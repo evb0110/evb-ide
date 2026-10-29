@@ -5,7 +5,7 @@
 //! each visible worktree's `package.json` and `composer.json`, and from the
 //! templates in `.zed/tasks.json` and the global tasks file.
 
-use std::{borrow::Cow, path::Path, sync::Arc, time::Duration};
+use std::{borrow::Cow, path::Path, sync::Arc};
 
 use collections::HashMap;
 use dap::adapters::DebugAdapterName;
@@ -15,9 +15,9 @@ use gpui::{
     Render, SharedString, Styled, Subscription, Task, TaskExt as _, WeakEntity, Window, actions,
 };
 use project::{Project, TaskSourceKind, WorktreeId};
-use task::{RevealStrategy, TaskContext, TaskId, TaskTemplate};
-use terminal::TaskStatus;
-use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
+use task::{RevealStrategy, TaskContext, TaskTemplate};
+use terminal::Terminal;
+use terminal_view::terminal_panel::TerminalPanel;
 use theme::ActiveTheme as _;
 use ui::{
     ButtonLike, ContextMenu, Icon, IconButton, IconName, IconSize, IconWithIndicator, Indicator,
@@ -45,8 +45,6 @@ actions!(
 const SELECTED_CONFIGURATION_KEY_PREFIX: &str = "evb_run_selected_configuration:";
 const SOURCE_ID_BASE: &str = "evb_run";
 const JAVASCRIPT_ADAPTER: &str = "JavaScript";
-const STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// Root files whose changes can add, remove or change run configurations.
 const WATCHED_ROOT_FILES: &[&str] = &[
@@ -261,13 +259,33 @@ pub enum RunStatus {
     Failed,
 }
 
+/// One execution of a configuration. The controller saves files and spawns the
+/// terminal itself (instead of handing the task to the workspace scheduler), so
+/// it owns the execution: Stop cancels it before the terminal exists and kills
+/// exactly its terminal afterwards.
 struct RunState {
     status: RunStatus,
-    /// Identifies the run's terminal; labels can repeat across configurations.
-    task_id: TaskId,
-    /// Distinguishes a restarted run from the one it replaced, whose completion
-    /// arrives after the new run started.
+    /// Distinguishes a restarted run from the one it replaced.
     generation: usize,
+    /// Set once the terminal is being created; from then on, dropping the
+    /// launch no longer reliably prevents the process from starting.
+    spawning: bool,
+    stop_requested: bool,
+    terminal: Option<WeakEntity<Terminal>>,
+    _completion: Option<Task<()>>,
+}
+
+impl RunState {
+    fn new(generation: usize) -> Self {
+        Self {
+            status: RunStatus::Running,
+            generation,
+            spawning: false,
+            stop_requested: false,
+            terminal: None,
+            _completion: None,
+        }
+    }
 }
 
 struct RootManifests {
@@ -282,11 +300,8 @@ pub struct RunController {
     configurations: Vec<RunConfiguration>,
     selected: Option<SharedString>,
     runs: HashMap<SharedString, RunState>,
-    /// Launches that have not handed their task to the workspace yet. Dropping
-    /// one (on Stop or Rerun) cancels it.
+    /// Running launches (resolve, save, spawn). Dropping one cancels it.
     launches: HashMap<SharedString, Task<()>>,
-    /// Stops waiting for a run's terminal to appear.
-    pending_stops: HashMap<SharedString, Task<()>>,
     next_generation: usize,
     menu_handle: PopoverMenuHandle<ContextMenu>,
     refresh_task: Task<()>,
@@ -325,7 +340,6 @@ impl RunController {
             selected: None,
             runs: HashMap::default(),
             launches: HashMap::default(),
-            pending_stops: HashMap::default(),
             next_generation: 0,
             menu_handle: PopoverMenuHandle::default(),
             refresh_task: Task::ready(()),
@@ -422,6 +436,9 @@ impl RunController {
         });
 
         self.refresh_task = cx.spawn(async move |this, cx| {
+            // Labels also name the terminal, which Zed reuses for tasks with the
+            // same label, so they are unique per root and manifest and depend
+            // only on the set of roots, not on the other scripts.
             let show_root_names = roots.len() > 1;
             let mut configurations = Vec::new();
             for root in roots.iter().filter(|_| discover_manifests) {
@@ -431,9 +448,19 @@ impl RunController {
                         root_files.push(*name);
                     }
                 }
+                let root_label = if roots
+                    .iter()
+                    .filter(|other| other.root_name == root.root_name)
+                    .count()
+                    > 1
+                {
+                    root.abs_path.display().to_string()
+                } else {
+                    root.root_name.clone()
+                };
                 let prefix = |script: &str| {
                     if show_root_names {
-                        format!("{}: {script}", root.root_name)
+                        format!("{root_label}: {script}")
                     } else {
                         script.to_string()
                     }
@@ -473,13 +500,13 @@ impl RunController {
                         for script in script_names(&manifest) {
                             configurations.push(RunConfiguration {
                                 id: format!("composer:{}:{script}", root.abs_path.display()).into(),
-                                label: prefix(&script).into(),
+                                label: prefix(&format!("composer: {script}")).into(),
                                 kind: RunConfigurationKind::ComposerScript,
                                 worktree_id: Some(root.worktree_id),
                                 source_kind: source_kind.clone(),
                                 template: composer_script_template(
                                     &script,
-                                    &prefix(&script),
+                                    &prefix(&format!("composer: {script}")),
                                     &root.abs_path,
                                 ),
                             });
@@ -533,7 +560,6 @@ impl RunController {
                 }
             }
 
-            disambiguate_script_labels(&mut configurations);
             this.update(cx, |this, cx| {
                 this.configurations = configurations;
                 let selection_is_valid = |id: &str| {
@@ -571,10 +597,11 @@ impl RunController {
         if self.is_running(&configuration.id) {
             self.stop(&configuration.id, cx);
         }
-        // A restart's new run has the same task id; a stop still waiting for
-        // the old run's terminal must not kill the new one.
-        self.pending_stops.remove(&configuration.id);
         let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(terminal_panel) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
+            log::error!("cannot run {}: no terminal panel", configuration.label);
             return;
         };
         let task_contexts = workspace.update(cx, |workspace, cx| {
@@ -582,8 +609,13 @@ impl RunController {
         });
         let generation = self.next_generation;
         self.next_generation += 1;
+        self.runs
+            .insert(configuration.id.clone(), RunState::new(generation));
+        cx.notify();
 
         let configuration_id = configuration.id.clone();
+        let project = self.project.clone();
+        let workspace = workspace.downgrade();
         let launch = cx.spawn_in(window, async move |this, cx| {
             let task_contexts = task_contexts.await;
             let task_context = task_context_for(&configuration, &task_contexts)
@@ -597,56 +629,112 @@ impl RunController {
                     "could not resolve run configuration {}",
                     configuration.label
                 );
+                this.update(cx, |this, cx| {
+                    this.finish_run(&configuration.id, generation, RunStatus::Failed, cx)
+                })
+                .log_err();
                 return;
             };
 
+            // Recorded like any scheduled task, so the task picker lists it.
+            project.update(cx, |project, cx| {
+                let inventory = project.task_store().read(cx).task_inventory().cloned();
+                if let Some(inventory) = inventory {
+                    inventory.update(cx, |inventory, _| {
+                        inventory
+                            .task_scheduled(configuration.source_kind.clone(), resolved.clone())
+                    });
+                }
+            });
+
+            Workspace::save_for_task(&workspace, resolved.resolved.save, cx).await;
+
+            let Ok(spawn) = this.update_in(cx, |this, window, cx| {
+                if let Some(run) = this.runs.get_mut(&configuration.id)
+                    && run.generation == generation
+                {
+                    run.spawning = true;
+                }
+                terminal_panel.update(cx, |terminal_panel, cx| {
+                    terminal_panel.spawn_task(&resolved.resolved, window, cx)
+                })
+            }) else {
+                return;
+            };
+            let terminal = spawn.await;
             this.update(cx, |this, cx| {
-                this.runs.insert(
-                    configuration.id.clone(),
-                    RunState {
-                        status: RunStatus::Running,
-                        task_id: resolved.id.clone(),
-                        generation,
-                    },
-                );
-                cx.notify();
+                this.attach_terminal(&configuration.id, generation, terminal, cx)
             })
             .log_err();
-
-            let configuration_id = configuration.id.clone();
-            let this_for_completion = this.clone();
-            workspace
-                .update_in(cx, |workspace, window, cx| {
-                    workspace.schedule_resolved_task_with_completion(
-                        configuration.source_kind.clone(),
-                        resolved,
-                        false,
-                        move |result, cx| {
-                            this_for_completion
-                                .update(cx, |this, cx| {
-                                    let Some(run) = this.runs.get_mut(&configuration_id) else {
-                                        return;
-                                    };
-                                    if run.generation != generation {
-                                        return;
-                                    }
-                                    run.status = match result {
-                                        workspace::tasks::ScheduledTaskResult::Success => {
-                                            RunStatus::Succeeded
-                                        }
-                                        _ => RunStatus::Failed,
-                                    };
-                                    cx.notify();
-                                })
-                                .log_err();
-                        },
-                        window,
-                        cx,
-                    )
-                })
-                .log_err();
         });
         self.launches.insert(configuration_id, launch);
+    }
+
+    fn attach_terminal(
+        &mut self,
+        configuration_id: &SharedString,
+        generation: usize,
+        terminal: anyhow::Result<WeakEntity<Terminal>>,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal = match terminal {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                log::error!("failed to start {configuration_id}: {error:#}");
+                self.finish_run(configuration_id, generation, RunStatus::Failed, cx);
+                return;
+            }
+        };
+        let Some(entity) = terminal.upgrade() else {
+            self.finish_run(configuration_id, generation, RunStatus::Failed, cx);
+            return;
+        };
+        let Some(run) = self
+            .runs
+            .get_mut(configuration_id)
+            .filter(|run| run.generation == generation)
+        else {
+            // Stopped or superseded while the terminal was being created.
+            entity.update(cx, |terminal, _| terminal.kill_active_task());
+            return;
+        };
+        if run.stop_requested {
+            entity.update(cx, |terminal, _| terminal.kill_active_task());
+        }
+        // The terminal updates its task status without notifying observers;
+        // waiting for completion is how the workspace scheduler tracks it too.
+        let completion = entity.read(cx).wait_for_completed_task(cx);
+        let completed_id = configuration_id.clone();
+        run.terminal = Some(terminal);
+        run._completion = Some(cx.spawn(async move |this, cx| {
+            let exit_status = completion.await;
+            let status = match exit_status {
+                Some(exit_status) if exit_status.success() => RunStatus::Succeeded,
+                _ => RunStatus::Failed,
+            };
+            this.update(cx, |this, cx| {
+                this.finish_run(&completed_id, generation, status, cx)
+            })
+            .log_err();
+        }));
+        cx.notify();
+    }
+
+    fn finish_run(
+        &mut self,
+        configuration_id: &str,
+        generation: usize,
+        status: RunStatus,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(run) = self
+            .runs
+            .get_mut(configuration_id)
+            .filter(|run| run.generation == generation && run.status == RunStatus::Running)
+        {
+            run.status = status;
+            cx.notify();
+        }
     }
 
     fn stop_selected(&mut self, cx: &mut Context<Self>) {
@@ -655,57 +743,30 @@ impl RunController {
         }
     }
 
-    /// Stops the configuration's running process and cancels a launch that
-    /// has not reached the workspace yet. A launch the workspace already took
-    /// may still be saving files or creating its terminal; its terminal is
-    /// killed as soon as it appears.
+    /// Stops the configuration's run: before its terminal is being created the
+    /// launch is cancelled, so nothing starts; afterwards exactly its terminal
+    /// is killed, as soon as it exists.
     pub fn stop(&mut self, configuration_id: &str, cx: &mut Context<Self>) {
-        self.launches.remove(configuration_id);
-        let Some(run) = self.runs.get(configuration_id) else {
+        let Some(run) = self.runs.get_mut(configuration_id) else {
             return;
         };
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-        let task_id = run.task_id.clone();
-        let generation = run.generation;
-        let terminals = running_task_terminals(&workspace, &task_id, cx);
-        if !terminals.is_empty() || run.status != RunStatus::Running {
-            for terminal in terminals {
-                terminal.update(cx, |terminal, _| terminal.kill_active_task());
-            }
+        if run.status != RunStatus::Running {
             return;
         }
-
-        let configuration_id = SharedString::from(configuration_id.to_string());
-        let workspace = workspace.downgrade();
-        let watcher = cx.spawn({
-            let configuration_id = configuration_id.clone();
-            async move |this, cx| {
-                let mut waited = Duration::ZERO;
-                while waited < STOP_WAIT {
-                    cx.background_executor().timer(STOP_POLL_INTERVAL).await;
-                    waited += STOP_POLL_INTERVAL;
-                    let stopped = this.update(cx, |this, cx| {
-                        let same_run = this.runs.get(&configuration_id).is_some_and(|run| {
-                            run.generation == generation && run.status == RunStatus::Running
-                        });
-                        let Some(workspace) = workspace.upgrade().filter(|_| same_run) else {
-                            return true;
-                        };
-                        let terminals = running_task_terminals(&workspace, &task_id, cx);
-                        for terminal in &terminals {
-                            terminal.update(cx, |terminal, _| terminal.kill_active_task());
-                        }
-                        !terminals.is_empty()
-                    });
-                    if stopped.unwrap_or(true) {
-                        break;
-                    }
-                }
-            }
-        });
-        self.pending_stops.insert(configuration_id, watcher);
+        if !run.spawning {
+            self.launches.remove(configuration_id);
+            run.status = RunStatus::Failed;
+            cx.notify();
+            return;
+        }
+        run.stop_requested = true;
+        if let Some(terminal) = run
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.upgrade())
+        {
+            terminal.update(cx, |terminal, _| terminal.kill_active_task());
+        }
     }
 
     fn debug_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -825,36 +886,6 @@ impl RunController {
     }
 }
 
-/// Zed reuses a task's terminal for any task with the same label, so scripts
-/// whose labels still collide (a package.json and a composer.json script of the
-/// same name, or two roots with the same directory name) get the manifest and
-/// root path appended, in both the shown label and the terminal label.
-fn disambiguate_script_labels(configurations: &mut [RunConfiguration]) {
-    let mut counts = HashMap::<SharedString, usize>::default();
-    for configuration in configurations.iter() {
-        *counts.entry(configuration.label.clone()).or_default() += 1;
-    }
-    for configuration in configurations.iter_mut() {
-        let manifest = match configuration.kind {
-            RunConfigurationKind::PackageScript(_) => "package.json",
-            RunConfigurationKind::ComposerScript => "composer.json",
-            RunConfigurationKind::Task => continue,
-        };
-        if counts
-            .get(&configuration.label)
-            .copied()
-            .unwrap_or_default()
-            < 2
-        {
-            continue;
-        }
-        let root = configuration.template.cwd.clone().unwrap_or_default();
-        let label = format!("{} ({manifest} in {root})", configuration.label);
-        configuration.template.label = label.clone();
-        configuration.label = label.into();
-    }
-}
-
 /// The context a configuration's variables resolve against: the active file's
 /// when it belongs to the configuration's worktree (or the configuration is a
 /// global task), so task templates can use `$ZED_FILE` and friends, otherwise
@@ -887,35 +918,6 @@ async fn load_manifest(fs: &dyn Fs, path: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&text)
         .map_err(|error| anyhow::anyhow!("parsing {}: {error}", path.display()))
         .log_err()
-}
-
-/// Terminals, in the center panes and the terminal panel, that are still running
-/// the given task.
-fn running_task_terminals(
-    workspace: &Entity<Workspace>,
-    task_id: &TaskId,
-    cx: &App,
-) -> Vec<Entity<terminal::Terminal>> {
-    let workspace = workspace.read(cx);
-    let mut panes = workspace.panes().to_vec();
-    if let Some(terminal_panel) = workspace.panel::<TerminalPanel>(cx) {
-        panes.extend(terminal_panel.read(cx).panes().into_iter().cloned());
-    }
-    panes
-        .iter()
-        .flat_map(|pane| {
-            pane.read(cx)
-                .items()
-                .filter_map(|item| item.act_as::<TerminalView>(cx))
-                .collect::<Vec<_>>()
-        })
-        .map(|terminal_view| terminal_view.read(cx).terminal().clone())
-        .filter(|terminal| {
-            terminal.read(cx).task().is_some_and(|task| {
-                task.status == TaskStatus::Running && &task.spawned_task.id == task_id
-            })
-        })
-        .collect()
 }
 
 impl Render for RunController {
@@ -1081,7 +1083,7 @@ mod tests {
                 vec![
                     "build pnpm run build",
                     "dev pnpm run dev",
-                    "test composer run-script test",
+                    "composer: test composer run-script test",
                 ]
             );
             assert_eq!(
@@ -1171,50 +1173,6 @@ mod tests {
                 migrate.id
             );
         });
-    }
-
-    #[test]
-    fn disambiguates_colliding_script_labels() {
-        let script = |label: &str, kind, cwd: &str| RunConfiguration {
-            id: format!("{cwd}:{label}").into(),
-            label: label.to_string().into(),
-            kind,
-            worktree_id: None,
-            source_kind: TaskSourceKind::UserInput,
-            template: TaskTemplate {
-                label: label.to_string(),
-                cwd: Some(cwd.to_string()),
-                ..TaskTemplate::default()
-            },
-        };
-        let npm = RunConfigurationKind::PackageScript(PackageManager::Npm);
-        let mut configurations = vec![
-            script("app: dev", npm, "/one/app"),
-            script("app: dev", npm, "/two/app"),
-            script("test", npm, "/one/app"),
-            script("test", RunConfigurationKind::ComposerScript, "/one/app"),
-            script("build", npm, "/one/app"),
-            script("build", RunConfigurationKind::Task, "/one/app"),
-        ];
-        disambiguate_script_labels(&mut configurations);
-        let labels = configurations
-            .iter()
-            .map(|configuration| {
-                assert_eq!(configuration.label.as_ref(), configuration.template.label);
-                configuration.label.to_string()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            labels,
-            vec![
-                "app: dev (package.json in /one/app)",
-                "app: dev (package.json in /two/app)",
-                "test (package.json in /one/app)",
-                "test (composer.json in /one/app)",
-                "build (package.json in /one/app)",
-                "build",
-            ]
-        );
     }
 
     #[test]

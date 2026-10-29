@@ -2304,7 +2304,13 @@ impl GitGraph {
                             for ref_name in refs {
                                 menu = menu.toggleable_entry(
                                     short_ref_name(&ref_name).to_string(),
-                                    selected.as_ref() == Some(&ref_name),
+                                    // Graphs saved with a short branch name (or opened
+                                    // by Zed code that uses short names) still show
+                                    // their branch as selected.
+                                    selected.as_ref().is_some_and(|selected| {
+                                        selected == &ref_name
+                                            || selected.as_ref() == short_ref_name(&ref_name)
+                                    }),
                                     IconPosition::Start,
                                     None,
                                     choose(LogSource::Branch(ref_name)),
