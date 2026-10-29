@@ -3,7 +3,9 @@
 # installs it into /Applications (or the directory given with -d).
 #
 # Unlike script/bundle-mac this needs no cargo-bundle, Apple identity or
-# notarization, and uses the system git instead of a bundled one.
+# notarization, and uses the system git instead of a bundled one. It registers
+# no URL scheme: the app only understands zed:// links, and that scheme belongs
+# to an installed Zed.
 #
 # Usage: script/evb-install [-n] [-d DIR]
 #   -n      build and assemble only; do not install
@@ -86,9 +88,6 @@ info = {
     "LSMinimumSystemVersion": "12.0",
     "NSHighResolutionCapable": True,
     "NSPrincipalClass": "NSApplication",
-    "CFBundleURLTypes": [
-        {"CFBundleURLName": bundle_id, "CFBundleURLSchemes": ["evb-ide"]}
-    ],
 }
 # The fragments are bare <key>/<value> pairs, as cargo-bundle expects them.
 for fragment in sorted(glob.glob("crates/zed/resources/info/*.plist")):

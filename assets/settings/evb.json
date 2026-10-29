@@ -44,9 +44,16 @@
     "diagnostics": false,
     "metrics": false,
   },
-  // AI features are off by default; set to false in user settings to bring
-  // back the agent panel and edit predictions.
-  "disable_ai": true,
+  // AI features are off by default. These are ordinary settings, so user
+  // settings can turn them back on ("disable_ai" cannot be used here: once a
+  // lower layer sets it to true, no higher layer can set it back to false).
+  "agent": {
+    "enabled": false,
+    "button": false,
+  },
+  "edit_predictions": {
+    "provider": "none",
+  },
   "auto_update": false,
   "show_call_status_icon": false,
   "auto_install_extensions": {

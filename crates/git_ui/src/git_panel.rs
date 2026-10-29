@@ -1196,7 +1196,9 @@ pub struct GitPanel {
     diff_stat_total: DiffStat,
     new_staged_count: usize,
     pending_commit: Option<Task<()>>,
-    push_after_commit: bool,
+    /// The repository a running Commit and Push committed to, pushed once the
+    /// commit succeeds.
+    push_after_commit: Option<RepositoryId>,
     pending_remote_operation: Option<RemoteOperationKind>,
     amend_pending: bool,
     original_commit_message: Option<String>,
@@ -1533,7 +1535,7 @@ impl GitPanel {
                 changes_count: 0,
                 diff_stat_total: DiffStat::default(),
                 pending_commit: None,
-                push_after_commit: false,
+                push_after_commit: None,
                 pending_remote_operation: None,
                 amend_pending,
                 original_commit_message,
@@ -3922,15 +3924,20 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let had_pending_commit = self.pending_commit.is_some();
-        self.push_after_commit = true;
+        if self.pending_commit.is_some() {
+            return;
+        }
+        let Some(repository_id) = self
+            .active_repository
+            .as_ref()
+            .map(|repository| repository.read(cx).id)
+        else {
+            return;
+        };
         let options = self.commit_options();
         self.commit_changes(options, window, cx);
-        if had_pending_commit || self.pending_commit.is_none() {
-            // The commit did not start (no message, conflicts, or another commit
-            // is still running), so there is nothing to push after.
-            self.push_after_commit = false;
-        } else {
+        if self.pending_commit.is_some() {
+            self.push_after_commit = Some(repository_id);
             telemetry::event!("Git Committed", source = "Git Panel");
         }
     }
@@ -4141,12 +4148,26 @@ impl GitPanel {
                             this.original_commit_message = None;
                             this.serialize(cx);
                         }
-                        if std::mem::take(&mut this.push_after_commit) {
-                            this.push(false, false, window, cx);
+                        if let Some(repository_id) = this.push_after_commit.take() {
+                            let active_repository_id = this
+                                .active_repository
+                                .as_ref()
+                                .map(|repository| repository.read(cx).id);
+                            if active_repository_id == Some(repository_id) {
+                                this.push(false, false, window, cx);
+                            } else {
+                                this.show_error_toast(
+                                    "push",
+                                    anyhow::anyhow!(
+                                        "Committed, but the active repository changed before the push, so nothing was pushed"
+                                    ),
+                                    cx,
+                                );
+                            }
                         }
                     }
                     Err(e) => {
-                        this.push_after_commit = false;
+                        this.push_after_commit = None;
                         this.show_error_toast("commit", e, cx)
                     }
                 }

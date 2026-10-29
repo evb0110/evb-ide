@@ -15,7 +15,7 @@ use gpui::{
     Render, SharedString, Styled, Subscription, Task, TaskExt as _, WeakEntity, Window, actions,
 };
 use project::{Project, TaskSourceKind, WorktreeId};
-use task::{RevealStrategy, TaskContext, TaskTemplate};
+use task::{RevealStrategy, TaskContext, TaskId, TaskTemplate};
 use terminal::TaskStatus;
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use theme::ActiveTheme as _;
@@ -207,9 +207,16 @@ pub fn script_names(manifest: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn package_script_template(manager: PackageManager, script: &str, cwd: &Path) -> TaskTemplate {
+/// `label` names the task's terminal. Zed reuses a terminal for tasks with the
+/// same label, so scripts of different roots get their root-prefixed label.
+fn package_script_template(
+    manager: PackageManager,
+    script: &str,
+    label: &str,
+    cwd: &Path,
+) -> TaskTemplate {
     TaskTemplate {
-        label: script.to_string(),
+        label: label.to_string(),
         command: manager.command().to_string(),
         args: vec!["run".to_string(), script.to_string()],
         cwd: Some(cwd.to_string_lossy().into_owned()),
@@ -218,9 +225,9 @@ fn package_script_template(manager: PackageManager, script: &str, cwd: &Path) ->
     }
 }
 
-fn composer_script_template(script: &str, cwd: &Path) -> TaskTemplate {
+fn composer_script_template(script: &str, label: &str, cwd: &Path) -> TaskTemplate {
     TaskTemplate {
-        label: script.to_string(),
+        label: label.to_string(),
         command: "composer".to_string(),
         args: vec!["run-script".to_string(), script.to_string()],
         cwd: Some(cwd.to_string_lossy().into_owned()),
@@ -238,7 +245,7 @@ pub fn preferred_configuration(configurations: &[RunConfiguration]) -> Option<Sh
         .find_map(|script| {
             configurations.iter().find(|configuration| {
                 matches!(configuration.kind, RunConfigurationKind::PackageScript(_))
-                    && configuration.template.label == *script
+                    && configuration.template.args.last().map(String::as_str) == Some(*script)
             })
         })
         .or_else(|| configurations.first())
@@ -254,7 +261,8 @@ pub enum RunStatus {
 
 struct RunState {
     status: RunStatus,
-    full_label: String,
+    /// Identifies the run's terminal; labels can repeat across configurations.
+    task_id: TaskId,
     /// Distinguishes a restarted run from the one it replaced, whose completion
     /// arrives after the new run started.
     generation: usize,
@@ -272,6 +280,9 @@ pub struct RunController {
     configurations: Vec<RunConfiguration>,
     selected: Option<SharedString>,
     runs: HashMap<SharedString, RunState>,
+    /// Launches that have not handed their task to the workspace yet. Dropping
+    /// one (on Stop or Rerun) cancels it.
+    launches: HashMap<SharedString, Task<()>>,
     next_generation: usize,
     menu_handle: PopoverMenuHandle<ContextMenu>,
     refresh_task: Task<()>,
@@ -309,6 +320,7 @@ impl RunController {
             configurations: Vec::new(),
             selected: None,
             runs: HashMap::default(),
+            launches: HashMap::default(),
             next_generation: 0,
             menu_handle: PopoverMenuHandle::default(),
             refresh_task: Task::ready(()),
@@ -360,6 +372,9 @@ impl RunController {
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let project = self.project.read(cx);
         let fs = project.fs().clone();
+        // `Project::fs` is this machine's file system; manifests of a remote
+        // project live on the remote host, so only its tasks.json is used.
+        let discover_manifests = project.is_local();
         let roots = project
             .visible_worktrees(cx)
             .filter(|worktree| worktree.read(cx).root_entry().is_some_and(|e| e.is_dir()))
@@ -404,7 +419,7 @@ impl RunController {
         self.refresh_task = cx.spawn(async move |this, cx| {
             let show_root_names = roots.len() > 1;
             let mut configurations = Vec::new();
-            for root in &roots {
+            for root in roots.iter().filter(|_| discover_manifests) {
                 let mut root_files = Vec::new();
                 for name in WATCHED_ROOT_FILES {
                     if fs.is_file(&root.abs_path.join(name)).await {
@@ -436,7 +451,12 @@ impl RunController {
                                 kind: RunConfigurationKind::PackageScript(manager),
                                 worktree_id: Some(root.worktree_id),
                                 source_kind: source_kind.clone(),
-                                template: package_script_template(manager, &script, &root.abs_path),
+                                template: package_script_template(
+                                    manager,
+                                    &script,
+                                    &prefix(&script),
+                                    &root.abs_path,
+                                ),
                             });
                         }
                     }
@@ -452,7 +472,11 @@ impl RunController {
                                 kind: RunConfigurationKind::ComposerScript,
                                 worktree_id: Some(root.worktree_id),
                                 source_kind: source_kind.clone(),
-                                template: composer_script_template(&script, &root.abs_path),
+                                template: composer_script_template(
+                                    &script,
+                                    &prefix(&script),
+                                    &root.abs_path,
+                                ),
                             });
                         }
                     }
@@ -462,11 +486,37 @@ impl RunController {
             let mut seen_task_ids = collections::HashSet::default();
             for (worktree_id, tasks) in template_tasks {
                 for (source_kind, template) in tasks.await {
-                    let id: SharedString =
-                        format!("task:{}:{}", source_kind.to_id_base(), template.label).into();
+                    // Persisted, so built from paths rather than the per-session
+                    // worktree id inside `TaskSourceKind::to_id_base`.
+                    let source = match &source_kind {
+                        TaskSourceKind::Worktree {
+                            id,
+                            directory_in_worktree,
+                            ..
+                        } => roots
+                            .iter()
+                            .find(|root| root.worktree_id == *id)
+                            .map(|root| {
+                                format!(
+                                    "{}/{}",
+                                    root.abs_path.display(),
+                                    directory_in_worktree.as_unix_str()
+                                )
+                            })
+                            .unwrap_or_else(|| source_kind.to_id_base()),
+                        TaskSourceKind::AbsPath { abs_path, .. } => abs_path.display().to_string(),
+                        _ => source_kind.to_id_base(),
+                    };
+                    let id: SharedString = format!("task:{source}:{}", template.label).into();
                     if !seen_task_ids.insert(id.clone()) {
                         continue;
                     }
+                    // Global tasks belong to no worktree; they run in the active
+                    // file's context.
+                    let worktree_id = match source_kind {
+                        TaskSourceKind::AbsPath { .. } => None,
+                        _ => worktree_id,
+                    };
                     configurations.push(RunConfiguration {
                         id,
                         label: template.label.clone().into(),
@@ -524,12 +574,10 @@ impl RunController {
         let generation = self.next_generation;
         self.next_generation += 1;
 
-        cx.spawn_in(window, async move |this, cx| {
+        let configuration_id = configuration.id.clone();
+        let launch = cx.spawn_in(window, async move |this, cx| {
             let task_contexts = task_contexts.await;
-            let task_context = configuration
-                .worktree_id
-                .and_then(|worktree_id| task_contexts.task_context_for_worktree_id(worktree_id))
-                .or_else(|| task_contexts.active_context())
+            let task_context = task_context_for(&configuration, &task_contexts)
                 .cloned()
                 .unwrap_or_else(TaskContext::default);
             let Some(resolved) = configuration
@@ -548,7 +596,7 @@ impl RunController {
                     configuration.id.clone(),
                     RunState {
                         status: RunStatus::Running,
-                        full_label: resolved.resolved.full_label.clone(),
+                        task_id: resolved.id.clone(),
                         generation,
                     },
                 );
@@ -588,8 +636,8 @@ impl RunController {
                     )
                 })
                 .log_err();
-        })
-        .detach();
+        });
+        self.launches.insert(configuration_id, launch);
     }
 
     fn stop_selected(&mut self, cx: &mut Context<Self>) {
@@ -598,14 +646,18 @@ impl RunController {
         }
     }
 
+    /// Stops the configuration's running process and cancels a launch that
+    /// has not reached the workspace yet. A task whose launch is already saving
+    /// files before spawning (`"save": "all"`) still starts and needs a second Stop.
     pub fn stop(&mut self, configuration_id: &str, cx: &mut Context<Self>) {
+        self.launches.remove(configuration_id);
         let Some(run) = self.runs.get(configuration_id) else {
             return;
         };
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        for terminal in running_task_terminals(&workspace, &run.full_label, cx) {
+        for terminal in running_task_terminals(&workspace, &run.task_id, cx) {
             terminal.update(cx, |terminal, _| terminal.kill_active_task());
         }
     }
@@ -731,6 +783,33 @@ impl RunController {
     }
 }
 
+/// The context a configuration's variables resolve against: the active file's
+/// when it belongs to the configuration's worktree (or the configuration is a
+/// global task), so task templates can use `$ZED_FILE` and friends, otherwise
+/// the worktree root's.
+fn task_context_for<'a>(
+    configuration: &RunConfiguration,
+    task_contexts: &'a project::TaskContexts,
+) -> Option<&'a TaskContext> {
+    let active_item_context = task_contexts
+        .active_item_context
+        .as_ref()
+        .filter(|(worktree_id, _, _)| {
+            configuration.worktree_id.is_none() || *worktree_id == configuration.worktree_id
+        })
+        .map(|(_, _, context)| context);
+    let worktree_context = configuration
+        .worktree_id
+        .and_then(|worktree_id| task_contexts.task_context_for_worktree_id(worktree_id));
+    match configuration.kind {
+        RunConfigurationKind::Task => active_item_context.or(worktree_context),
+        RunConfigurationKind::PackageScript(_) | RunConfigurationKind::ComposerScript => {
+            worktree_context.or(active_item_context)
+        }
+    }
+    .or_else(|| task_contexts.active_context())
+}
+
 async fn load_manifest(fs: &dyn Fs, path: &Path) -> Option<serde_json::Value> {
     let text = fs.load(path).await.log_err()?;
     serde_json::from_str(&text)
@@ -739,10 +818,10 @@ async fn load_manifest(fs: &dyn Fs, path: &Path) -> Option<serde_json::Value> {
 }
 
 /// Terminals, in the center panes and the terminal panel, that are still running
-/// the task with the given label.
+/// the given task.
 fn running_task_terminals(
     workspace: &Entity<Workspace>,
-    full_label: &str,
+    task_id: &TaskId,
     cx: &App,
 ) -> Vec<Entity<terminal::Terminal>> {
     let workspace = workspace.read(cx);
@@ -761,7 +840,7 @@ fn running_task_terminals(
         .map(|terminal_view| terminal_view.read(cx).terminal().clone())
         .filter(|terminal| {
             terminal.read(cx).task().is_some_and(|task| {
-                task.status == TaskStatus::Running && task.spawned_task.full_label == full_label
+                task.status == TaskStatus::Running && &task.spawned_task.id == task_id
             })
         })
         .collect()
@@ -942,6 +1021,86 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    async fn keeps_same_named_scripts_of_different_roots_apart(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            AppState::test(cx);
+            editor::init(cx);
+            project::task_store::TaskStore::init(None);
+            init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/work"),
+            json!({
+                "web": {
+                    "package.json": r#"{ "scripts": { "dev": "vite" } }"#,
+                    "yarn.lock": "",
+                },
+                "api": {
+                    "package.json": r#"{ "scripts": { "dev": "nest start" } }"#,
+                    ".zed": { "tasks.json": r#"[{ "label": "migrate", "command": "make" }]"# },
+                },
+            }),
+        )
+        .await;
+        let project = Project::test(
+            fs,
+            [path!("/work/web").as_ref(), path!("/work/api").as_ref()],
+            cx,
+        )
+        .await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        cx.run_until_parked();
+
+        let controller = cx
+            .update(|_, cx| RunController::for_workspace(workspace.entity_id(), cx))
+            .expect("every workspace gets a run controller");
+        controller.read_with(cx, |controller, _| {
+            let scripts = controller
+                .configurations()
+                .iter()
+                .filter(|configuration| configuration.kind != RunConfigurationKind::Task)
+                .map(|configuration| {
+                    (
+                        configuration.label.to_string(),
+                        configuration.template.label.clone(),
+                        configuration.template.command.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            // Terminals are matched by task label, so the labels must differ.
+            assert_eq!(
+                scripts,
+                vec![
+                    (
+                        "web: dev".to_string(),
+                        "web: dev".to_string(),
+                        "yarn".to_string()
+                    ),
+                    (
+                        "api: dev".to_string(),
+                        "api: dev".to_string(),
+                        "npm".to_string()
+                    ),
+                ]
+            );
+            let migrate = controller
+                .configurations()
+                .iter()
+                .find(|configuration| configuration.label.as_ref() == "migrate")
+                .expect("the worktree tasks.json task is a configuration");
+            // Persisted ids must survive reopening, when worktree ids change.
+            assert!(
+                migrate.id.contains(path!("/work/api")),
+                "unstable id {}",
+                migrate.id
+            );
+        });
+    }
+
     #[test]
     fn detects_package_manager_from_lockfiles_then_manifest() {
         let manifest = json!({ "packageManager": "yarn@4.1.0" });
@@ -972,8 +1131,12 @@ mod tests {
 
     #[test]
     fn package_script_runs_through_the_detected_manager() {
-        let template =
-            package_script_template(PackageManager::Pnpm, "package:mac", Path::new("/p"));
+        let template = package_script_template(
+            PackageManager::Pnpm,
+            "package:mac",
+            "package:mac",
+            Path::new("/p"),
+        );
         assert_eq!(template.command, "pnpm");
         assert_eq!(template.args, vec!["run", "package:mac"]);
         assert_eq!(template.cwd.as_deref(), Some("/p"));
@@ -990,6 +1153,7 @@ mod tests {
             source_kind: TaskSourceKind::UserInput,
             template: TaskTemplate {
                 label: id.to_string(),
+                args: vec!["run".to_string(), id.to_string()],
                 ..TaskTemplate::default()
             },
         };

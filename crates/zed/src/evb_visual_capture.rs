@@ -244,8 +244,8 @@ mod capture {
             }
         });
         cx.update(|cx| {
-            let extension_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../extensions/evb-jetbrains-icons");
+            let extension_root =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions/evb-jetbrains-icons");
             let icon_theme = extension_root.join("icon_themes/jetbrains-icons.json");
             if let Some(bytes) = std::fs::read(&icon_theme).log_err() {
                 theme::ThemeRegistry::global(cx)

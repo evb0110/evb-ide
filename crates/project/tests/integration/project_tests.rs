@@ -12282,6 +12282,71 @@ async fn test_prepare_rename_falls_back_to_next_capable_server(cx: &mut gpui::Te
     );
 }
 
+#[gpui::test]
+async fn test_prepare_rename_ignores_unprepared_support_of_lower_priority_server(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.tsx": "const value = 1;" }))
+        .await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(tsx_lang());
+    let mut declining_servers = language_registry.register_fake_lsp(
+        "tsx",
+        FakeLspAdapter {
+            name: "DecliningServer",
+            capabilities: lsp::ServerCapabilities {
+                rename_provider: Some(lsp::OneOf::Right(lsp::RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
+                ..Default::default()
+            },
+            ..FakeLspAdapter::default()
+        },
+    );
+    let _unprepared_servers = language_registry.register_fake_lsp(
+        "tsx",
+        FakeLspAdapter {
+            name: "UnpreparedServer",
+            capabilities: lsp::ServerCapabilities {
+                rename_provider: Some(lsp::OneOf::Left(true)),
+                ..Default::default()
+            },
+            ..FakeLspAdapter::default()
+        },
+    );
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.tsx"), cx)
+        })
+        .await
+        .unwrap();
+    let declining_server = declining_servers.next().await.unwrap();
+    cx.executor().run_until_parked();
+    let _declines = declining_server
+        .set_request_handler::<lsp::request::PrepareRenameRequest, _, _>(
+            |_, _| async move { Ok(None) },
+        );
+
+    // An unprepared rename would be sent to the first capable server, which
+    // declined this position, so it must not be offered.
+    let response = project
+        .update(cx, |project, cx| {
+            project.prepare_rename(buffer.clone(), 8, cx)
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(response, PrepareRenameResponse::InvalidPosition),
+        "{response:?}"
+    );
+}
+
 // Regression test for https://github.com/zed-industries/zed/issues/59077:
 // a "rename symbol" whose workspace edit also renames the file used to swap the
 // two files' contents. The edited content must end up in the renamed file, and

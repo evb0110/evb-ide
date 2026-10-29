@@ -4904,7 +4904,7 @@ impl Project {
             let mut unprepared_rename_supported = false;
             let mut declined = false;
             let mut first_error = None;
-            for server_id in candidates {
+            for (index, server_id) in candidates.into_iter().enumerate() {
                 let response = project
                     .update(cx, |project, cx| {
                         project.request_lsp(
@@ -4917,9 +4917,13 @@ impl Project {
                     .await;
                 match response {
                     Ok(response @ PrepareRenameResponse::Success { .. }) => return Ok(response),
-                    Ok(PrepareRenameResponse::OnlyUnpreparedRenameSupported) => {
+                    // This response carries no server id, so `perform_rename`
+                    // falls back to the first capable server: only that one's
+                    // unprepared support can be used.
+                    Ok(PrepareRenameResponse::OnlyUnpreparedRenameSupported) if index == 0 => {
                         unprepared_rename_supported = true
                     }
+                    Ok(PrepareRenameResponse::OnlyUnpreparedRenameSupported) => declined = true,
                     Ok(PrepareRenameResponse::InvalidPosition) => declined = true,
                     Err(error) => {
                         log::debug!("prepare rename failed on {server_id}: {error:#}");

@@ -296,7 +296,7 @@ name = "EVB IDE Dev"
 category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = []
 
 [package.metadata.bundle-nightly]
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
@@ -305,7 +305,7 @@ name = "EVB IDE Nightly"
 category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = []
 
 [package.metadata.bundle-preview]
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
@@ -314,7 +314,7 @@ name = "EVB IDE Preview"
 category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = []
 
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
@@ -323,7 +323,7 @@ name = "EVB IDE"
 category = "Developer Tool"
 osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = []
 
 [package.metadata.cargo-shear]
 ignored = ["profiling", "tracing"]

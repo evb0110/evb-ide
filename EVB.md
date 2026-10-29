@@ -11,7 +11,7 @@ runs next to an installed Zed without sharing state.
 | Area | Change | Where |
 | --- | --- | --- |
 | Identity | App "EVB IDE", binary `evb-ide`, bundle id `dev.evb.EVB-IDE`, data in `~/.config/evb-ide` and `~/Library/Application Support/EVB-IDE`, CLI link `/usr/local/bin/evb`, no zed.dev auto-update | `crates/paths`, `crates/release_channel`, `crates/zed/Cargo.toml`, `crates/cli`, `crates/install_cli`, `.cargo/config.toml` |
-| Defaults | JetBrains keymap, IntelliJ Light/Dark themes, JetBrains Mono 13 without ligatures, Inter 13 for the UI, Project and Commit panels on the left, telemetry, AI features and sign-in off, Vue/PHP/Blade/Stylelint extensions installed automatically, Intelephense for PHP and Blade | `assets/settings/evb.json`, merged over `assets/settings/default.json` at startup |
+| Defaults | JetBrains keymap, IntelliJ Light/Dark themes, JetBrains Mono 13 without ligatures, Inter 13 for the UI, Project and Commit panels on the left, telemetry, the agent panel, edit predictions and sign-in off, Vue/PHP/Blade/Stylelint extensions installed automatically, Intelephense for PHP and Blade | `assets/settings/evb.json`, merged over `assets/settings/default.json` at startup |
 | Key bindings | Run ⌃R, Debug ⌃D, Stop ⌘F2, choose configuration ⌃⌥R, Commit and Push ⌥⌘K | `assets/keymaps/evb.json`, loaded after the base keymap |
 | Run configurations | Title bar widget: configurations from `package.json` scripts (npm, pnpm, yarn or bun, from the lockfile), `composer.json` scripts and `.zed/tasks.json`; Run/Rerun, Debug (Node), Stop | `crates/evb_run` |
 | Git | Commit and Push in the commit split button | `crates/git_ui/src/git_panel.rs` |
@@ -36,6 +36,13 @@ cargo run                   # debug build of the app
 ```
 
 The release build takes a while and needs about 20 GB of memory at link time.
+
+`script/evb-install` is the only supported packaging path. Upstream's
+`script/bundle-mac`, `bundle-linux` and `bundle-windows.ps1` still expect a
+binary named `zed` and Zed's signing setup, and are not used by EVB IDE. The
+app registers no URL scheme, since it only understands `zed://` links, which
+belong to an installed Zed. It also uses its own single-instance port, so it
+runs at the same time as Zed.
 
 ## Keep up with Zed
 

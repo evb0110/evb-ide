@@ -256,6 +256,8 @@ mod evb_default_settings_tests {
         assert_eq!(merged["base_keymap"], "JetBrains");
         assert_eq!(merged["theme"]["light"], "IntelliJ Light");
         assert_eq!(merged["telemetry"]["metrics"], false);
+        // `disable_ai` merges with OR, so a default of true could never be undone.
+        assert_eq!(merged["disable_ai"], false);
         // Keys the EVB layer does not mention keep their upstream values.
         assert_eq!(merged["git_panel"]["button"], true);
 

@@ -4,6 +4,7 @@ use gpui::{AppContext, AsyncApp, WeakEntity};
 use lsp::{LanguageServer, LanguageServerId, LanguageServerName};
 use serde_json::Value;
 use util::ResultExt as _;
+use worktree::WorktreeId;
 
 use crate::{LspStore, ProjectSettings};
 use settings::Settings;
@@ -34,28 +35,29 @@ const TS_LS: LanguageServerName = LanguageServerName::new_static("typescript-lan
 const TYPESCRIPT_SERVER_STARTUP_WAIT: Duration = Duration::from_secs(60);
 const TYPESCRIPT_SERVER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// The running TypeScript server that should answer the given Vue server: one
-/// from the Vue server's own worktree when that worktree has one, otherwise any.
-/// Returns `None` while the chosen worktree's TypeScript server is still starting.
-fn typescript_server_for_vue_server(
+fn vue_server_worktree(
     lsp_store: &LspStore,
     vue_server_id: LanguageServerId,
-) -> Option<Arc<LanguageServer>> {
-    let local = lsp_store.as_local()?;
-    let vue_worktree = local
+) -> Option<WorktreeId> {
+    lsp_store
+        .as_local()?
         .language_server_ids
         .iter()
-        .find_map(|(seed, server)| (server.id == vue_server_id).then_some(seed.worktree_id));
-    let typescript_seeds = || {
-        local
-            .language_server_ids
-            .iter()
-            .filter(|(seed, _)| [VTSLS, TS_LS].contains(&seed.name))
-    };
-    let has_worktree_server =
-        typescript_seeds().any(|(seed, _)| Some(seed.worktree_id) == vue_worktree);
-    typescript_seeds()
-        .filter(|(seed, _)| !has_worktree_server || Some(seed.worktree_id) == vue_worktree)
+        .find_map(|(seed, server)| (server.id == vue_server_id).then_some(seed.worktree_id))
+}
+
+/// A running TypeScript server in the given worktree, or in any worktree when
+/// `worktree` is `None`.
+fn running_typescript_server(
+    lsp_store: &LspStore,
+    worktree: Option<WorktreeId>,
+) -> Option<Arc<LanguageServer>> {
+    let local = lsp_store.as_local()?;
+    local
+        .language_server_ids
+        .iter()
+        .filter(|(seed, _)| [VTSLS, TS_LS].contains(&seed.name))
+        .filter(|(seed, _)| worktree.is_none_or(|worktree| seed.worktree_id == worktree))
         .find_map(|(_, server)| local.language_server_for_id(server.id))
 }
 
@@ -78,22 +80,38 @@ pub fn register_requests(lsp_store: WeakEntity<LspStore>, language_server: &Lang
 
                 let requests = params;
                 cx.spawn(async move |cx| {
+                    // The worktree is fixed when the request arrives: while its
+                    // TypeScript server restarts, the request waits for the
+                    // replacement instead of going to another worktree's server.
+                    let Ok(Some(worktree)) =
+                        lsp_store.read_with(cx, |this, _| vue_server_worktree(this, vue_server_id))
+                    else {
+                        return;
+                    };
                     let mut waited = Duration::ZERO;
                     let target_server = loop {
-                        match lsp_store.read_with(cx, |this, _| {
-                            typescript_server_for_vue_server(this, vue_server_id)
-                        }) {
-                            Ok(Some(server)) => break server,
-                            Ok(None) if waited < TYPESCRIPT_SERVER_STARTUP_WAIT => {
+                        let lookup = lsp_store.read_with(cx, |this, _| {
+                            let vue_server_running =
+                                this.language_server_for_id(vue_server_id).is_some();
+                            let in_worktree = running_typescript_server(this, Some(worktree));
+                            let anywhere = (waited >= TYPESCRIPT_SERVER_STARTUP_WAIT)
+                                .then(|| running_typescript_server(this, None))
+                                .flatten();
+                            (vue_server_running, in_worktree.or(anywhere))
+                        });
+                        match lookup {
+                            Ok((false, _)) | Err(_) => return,
+                            Ok((true, Some(server))) => break server,
+                            Ok((true, None)) if waited < TYPESCRIPT_SERVER_STARTUP_WAIT => {
                                 cx.background_executor()
                                     .timer(TYPESCRIPT_SERVER_POLL_INTERVAL)
                                     .await;
                                 waited += TYPESCRIPT_SERVER_POLL_INTERVAL;
                             }
-                            other => {
+                            Ok((true, None)) => {
                                 log::warn!(
                                     "vue-language-server forwarding skipped after {waited:?}: \
-                                        no running TypeScript server ({other:?}). \
+                                        no running TypeScript server. \
                                         Returning null tsserver responses"
                                 );
                                 if !requests.is_empty() {
