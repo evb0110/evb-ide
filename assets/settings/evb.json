@@ -46,5 +46,43 @@
     "html": true,
     "vue": true,
     "php": true,
+    "blade": true,
+    "stylelint": true,
+  },
+  "file_types": {
+    "Blade": ["*.blade.php"],
+  },
+  "languages": {
+    // Intelephense runs on Node; Phpactor needs PHP 8.2+ on PATH and fails
+    // silently with older PHP. Free Intelephense has no rename; switch to
+    // phpactor here when a PHP 8.2+ runtime is available.
+    "PHP": {
+      "language_servers": ["intelephense", "!phpactor", "!phptools", "!phpantom", "..."],
+    },
+    "Blade": {
+      "language_servers": [
+        "intelephense",
+        "tailwindcss-language-server",
+        "!phpactor",
+        "!phptools",
+        "!phpantom",
+        "...",
+      ],
+      "formatter": "none",
+    },
+  },
+  "lsp": {
+    "tailwindcss-language-server": {
+      "settings": {
+        "includeLanguages": { "vue": "html", "blade": "html" },
+      },
+    },
+    "stylelint-lsp": {
+      "settings": {
+        "stylelint": {
+          "validate": ["css", "postcss", "scss", "vue.js"],
+        },
+      },
+    },
   },
 }

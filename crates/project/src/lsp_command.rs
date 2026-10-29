@@ -3147,6 +3147,35 @@ impl LspCommand for GetHover {
     }
 }
 
+/// The editor sends one completion request to every server of a buffer, with
+/// the trigger character of whichever server registered it. A server that did
+/// not register that character treats the request as invalid and may return
+/// nothing (the Vue language server does this with Emmet's triggers), so it
+/// gets a plain invoked request instead.
+///
+/// `server_triggers` are the triggers the receiving server registered for the
+/// buffer, statically or dynamically.
+fn completion_context_for_server(
+    context: &lsp::CompletionContext,
+    server_triggers: Option<&std::collections::BTreeSet<String>>,
+) -> lsp::CompletionContext {
+    if context.trigger_kind != lsp::CompletionTriggerKind::TRIGGER_CHARACTER {
+        return context.clone();
+    }
+    let server_registered_trigger = match (&context.trigger_character, server_triggers) {
+        (Some(character), Some(triggers)) => triggers.contains(character),
+        _ => false,
+    };
+    if server_registered_trigger {
+        context.clone()
+    } else {
+        lsp::CompletionContext {
+            trigger_kind: lsp::CompletionTriggerKind::INVOKED,
+            trigger_character: None,
+        }
+    }
+}
+
 impl GetCompletions {
     pub fn can_resolve_completions(capabilities: &lsp::ServerCapabilities) -> bool {
         capabilities
@@ -3177,13 +3206,16 @@ impl LspCommand for GetCompletions {
     fn to_lsp(
         &self,
         path: &Path,
-        _: &Buffer,
-        _: &Arc<LanguageServer>,
+        buffer: &Buffer,
+        language_server: &Arc<LanguageServer>,
         _: &App,
     ) -> Result<lsp::CompletionParams> {
         Ok(lsp::CompletionParams {
             text_document_position: make_lsp_text_document_position(path, self.position)?,
-            context: Some(self.context.clone()),
+            context: Some(completion_context_for_server(
+                &self.context,
+                buffer.completion_triggers_for_server(language_server.server_id()),
+            )),
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
         })
@@ -6277,5 +6309,61 @@ fn process_full_diagnostics_report(
                 registration_id,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod completion_context_tests {
+    use super::*;
+
+    fn server_with_triggers(triggers: &[&str]) -> std::collections::BTreeSet<String> {
+        triggers.iter().map(|trigger| trigger.to_string()).collect()
+    }
+
+    fn triggered_by(character: &str) -> lsp::CompletionContext {
+        lsp::CompletionContext {
+            trigger_kind: lsp::CompletionTriggerKind::TRIGGER_CHARACTER,
+            trigger_character: Some(character.to_string()),
+        }
+    }
+
+    #[test]
+    fn keeps_trigger_characters_the_server_registered() {
+        let vue = server_with_triggers(&[".", ":", "@", "<"]);
+        assert_eq!(
+            completion_context_for_server(&triggered_by(":"), Some(&vue)),
+            triggered_by(":")
+        );
+    }
+
+    #[test]
+    fn sends_invoked_for_triggers_registered_by_another_server() {
+        let vue = server_with_triggers(&[".", ":", "@", "<"]);
+        let invoked = lsp::CompletionContext {
+            trigger_kind: lsp::CompletionTriggerKind::INVOKED,
+            trigger_character: None,
+        };
+        // Emmet registers letters; the Vue server must still answer when they are typed.
+        assert_eq!(
+            completion_context_for_server(&triggered_by("a"), Some(&vue)),
+            invoked
+        );
+        assert_eq!(
+            completion_context_for_server(&triggered_by("."), None),
+            invoked
+        );
+    }
+
+    #[test]
+    fn leaves_invoked_and_incomplete_requests_alone() {
+        let vue = server_with_triggers(&["."]);
+        let incomplete = lsp::CompletionContext {
+            trigger_kind: lsp::CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS,
+            trigger_character: None,
+        };
+        assert_eq!(
+            completion_context_for_server(&incomplete, Some(&vue)),
+            incomplete
+        );
     }
 }

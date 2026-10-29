@@ -4863,12 +4863,78 @@ impl Project {
         cx: &mut Context<Self>,
     ) -> Task<Result<PrepareRenameResponse>> {
         let position = position.to_point_utf16(buffer.read(cx));
-        self.request_lsp(
-            buffer,
-            LanguageServerToQuery::FirstCapable,
-            PrepareRename { position },
-            cx,
-        )
+        if !self.is_local() {
+            return self.request_lsp(
+                buffer,
+                LanguageServerToQuery::FirstCapable,
+                PrepareRename { position },
+                cx,
+            );
+        }
+
+        // Several servers can claim rename for one buffer (a Vue file has both
+        // the Vue server and vtsls). The first may decline a position the next
+        // can rename, so try them in priority order. The winning server's id is
+        // in the response, and `perform_rename` sends the rename to it.
+        let candidates = self.lsp_store.update(cx, |lsp_store, cx| {
+            let server_ids = buffer.update(cx, |buffer, cx| {
+                lsp_store.language_servers_for_local_buffer(buffer, cx)
+            });
+            let request = PrepareRename { position };
+            server_ids
+                .into_iter()
+                .filter(|server_id| {
+                    lsp_store
+                        .language_server_capable_of_lsp_request(&buffer, *server_id, &request, cx)
+                })
+                .collect::<Vec<_>>()
+        });
+        if candidates.len() < 2 {
+            return self.request_lsp(
+                buffer,
+                LanguageServerToQuery::FirstCapable,
+                PrepareRename { position },
+                cx,
+            );
+        }
+
+        cx.spawn(async move |project, cx| {
+            // A server that renames without preparing is only used when no
+            // server can prepare the position, matching `FirstCapable`.
+            let mut unprepared_rename_supported = false;
+            let mut declined = false;
+            let mut first_error = None;
+            for server_id in candidates {
+                let response = project
+                    .update(cx, |project, cx| {
+                        project.request_lsp(
+                            buffer.clone(),
+                            LanguageServerToQuery::Other(server_id),
+                            PrepareRename { position },
+                            cx,
+                        )
+                    })?
+                    .await;
+                match response {
+                    Ok(response @ PrepareRenameResponse::Success { .. }) => return Ok(response),
+                    Ok(PrepareRenameResponse::OnlyUnpreparedRenameSupported) => {
+                        unprepared_rename_supported = true
+                    }
+                    Ok(PrepareRenameResponse::InvalidPosition) => declined = true,
+                    Err(error) => {
+                        log::debug!("prepare rename failed on {server_id}: {error:#}");
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            if unprepared_rename_supported {
+                return Ok(PrepareRenameResponse::OnlyUnpreparedRenameSupported);
+            }
+            match first_error {
+                Some(error) if !declined => Err(error),
+                _ => Ok(PrepareRenameResponse::InvalidPosition),
+            }
+        })
     }
 
     pub fn perform_rename<T: ToPointUtf16>(

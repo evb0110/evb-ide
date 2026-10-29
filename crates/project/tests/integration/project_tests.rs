@@ -12166,6 +12166,122 @@ async fn test_rename(cx: &mut gpui::TestAppContext) {
     );
 }
 
+#[gpui::test]
+async fn test_prepare_rename_falls_back_to_next_capable_server(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.tsx": "const value = 1;" }))
+        .await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(tsx_lang());
+    let rename_capabilities = || lsp::ServerCapabilities {
+        rename_provider: Some(lsp::OneOf::Right(lsp::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
+        ..Default::default()
+    };
+    // Like the Vue server in front of vtsls: first in priority, but it declines
+    // positions that only the second server can rename.
+    let mut declining_servers = language_registry.register_fake_lsp(
+        "tsx",
+        FakeLspAdapter {
+            name: "DecliningServer",
+            capabilities: rename_capabilities(),
+            ..FakeLspAdapter::default()
+        },
+    );
+    let mut renaming_servers = language_registry.register_fake_lsp(
+        "tsx",
+        FakeLspAdapter {
+            name: "RenamingServer",
+            capabilities: rename_capabilities(),
+            ..FakeLspAdapter::default()
+        },
+    );
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.tsx"), cx)
+        })
+        .await
+        .unwrap();
+    let declining_server = declining_servers.next().await.unwrap();
+    let renaming_server = renaming_servers.next().await.unwrap();
+    cx.executor().run_until_parked();
+
+    let _declines = declining_server
+        .set_request_handler::<lsp::request::PrepareRenameRequest, _, _>(
+            |_, _| async move { Ok(None) },
+        );
+    let _renames_nothing =
+        declining_server.set_request_handler::<lsp::request::Rename, _, _>(|_, _| async move {
+            panic!("the rename must go to the server that prepared it")
+        });
+    let _prepares = renaming_server
+        .set_request_handler::<lsp::request::PrepareRenameRequest, _, _>(|_, _| async move {
+            Ok(Some(lsp::PrepareRenameResponse::Range(lsp::Range::new(
+                lsp::Position::new(0, 6),
+                lsp::Position::new(0, 11),
+            ))))
+        });
+    let _renames =
+        renaming_server.set_request_handler::<lsp::request::Rename, _, _>(|params, _| async move {
+            Ok(Some(lsp::WorkspaceEdit {
+                changes: Some(
+                    [(
+                        params.text_document_position.text_document.uri,
+                        vec![lsp::TextEdit::new(
+                            lsp::Range::new(lsp::Position::new(0, 6), lsp::Position::new(0, 11)),
+                            params.new_name,
+                        )],
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            }))
+        });
+
+    let response = project
+        .update(cx, |project, cx| {
+            project.prepare_rename(buffer.clone(), 8, cx)
+        })
+        .await
+        .unwrap();
+    let PrepareRenameResponse::Success {
+        range,
+        language_server_id,
+    } = response
+    else {
+        panic!("expected the second server to prepare the rename, got {response:?}");
+    };
+    assert_eq!(language_server_id, Some(renaming_server.server.server_id()));
+    assert_eq!(
+        buffer.update(cx, |buffer, _| range.to_offset(buffer)),
+        6..11
+    );
+
+    project
+        .update(cx, |project, cx| {
+            project.perform_rename(
+                buffer.clone(),
+                8,
+                "count".to_string(),
+                language_server_id,
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        buffer.read_with(cx, |buffer, _| buffer.text()),
+        "const count = 1;"
+    );
+}
+
 // Regression test for https://github.com/zed-industries/zed/issues/59077:
 // a "rename symbol" whose workspace edit also renames the file used to swap the
 // two files' contents. The edited content must end up in the renamed file, and

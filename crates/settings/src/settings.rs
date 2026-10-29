@@ -244,3 +244,22 @@ pub fn initial_debug_tasks_content() -> Cow<'static, str> {
 pub fn initial_local_debug_tasks_content() -> Cow<'static, str> {
     asset_str::<SettingsAssets>("settings/initial_local_debug_tasks.json")
 }
+
+#[cfg(test)]
+mod evb_default_settings_tests {
+    use super::*;
+
+    #[test]
+    fn evb_layer_parses_and_overrides_upstream_defaults() {
+        let merged = parse_json_with_comments::<serde_json::Value>(&app_default_settings())
+            .expect("merged defaults are valid JSON");
+        assert_eq!(merged["base_keymap"], "JetBrains");
+        assert_eq!(merged["theme"]["light"], "IntelliJ Light");
+        assert_eq!(merged["telemetry"]["metrics"], false);
+        // Keys the EVB layer does not mention keep their upstream values.
+        assert_eq!(merged["git_panel"]["button"], true);
+
+        let content = UserSettingsContent::parse_json_with_comments(&app_default_settings());
+        assert!(content.is_ok(), "{:?}", content.err());
+    }
+}

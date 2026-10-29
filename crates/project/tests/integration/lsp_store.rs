@@ -1248,3 +1248,90 @@ fn worktree_entries(project: &Entity<Project>, cx: &TestAppContext) -> Vec<Strin
             .collect()
     })
 }
+
+struct VueTsserverRequest;
+struct VueTsserverResponse;
+
+impl lsp::notification::Notification for VueTsserverRequest {
+    type Params = Vec<(u64, String, serde_json::Value)>;
+    const METHOD: &'static str = "tsserver/request";
+}
+
+impl lsp::notification::Notification for VueTsserverResponse {
+    type Params = Vec<(u64, serde_json::Value)>;
+    const METHOD: &'static str = "tsserver/response";
+}
+
+#[gpui::test]
+async fn test_vue_tsserver_requests_are_forwarded_to_vtsls(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/app"),
+        json!({ "App.vue": "<script setup lang=\"ts\"></script>" }),
+    )
+    .await;
+    let project = Project::test(fs, [path!("/app").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(Arc::new(language::Language::new(
+        language::LanguageConfig {
+            name: "Vue".into(),
+            matcher: (language::LanguageMatcher {
+                path_suffixes: vec!["vue".into()],
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        },
+        None,
+    )));
+    let mut vue_servers = language_registry.register_fake_lsp(
+        "Vue",
+        FakeLspAdapter {
+            name: "vue-language-server",
+            ..FakeLspAdapter::default()
+        },
+    );
+    let mut typescript_servers = language_registry.register_fake_lsp(
+        "Vue",
+        FakeLspAdapter {
+            name: "vtsls",
+            ..FakeLspAdapter::default()
+        },
+    );
+
+    let (_buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/app/App.vue"), cx)
+        })
+        .await
+        .unwrap();
+    let mut vue_server = vue_servers.next().await.unwrap();
+    let typescript_server = typescript_servers.next().await.unwrap();
+    cx.run_until_parked();
+
+    let _tsserver = typescript_server.set_request_handler::<lsp::request::ExecuteCommand, _, _>(
+        |params, _| async move {
+            assert_eq!(params.command, "typescript.tsserverRequest");
+            assert_eq!(params.arguments[0], json!("_vue:projectInfo"));
+            Ok(Some(
+                json!({ "body": { "configFileName": "/app/tsconfig.json" } }),
+            ))
+        },
+    );
+    vue_server.notify::<VueTsserverRequest>(vec![(
+        7,
+        "_vue:projectInfo".to_string(),
+        json!({ "file": "/app/App.vue" }),
+    )]);
+    cx.run_until_parked();
+
+    let response = vue_server
+        .receive_notification::<VueTsserverResponse>()
+        .await;
+    assert_eq!(
+        response,
+        vec![(7, json!({ "configFileName": "/app/tsconfig.json" }))]
+    );
+}
