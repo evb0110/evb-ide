@@ -608,6 +608,14 @@ pub struct OpenAtCommit {
     pub sha: String,
 }
 
+/// `refs/heads/main` -> `main`, `refs/remotes/origin/main` -> `origin/main`.
+fn short_ref_name(ref_name: &str) -> &str {
+    ref_name
+        .strip_prefix("refs/heads/")
+        .or_else(|| ref_name.strip_prefix("refs/remotes/"))
+        .unwrap_or(ref_name)
+}
+
 fn timestamp_format() -> &'static [BorrowedFormatItem<'static>] {
     static FORMAT: OnceLock<Vec<BorrowedFormatItem<'static>>> = OnceLock::new();
     FORMAT.get_or_init(|| {
@@ -2250,7 +2258,7 @@ impl GitGraph {
             _ => None,
         };
         let label: SharedString = match &selected {
-            Some(name) => format!("Branch: {name}").into(),
+            Some(ref_name) => format!("Branch: {}", short_ref_name(ref_name)).into(),
             None => "Branch: All".into(),
         };
         let git_graph = cx.weak_entity();
@@ -2279,25 +2287,27 @@ impl GitGraph {
                             choose(LogSource::All),
                         );
                         for remote in [false, true] {
-                            let mut names = branches
+                            // Filter by the full ref: a local `origin/main` and the
+                            // remote-tracking `origin/main` share a short name.
+                            let mut refs = branches
                                 .iter()
                                 .filter(|branch| branch.is_remote() == remote)
-                                .map(|branch| SharedString::from(branch.name().to_string()))
+                                .map(|branch| branch.ref_name.clone())
                                 .collect::<Vec<_>>();
-                            if names.is_empty() {
+                            if refs.is_empty() {
                                 continue;
                             }
-                            names.sort();
+                            refs.sort();
                             menu = menu
                                 .separator()
                                 .header(if remote { "Remote" } else { "Local" });
-                            for name in names {
+                            for ref_name in refs {
                                 menu = menu.toggleable_entry(
-                                    name.clone(),
-                                    selected.as_ref() == Some(&name),
+                                    short_ref_name(&ref_name).to_string(),
+                                    selected.as_ref() == Some(&ref_name),
                                     IconPosition::Start,
                                     None,
-                                    choose(LogSource::Branch(name)),
+                                    choose(LogSource::Branch(ref_name)),
                                 );
                             }
                         }

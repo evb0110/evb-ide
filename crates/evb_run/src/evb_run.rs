@@ -5,7 +5,7 @@
 //! each visible worktree's `package.json` and `composer.json`, and from the
 //! templates in `.zed/tasks.json` and the global tasks file.
 
-use std::{borrow::Cow, path::Path, sync::Arc};
+use std::{borrow::Cow, path::Path, sync::Arc, time::Duration};
 
 use collections::HashMap;
 use dap::adapters::DebugAdapterName;
@@ -45,6 +45,8 @@ actions!(
 const SELECTED_CONFIGURATION_KEY_PREFIX: &str = "evb_run_selected_configuration:";
 const SOURCE_ID_BASE: &str = "evb_run";
 const JAVASCRIPT_ADAPTER: &str = "JavaScript";
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// Root files whose changes can add, remove or change run configurations.
 const WATCHED_ROOT_FILES: &[&str] = &[
@@ -283,6 +285,8 @@ pub struct RunController {
     /// Launches that have not handed their task to the workspace yet. Dropping
     /// one (on Stop or Rerun) cancels it.
     launches: HashMap<SharedString, Task<()>>,
+    /// Stops waiting for a run's terminal to appear.
+    pending_stops: HashMap<SharedString, Task<()>>,
     next_generation: usize,
     menu_handle: PopoverMenuHandle<ContextMenu>,
     refresh_task: Task<()>,
@@ -321,6 +325,7 @@ impl RunController {
             selected: None,
             runs: HashMap::default(),
             launches: HashMap::default(),
+            pending_stops: HashMap::default(),
             next_generation: 0,
             menu_handle: PopoverMenuHandle::default(),
             refresh_task: Task::ready(()),
@@ -528,6 +533,7 @@ impl RunController {
                 }
             }
 
+            disambiguate_script_labels(&mut configurations);
             this.update(cx, |this, cx| {
                 this.configurations = configurations;
                 let selection_is_valid = |id: &str| {
@@ -565,6 +571,9 @@ impl RunController {
         if self.is_running(&configuration.id) {
             self.stop(&configuration.id, cx);
         }
+        // A restart's new run has the same task id; a stop still waiting for
+        // the old run's terminal must not kill the new one.
+        self.pending_stops.remove(&configuration.id);
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -647,8 +656,9 @@ impl RunController {
     }
 
     /// Stops the configuration's running process and cancels a launch that
-    /// has not reached the workspace yet. A task whose launch is already saving
-    /// files before spawning (`"save": "all"`) still starts and needs a second Stop.
+    /// has not reached the workspace yet. A launch the workspace already took
+    /// may still be saving files or creating its terminal; its terminal is
+    /// killed as soon as it appears.
     pub fn stop(&mut self, configuration_id: &str, cx: &mut Context<Self>) {
         self.launches.remove(configuration_id);
         let Some(run) = self.runs.get(configuration_id) else {
@@ -657,9 +667,45 @@ impl RunController {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        for terminal in running_task_terminals(&workspace, &run.task_id, cx) {
-            terminal.update(cx, |terminal, _| terminal.kill_active_task());
+        let task_id = run.task_id.clone();
+        let generation = run.generation;
+        let terminals = running_task_terminals(&workspace, &task_id, cx);
+        if !terminals.is_empty() || run.status != RunStatus::Running {
+            for terminal in terminals {
+                terminal.update(cx, |terminal, _| terminal.kill_active_task());
+            }
+            return;
         }
+
+        let configuration_id = SharedString::from(configuration_id.to_string());
+        let workspace = workspace.downgrade();
+        let watcher = cx.spawn({
+            let configuration_id = configuration_id.clone();
+            async move |this, cx| {
+                let mut waited = Duration::ZERO;
+                while waited < STOP_WAIT {
+                    cx.background_executor().timer(STOP_POLL_INTERVAL).await;
+                    waited += STOP_POLL_INTERVAL;
+                    let stopped = this.update(cx, |this, cx| {
+                        let same_run = this.runs.get(&configuration_id).is_some_and(|run| {
+                            run.generation == generation && run.status == RunStatus::Running
+                        });
+                        let Some(workspace) = workspace.upgrade().filter(|_| same_run) else {
+                            return true;
+                        };
+                        let terminals = running_task_terminals(&workspace, &task_id, cx);
+                        for terminal in &terminals {
+                            terminal.update(cx, |terminal, _| terminal.kill_active_task());
+                        }
+                        !terminals.is_empty()
+                    });
+                    if stopped.unwrap_or(true) {
+                        break;
+                    }
+                }
+            }
+        });
+        self.pending_stops.insert(configuration_id, watcher);
     }
 
     fn debug_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -710,18 +756,14 @@ impl RunController {
                         );
                         return;
                     };
-                    let task_context = configuration
-                        .worktree_id
-                        .and_then(|worktree_id| {
-                            task_contexts.task_context_for_worktree_id(worktree_id)
-                        })
+                    let task_context = task_context_for(&configuration, &task_contexts)
                         .cloned()
                         .unwrap_or_default();
                     workspace.start_debug_session(
                         scenario,
                         task_context.into(),
                         None,
-                        configuration.worktree_id,
+                        configuration.worktree_id.or_else(|| task_contexts.worktree()),
                         window,
                         cx,
                     );
@@ -780,6 +822,36 @@ impl RunController {
             menu.separator()
                 .action("Edit Configurations…", EditConfigurations.boxed_clone())
         })
+    }
+}
+
+/// Zed reuses a task's terminal for any task with the same label, so scripts
+/// whose labels still collide (a package.json and a composer.json script of the
+/// same name, or two roots with the same directory name) get the manifest and
+/// root path appended, in both the shown label and the terminal label.
+fn disambiguate_script_labels(configurations: &mut [RunConfiguration]) {
+    let mut counts = HashMap::<SharedString, usize>::default();
+    for configuration in configurations.iter() {
+        *counts.entry(configuration.label.clone()).or_default() += 1;
+    }
+    for configuration in configurations.iter_mut() {
+        let manifest = match configuration.kind {
+            RunConfigurationKind::PackageScript(_) => "package.json",
+            RunConfigurationKind::ComposerScript => "composer.json",
+            RunConfigurationKind::Task => continue,
+        };
+        if counts
+            .get(&configuration.label)
+            .copied()
+            .unwrap_or_default()
+            < 2
+        {
+            continue;
+        }
+        let root = configuration.template.cwd.clone().unwrap_or_default();
+        let label = format!("{} ({manifest} in {root})", configuration.label);
+        configuration.template.label = label.clone();
+        configuration.label = label.into();
     }
 }
 
@@ -1099,6 +1171,50 @@ mod tests {
                 migrate.id
             );
         });
+    }
+
+    #[test]
+    fn disambiguates_colliding_script_labels() {
+        let script = |label: &str, kind, cwd: &str| RunConfiguration {
+            id: format!("{cwd}:{label}").into(),
+            label: label.to_string().into(),
+            kind,
+            worktree_id: None,
+            source_kind: TaskSourceKind::UserInput,
+            template: TaskTemplate {
+                label: label.to_string(),
+                cwd: Some(cwd.to_string()),
+                ..TaskTemplate::default()
+            },
+        };
+        let npm = RunConfigurationKind::PackageScript(PackageManager::Npm);
+        let mut configurations = vec![
+            script("app: dev", npm, "/one/app"),
+            script("app: dev", npm, "/two/app"),
+            script("test", npm, "/one/app"),
+            script("test", RunConfigurationKind::ComposerScript, "/one/app"),
+            script("build", npm, "/one/app"),
+            script("build", RunConfigurationKind::Task, "/one/app"),
+        ];
+        disambiguate_script_labels(&mut configurations);
+        let labels = configurations
+            .iter()
+            .map(|configuration| {
+                assert_eq!(configuration.label.as_ref(), configuration.template.label);
+                configuration.label.to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "app: dev (package.json in /one/app)",
+                "app: dev (package.json in /two/app)",
+                "test (package.json in /one/app)",
+                "test (composer.json in /one/app)",
+                "build (package.json in /one/app)",
+                "build",
+            ]
+        );
     }
 
     #[test]

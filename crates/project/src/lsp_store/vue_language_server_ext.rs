@@ -46,18 +46,17 @@ fn vue_server_worktree(
         .find_map(|(seed, server)| (server.id == vue_server_id).then_some(seed.worktree_id))
 }
 
-/// A running TypeScript server in the given worktree, or in any worktree when
-/// `worktree` is `None`.
+/// A running TypeScript server in the given worktree.
 fn running_typescript_server(
     lsp_store: &LspStore,
-    worktree: Option<WorktreeId>,
+    worktree: WorktreeId,
 ) -> Option<Arc<LanguageServer>> {
     let local = lsp_store.as_local()?;
     local
         .language_server_ids
         .iter()
         .filter(|(seed, _)| [VTSLS, TS_LS].contains(&seed.name))
-        .filter(|(seed, _)| worktree.is_none_or(|worktree| seed.worktree_id == worktree))
+        .filter(|(seed, _)| seed.worktree_id == worktree)
         .find_map(|(_, server)| local.language_server_for_id(server.id))
 }
 
@@ -93,11 +92,12 @@ pub fn register_requests(lsp_store: WeakEntity<LspStore>, language_server: &Lang
                         let lookup = lsp_store.read_with(cx, |this, _| {
                             let vue_server_running =
                                 this.language_server_for_id(vue_server_id).is_some();
-                            let in_worktree = running_typescript_server(this, Some(worktree));
-                            let anywhere = (waited >= TYPESCRIPT_SERVER_STARTUP_WAIT)
-                                .then(|| running_typescript_server(this, None))
-                                .flatten();
-                            (vue_server_running, in_worktree.or(anywhere))
+                            // Another worktree's server does not know this file's
+                            // project, so it is never used, even after the wait.
+                            (
+                                vue_server_running,
+                                running_typescript_server(this, worktree),
+                            )
                         });
                         match lookup {
                             Ok((false, _)) | Err(_) => return,
