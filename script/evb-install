@@ -42,9 +42,13 @@ export MACOSX_DEPLOYMENT_TARGET=12.0
 export CXXFLAGS="-stdlib=libc++"
 
 echo "Building $app_name $version ($commit)"
-cargo --config .cargo/bundle-config.toml build --release \
-    --package zed --bin "$executable" \
-    --package cli
+# Release builds embed assets/ at compile time. Cargo notices edits to embedded
+# files but not files added since the last build (a new font or theme), so the
+# embedding crates are always rebuilt.
+touch crates/assets/src/assets.rs crates/settings/src/settings.rs
+cargo --config .cargo/bundle-config.toml build --release --package zed --bin "$executable"
+# Separately: `--bin` would otherwise also restrict the cli package's binaries.
+cargo --config .cargo/bundle-config.toml build --release --package cli
 
 out_dir="target/evb-bundle"
 app_path="$out_dir/$app_name.app"
