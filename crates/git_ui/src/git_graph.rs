@@ -2268,6 +2268,19 @@ impl GitGraph {
                     let git_graph = git_graph.clone();
                     let branches = branches.clone();
                     let selected = selected.clone();
+                    // A graph saved with a short branch name (or opened by Zed
+                    // code that uses short names) shows its branch as selected
+                    // when exactly one branch has that short name.
+                    let legacy_selection = selected
+                        .as_ref()
+                        .filter(|selected| !selected.starts_with("refs/"))
+                        .and_then(|selected| {
+                            let mut matches = branches.iter().filter(|branch| {
+                                short_ref_name(&branch.ref_name) == selected.as_ref()
+                            });
+                            let only = matches.next()?;
+                            matches.next().is_none().then(|| only.ref_name.clone())
+                        });
                     Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
                         let choose = |log_source: LogSource| {
                             let git_graph = git_graph.clone();
@@ -2304,13 +2317,8 @@ impl GitGraph {
                             for ref_name in refs {
                                 menu = menu.toggleable_entry(
                                     short_ref_name(&ref_name).to_string(),
-                                    // Graphs saved with a short branch name (or opened
-                                    // by Zed code that uses short names) still show
-                                    // their branch as selected.
-                                    selected.as_ref().is_some_and(|selected| {
-                                        selected == &ref_name
-                                            || selected.as_ref() == short_ref_name(&ref_name)
-                                    }),
+                                    selected.as_ref() == Some(&ref_name)
+                                        || legacy_selection.as_ref() == Some(&ref_name),
                                     IconPosition::Start,
                                     None,
                                     choose(LogSource::Branch(ref_name)),
