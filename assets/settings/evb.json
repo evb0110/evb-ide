@@ -11,6 +11,13 @@
     "light": "IntelliJ Light",
     "dark": "IntelliJ Dark",
   },
+  // From the bundled extensions/evb-jetbrains-icons, which script/evb-install
+  // installs; Zed's icons are used until it is present.
+  "icon_theme": {
+    "mode": "system",
+    "light": "JetBrains Icons Light",
+    "dark": "JetBrains Icons Dark",
+  },
   "buffer_font_family": "JetBrains Mono",
   "buffer_font_size": 13,
   // WebStorm renders JetBrains Mono without ligatures by default.

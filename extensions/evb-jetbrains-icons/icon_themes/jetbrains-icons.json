@@ -1,0 +1,433 @@
+{
+  "$schema": "https://zed.dev/schema/icon_themes/v0.3.0.json",
+  "name": "JetBrains Icons",
+  "author": "EVB IDE, icons from JetBrains/intellij-community (Apache-2.0)",
+  "themes": [
+    {
+      "name": "JetBrains Icons Light",
+      "appearance": "light",
+      "directory_icons": {
+        "collapsed": "./icons/folder.svg",
+        "expanded": "./icons/folder.svg"
+      },
+      "named_directory_icons": {
+        "node_modules": {
+          "collapsed": "./icons/libraryFolder.svg",
+          "expanded": "./icons/libraryFolder.svg"
+        },
+        ".nuxt": {
+          "collapsed": "./icons/excludeRoot.svg",
+          "expanded": "./icons/excludeRoot.svg"
+        },
+        ".output": {
+          "collapsed": "./icons/excludeRoot.svg",
+          "expanded": "./icons/excludeRoot.svg"
+        },
+        ".next": {
+          "collapsed": "./icons/excludeRoot.svg",
+          "expanded": "./icons/excludeRoot.svg"
+        },
+        "dist": {
+          "collapsed": "./icons/excludeRoot.svg",
+          "expanded": "./icons/excludeRoot.svg"
+        },
+        "coverage": {
+          "collapsed": "./icons/excludeRoot.svg",
+          "expanded": "./icons/excludeRoot.svg"
+        },
+        "target": {
+          "collapsed": "./icons/excludeRoot.svg",
+          "expanded": "./icons/excludeRoot.svg"
+        },
+        ".github": {
+          "collapsed": "./icons/folderGithub.svg",
+          "expanded": "./icons/folderGithub.svg"
+        }
+      },
+      "file_stems": {
+        "Dockerfile": "docker",
+        "Containerfile": "docker",
+        ".env": "config",
+        ".npmrc": "config",
+        ".nvmrc": "config"
+      },
+      "file_suffixes": {
+        "ts": "typescript",
+        "mts": "typescript",
+        "cts": "typescript",
+        "tsx": "typescript",
+        "js": "javascript",
+        "mjs": "javascript",
+        "cjs": "javascript",
+        "jsx": "javascript",
+        "vue": "vue",
+        "json": "json",
+        "jsonc": "json",
+        "json5": "json",
+        "webmanifest": "json",
+        "md": "markdown",
+        "mdx": "markdown",
+        "markdown": "markdown",
+        "css": "css",
+        "scss": "css",
+        "sass": "css",
+        "less": "css",
+        "pcss": "css",
+        "postcss": "css",
+        "styl": "css",
+        "html": "html",
+        "htm": "html",
+        "xhtml": "html",
+        "php": "php",
+        "phtml": "php",
+        "yaml": "yaml",
+        "yml": "yaml",
+        "toml": "toml",
+        "rs": "rust",
+        "sh": "shell",
+        "bash": "shell",
+        "zsh": "shell",
+        "fish": "shell",
+        "command": "shell",
+        "txt": "text",
+        "log": "text",
+        "png": "image",
+        "jpg": "image",
+        "jpeg": "image",
+        "gif": "image",
+        "svg": "image",
+        "webp": "image",
+        "ico": "image",
+        "bmp": "image",
+        "avif": "image",
+        "tiff": "image",
+        "icns": "image",
+        "xml": "xml",
+        "plist": "xml",
+        "xsd": "xml",
+        "wsdl": "xml",
+        "dockerfile": "docker",
+        "gitignore": "gitignore",
+        "gitattributes": "gitignore",
+        "gitmodules": "gitignore",
+        "dockerignore": "gitignore",
+        "npmignore": "gitignore",
+        "eslintignore": "gitignore",
+        "prettierignore": "gitignore",
+        "env": "config",
+        "ini": "config",
+        "conf": "config",
+        "cfg": "config",
+        "npmrc": "config",
+        "nvmrc": "config",
+        "lock": "config",
+        "example": "config",
+        "editorconfig": "editorconfig",
+        "properties": "properties",
+        "zip": "archive",
+        "gz": "archive",
+        "tgz": "archive",
+        "tar": "archive",
+        "7z": "archive",
+        "rar": "archive",
+        "bz2": "archive",
+        "xz": "archive",
+        "jar": "archive",
+        "ttf": "font",
+        "otf": "font",
+        "woff": "font",
+        "woff2": "font",
+        "eot": "font",
+        "csv": "csv",
+        "tsv": "csv"
+      },
+      "file_icons": {
+        "typescript": {
+          "path": "./icons/typeScript.svg"
+        },
+        "javascript": {
+          "path": "./icons/javaScript.svg"
+        },
+        "vue": {
+          "path": "./icons/vue.svg"
+        },
+        "json": {
+          "path": "./icons/json.svg"
+        },
+        "markdown": {
+          "path": "./icons/markdown.svg"
+        },
+        "css": {
+          "path": "./icons/css.svg"
+        },
+        "html": {
+          "path": "./icons/html.svg"
+        },
+        "php": {
+          "path": "./icons/php.svg"
+        },
+        "yaml": {
+          "path": "./icons/yaml.svg"
+        },
+        "toml": {
+          "path": "./icons/toml.svg"
+        },
+        "rust": {
+          "path": "./icons/rust.svg"
+        },
+        "shell": {
+          "path": "./icons/shell.svg"
+        },
+        "text": {
+          "path": "./icons/text.svg"
+        },
+        "image": {
+          "path": "./icons/image.svg"
+        },
+        "xml": {
+          "path": "./icons/xml.svg"
+        },
+        "docker": {
+          "path": "./icons/docker.svg"
+        },
+        "gitignore": {
+          "path": "./icons/gitignore.svg"
+        },
+        "config": {
+          "path": "./icons/config.svg"
+        },
+        "editorconfig": {
+          "path": "./icons/editorConfig.svg"
+        },
+        "properties": {
+          "path": "./icons/properties.svg"
+        },
+        "archive": {
+          "path": "./icons/archive.svg"
+        },
+        "font": {
+          "path": "./icons/font.svg"
+        },
+        "csv": {
+          "path": "./icons/csv.svg"
+        },
+        "default": {
+          "path": "./icons/anyType.svg"
+        }
+      }
+    },
+    {
+      "name": "JetBrains Icons Dark",
+      "appearance": "dark",
+      "directory_icons": {
+        "collapsed": "./icons/folder_dark.svg",
+        "expanded": "./icons/folder_dark.svg"
+      },
+      "named_directory_icons": {
+        "node_modules": {
+          "collapsed": "./icons/libraryFolder_dark.svg",
+          "expanded": "./icons/libraryFolder_dark.svg"
+        },
+        ".nuxt": {
+          "collapsed": "./icons/excludeRoot_dark.svg",
+          "expanded": "./icons/excludeRoot_dark.svg"
+        },
+        ".output": {
+          "collapsed": "./icons/excludeRoot_dark.svg",
+          "expanded": "./icons/excludeRoot_dark.svg"
+        },
+        ".next": {
+          "collapsed": "./icons/excludeRoot_dark.svg",
+          "expanded": "./icons/excludeRoot_dark.svg"
+        },
+        "dist": {
+          "collapsed": "./icons/excludeRoot_dark.svg",
+          "expanded": "./icons/excludeRoot_dark.svg"
+        },
+        "coverage": {
+          "collapsed": "./icons/excludeRoot_dark.svg",
+          "expanded": "./icons/excludeRoot_dark.svg"
+        },
+        "target": {
+          "collapsed": "./icons/excludeRoot_dark.svg",
+          "expanded": "./icons/excludeRoot_dark.svg"
+        },
+        ".github": {
+          "collapsed": "./icons/folderGithub_dark.svg",
+          "expanded": "./icons/folderGithub_dark.svg"
+        }
+      },
+      "file_stems": {
+        "Dockerfile": "docker",
+        "Containerfile": "docker",
+        ".env": "config",
+        ".npmrc": "config",
+        ".nvmrc": "config"
+      },
+      "file_suffixes": {
+        "ts": "typescript",
+        "mts": "typescript",
+        "cts": "typescript",
+        "tsx": "typescript",
+        "js": "javascript",
+        "mjs": "javascript",
+        "cjs": "javascript",
+        "jsx": "javascript",
+        "vue": "vue",
+        "json": "json",
+        "jsonc": "json",
+        "json5": "json",
+        "webmanifest": "json",
+        "md": "markdown",
+        "mdx": "markdown",
+        "markdown": "markdown",
+        "css": "css",
+        "scss": "css",
+        "sass": "css",
+        "less": "css",
+        "pcss": "css",
+        "postcss": "css",
+        "styl": "css",
+        "html": "html",
+        "htm": "html",
+        "xhtml": "html",
+        "php": "php",
+        "phtml": "php",
+        "yaml": "yaml",
+        "yml": "yaml",
+        "toml": "toml",
+        "rs": "rust",
+        "sh": "shell",
+        "bash": "shell",
+        "zsh": "shell",
+        "fish": "shell",
+        "command": "shell",
+        "txt": "text",
+        "log": "text",
+        "png": "image",
+        "jpg": "image",
+        "jpeg": "image",
+        "gif": "image",
+        "svg": "image",
+        "webp": "image",
+        "ico": "image",
+        "bmp": "image",
+        "avif": "image",
+        "tiff": "image",
+        "icns": "image",
+        "xml": "xml",
+        "plist": "xml",
+        "xsd": "xml",
+        "wsdl": "xml",
+        "dockerfile": "docker",
+        "gitignore": "gitignore",
+        "gitattributes": "gitignore",
+        "gitmodules": "gitignore",
+        "dockerignore": "gitignore",
+        "npmignore": "gitignore",
+        "eslintignore": "gitignore",
+        "prettierignore": "gitignore",
+        "env": "config",
+        "ini": "config",
+        "conf": "config",
+        "cfg": "config",
+        "npmrc": "config",
+        "nvmrc": "config",
+        "lock": "config",
+        "example": "config",
+        "editorconfig": "editorconfig",
+        "properties": "properties",
+        "zip": "archive",
+        "gz": "archive",
+        "tgz": "archive",
+        "tar": "archive",
+        "7z": "archive",
+        "rar": "archive",
+        "bz2": "archive",
+        "xz": "archive",
+        "jar": "archive",
+        "ttf": "font",
+        "otf": "font",
+        "woff": "font",
+        "woff2": "font",
+        "eot": "font",
+        "csv": "csv",
+        "tsv": "csv"
+      },
+      "file_icons": {
+        "typescript": {
+          "path": "./icons/typeScript_dark.svg"
+        },
+        "javascript": {
+          "path": "./icons/javaScript_dark.svg"
+        },
+        "vue": {
+          "path": "./icons/vue.svg"
+        },
+        "json": {
+          "path": "./icons/json_dark.svg"
+        },
+        "markdown": {
+          "path": "./icons/markdown_dark.svg"
+        },
+        "css": {
+          "path": "./icons/css_dark.svg"
+        },
+        "html": {
+          "path": "./icons/html_dark.svg"
+        },
+        "php": {
+          "path": "./icons/php_dark.svg"
+        },
+        "yaml": {
+          "path": "./icons/yaml_dark.svg"
+        },
+        "toml": {
+          "path": "./icons/toml_dark.svg"
+        },
+        "rust": {
+          "path": "./icons/rust_dark.svg"
+        },
+        "shell": {
+          "path": "./icons/shell_dark.svg"
+        },
+        "text": {
+          "path": "./icons/text_dark.svg"
+        },
+        "image": {
+          "path": "./icons/image_dark.svg"
+        },
+        "xml": {
+          "path": "./icons/xml_dark.svg"
+        },
+        "docker": {
+          "path": "./icons/docker_dark.svg"
+        },
+        "gitignore": {
+          "path": "./icons/gitignore.svg"
+        },
+        "config": {
+          "path": "./icons/config_dark.svg"
+        },
+        "editorconfig": {
+          "path": "./icons/editorConfig_dark.svg"
+        },
+        "properties": {
+          "path": "./icons/properties_dark.svg"
+        },
+        "archive": {
+          "path": "./icons/archive_dark.svg"
+        },
+        "font": {
+          "path": "./icons/font_dark.svg"
+        },
+        "csv": {
+          "path": "./icons/csv_dark.svg"
+        },
+        "default": {
+          "path": "./icons/anyType_dark.svg"
+        }
+      }
+    }
+  ]
+}

@@ -126,3 +126,14 @@ fi
 rm -rf "$target"
 ditto "$app_path" "$target"
 echo "Installed $target"
+
+# Extensions that ship with EVB IDE are installed into its extensions folder,
+# where the app picks them up like any extension from the registry.
+extensions_dir="$HOME/Library/Application Support/EVB-IDE/extensions/installed"
+mkdir -p "$extensions_dir"
+for extension in extensions/evb-*; do
+    name="$(basename "$extension")"
+    rm -rf "$extensions_dir/$name"
+    ditto "$extension" "$extensions_dir/$name"
+    echo "Installed extension $name"
+done

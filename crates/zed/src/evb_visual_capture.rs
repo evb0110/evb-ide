@@ -244,6 +244,17 @@ mod capture {
             }
         });
         cx.update(|cx| {
+            let extension_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../extensions/evb-jetbrains-icons");
+            let icon_theme = extension_root.join("icon_themes/jetbrains-icons.json");
+            if let Some(bytes) = std::fs::read(&icon_theme).log_err() {
+                theme::ThemeRegistry::global(cx)
+                    .load_icon_theme(&icon_theme, &extension_root, bytes)
+                    .log_err();
+                theme_settings::reload_icon_theme(cx);
+            }
+        });
+        cx.update(|cx| {
             use theme::ActiveTheme as _;
             app_state.languages.set_theme(cx.theme().clone());
             cx.observe_global::<theme::GlobalTheme>({
