@@ -164,6 +164,8 @@ actions!(
         ActivateChangesTab,
         /// Activates the History tab.
         ActivateHistoryTab,
+        /// Commits, then pushes the current branch if the commit succeeds.
+        CommitAndPush,
     ]
 );
 
@@ -1194,6 +1196,7 @@ pub struct GitPanel {
     diff_stat_total: DiffStat,
     new_staged_count: usize,
     pending_commit: Option<Task<()>>,
+    push_after_commit: bool,
     pending_remote_operation: Option<RemoteOperationKind>,
     amend_pending: bool,
     original_commit_message: Option<String>,
@@ -1530,6 +1533,7 @@ impl GitPanel {
                 changes_count: 0,
                 diff_stat_total: DiffStat::default(),
                 pending_commit: None,
+                push_after_commit: false,
                 pending_remote_operation: None,
                 amend_pending,
                 original_commit_message,
@@ -3912,6 +3916,25 @@ impl GitPanel {
         }
     }
 
+    fn on_commit_and_push(
+        &mut self,
+        _: &CommitAndPush,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let had_pending_commit = self.pending_commit.is_some();
+        self.push_after_commit = true;
+        let options = self.commit_options();
+        self.commit_changes(options, window, cx);
+        if had_pending_commit || self.pending_commit.is_none() {
+            // The commit did not start (no message, conflicts, or another commit
+            // is still running), so there is nothing to push after.
+            self.push_after_commit = false;
+        } else {
+            telemetry::event!("Git Committed", source = "Git Panel");
+        }
+    }
+
     fn on_amend(&mut self, _: &Amend, window: &mut Window, cx: &mut Context<Self>) {
         if self.amend(&self.commit_editor.focus_handle(cx), window, cx) {
             telemetry::event!("Git Amended", source = "Git Panel");
@@ -4118,8 +4141,14 @@ impl GitPanel {
                             this.original_commit_message = None;
                             this.serialize(cx);
                         }
+                        if std::mem::take(&mut this.push_after_commit) {
+                            this.push(false, false, window, cx);
+                        }
                     }
-                    Err(e) => this.show_error_toast("commit", e, cx),
+                    Err(e) => {
+                        this.push_after_commit = false;
+                        this.show_error_toast("commit", e, cx)
+                    }
                 }
             })
             .ok();
@@ -6670,6 +6699,8 @@ impl GitPanel {
                             .when_some(keybinding_target.clone(), |el, keybinding_target| {
                                 el.context(keybinding_target)
                             })
+                            .action("Commit and Push…", Box::new(CommitAndPush))
+                            .separator()
                             .when(has_previous_commit, |this| {
                                 this.toggleable_entry(
                                     "Amend",
@@ -9574,6 +9605,7 @@ impl Render for GitPanel {
                 this.on_action(cx.listener(Self::toggle_staged_for_selected))
                     .on_action(cx.listener(Self::stage_range))
                     .on_action(cx.listener(GitPanel::on_commit))
+                    .on_action(cx.listener(GitPanel::on_commit_and_push))
                     .on_action(cx.listener(GitPanel::toggle_skip_hooks))
                     .on_action(cx.listener(GitPanel::on_amend))
                     .on_action(cx.listener(GitPanel::toggle_signoff_enabled))

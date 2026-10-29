@@ -1,0 +1,37 @@
+// EVB IDE key bindings, loaded after the base keymap so they win over it.
+// User keymaps still override these.
+[
+  {
+    "context": "Workspace",
+    "bindings": {
+      "ctrl-r": "evb_run::Run",
+      "ctrl-d": "evb_run::Debug",
+      "cmd-f2": "evb_run::Stop",
+      "ctrl-alt-r": "evb_run::ChooseConfiguration",
+    },
+  },
+  {
+    // JetBrains binds these in the editor too, replacing the macOS
+    // delete-forward and select-all-occurrences defaults.
+    "context": "Editor && mode == full",
+    "bindings": {
+      "ctrl-r": "evb_run::Run",
+      "ctrl-d": "evb_run::Debug",
+      "cmd-f2": "evb_run::Stop",
+    },
+  },
+  {
+    "context": "GitPanel || CommitEditor > Editor",
+    "bindings": {
+      "cmd-alt-k": "git_panel::CommitAndPush",
+    },
+  },
+  {
+    // The shell owns these keys inside a terminal.
+    "context": "Terminal",
+    "bindings": {
+      "ctrl-r": ["terminal::SendKeystroke", "ctrl-r"],
+      "ctrl-d": ["terminal::SendKeystroke", "ctrl-d"],
+    },
+  },
+]

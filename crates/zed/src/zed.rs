@@ -72,10 +72,11 @@ use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use rope::Rope;
 use search::project_search::ProjectSearchBar;
 use settings::{
-    BaseKeymap, DEFAULT_KEYMAP_PATH, DefaultOpenBehavior, InvalidSettingsError, KeybindSource,
-    KeymapFile, KeymapFileLoadResult, MigrationStatus, SPECIFIC_OVERRIDES_KEYMAP_PATH, Settings,
-    SettingsFile, SettingsStore, VIM_KEYMAP_PATH, initial_local_debug_tasks_content,
-    initial_project_settings_content, initial_tasks_content, update_settings_file,
+    BaseKeymap, DEFAULT_KEYMAP_PATH, DefaultOpenBehavior, EVB_KEYMAP_PATH, InvalidSettingsError,
+    KeybindSource, KeymapFile, KeymapFileLoadResult, MigrationStatus,
+    SPECIFIC_OVERRIDES_KEYMAP_PATH, Settings, SettingsFile, SettingsStore, VIM_KEYMAP_PATH,
+    initial_local_debug_tasks_content, initial_project_settings_content, initial_tasks_content,
+    update_settings_file,
 };
 use sidebar::Sidebar;
 #[cfg(debug_assertions)]
@@ -2361,6 +2362,12 @@ pub fn load_default_keymap(cx: &mut App) {
             KeymapFile::load_asset(asset_path, Some(KeybindSource::Base), cx).unwrap(),
             cx,
         ));
+    }
+
+    if let Some(bindings) =
+        KeymapFile::load_asset(EVB_KEYMAP_PATH, Some(KeybindSource::Base), cx).log_err()
+    {
+        cx.bind_keys(bindings);
     }
 
     if VimModeSetting::get_global(cx).0 || vim_mode_setting::HelixModeSetting::get_global(cx).0 {

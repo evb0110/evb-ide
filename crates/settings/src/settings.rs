@@ -144,13 +144,36 @@ util::fs_embed! {
 }
 
 pub fn init(cx: &mut App) {
-    let settings = SettingsStore::new(cx, &default_settings());
+    let settings = SettingsStore::new(cx, &app_default_settings());
     cx.set_global(settings);
     SettingsStore::observe_active_settings_profile_name(cx).detach();
 }
 
 pub fn default_settings() -> Cow<'static, str> {
     asset_str::<SettingsAssets>("settings/default.json")
+}
+
+/// EVB IDE keeps its defaults in a separate `settings/evb.json` layer instead of
+/// editing `default.json`, so upstream changes to `default.json` rebase cleanly.
+pub fn evb_default_settings() -> Cow<'static, str> {
+    asset_str::<SettingsAssets>("settings/evb.json")
+}
+
+/// `default.json` with the `evb.json` layer merged over it.
+pub fn app_default_settings() -> Cow<'static, str> {
+    let defaults = default_settings();
+    let merged = parse_json_with_comments::<serde_json::Value>(&defaults).and_then(|mut value| {
+        let overrides = parse_json_with_comments::<serde_json::Value>(&evb_default_settings())?;
+        util::merge_non_null_json_value_into(overrides, &mut value);
+        Ok(serde_json::to_string(&value)?)
+    });
+    match merged {
+        Ok(merged) => Cow::Owned(merged),
+        Err(error) => {
+            log::error!("failed to apply settings/evb.json defaults: {error:#}");
+            defaults
+        }
+    }
 }
 
 pub fn default_semantic_token_rules() -> Cow<'static, str> {
@@ -171,6 +194,9 @@ pub fn default_keymap() -> Cow<'static, str> {
 }
 
 pub const VIM_KEYMAP_PATH: &str = "keymaps/vim.json";
+
+/// EVB IDE bindings, layered over the base keymap.
+pub const EVB_KEYMAP_PATH: &str = "keymaps/evb.json";
 
 pub fn vim_keymap() -> Cow<'static, str> {
     asset_str::<SettingsAssets>(VIM_KEYMAP_PATH)

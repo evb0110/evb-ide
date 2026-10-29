@@ -1,0 +1,44 @@
+// EVB IDE defaults.
+//
+// This layer is merged over `default.json` at startup (see
+// `settings::app_default_settings`). Keep EVB-specific defaults here so that
+// `default.json` stays identical to upstream Zed and rebases cleanly.
+// User settings still override everything in this file.
+{
+  "base_keymap": "JetBrains",
+  "theme": {
+    "mode": "system",
+    "light": "IntelliJ Light",
+    "dark": "IntelliJ Dark",
+  },
+  "buffer_font_family": "JetBrains Mono",
+  "buffer_font_size": 13,
+  "buffer_line_height": { "custom": 1.4 },
+  "ui_font_family": ".SystemUIFont",
+  "ui_font_size": 13,
+  "title_bar": {
+    "show_onboarding_banner": false,
+    "show_sign_in": false,
+    "show_user_picture": false,
+  },
+  "collaboration_panel": {
+    "button": false,
+  },
+  "git_panel": {
+    "dock": "left",
+  },
+  "telemetry": {
+    "diagnostics": false,
+    "metrics": false,
+  },
+  // AI features are off by default; set to false in user settings to bring
+  // back the agent panel and edit predictions.
+  "disable_ai": true,
+  "auto_update": false,
+  "show_call_status_icon": false,
+  "auto_install_extensions": {
+    "html": true,
+    "vue": true,
+    "php": true,
+  },
+}
