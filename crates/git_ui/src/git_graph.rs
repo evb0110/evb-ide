@@ -2273,7 +2273,9 @@ impl GitGraph {
                     // when exactly one branch has that short name.
                     let legacy_selection = selected
                         .as_ref()
-                        .filter(|selected| !selected.starts_with("refs/"))
+                        .filter(|selected| {
+                            !branches.iter().any(|branch| &branch.ref_name == *selected)
+                        })
                         .and_then(|selected| {
                             let mut matches = branches.iter().filter(|branch| {
                                 short_ref_name(&branch.ref_name) == selected.as_ref()
@@ -2284,7 +2286,17 @@ impl GitGraph {
                     Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
                         let choose = |log_source: LogSource| {
                             let git_graph = git_graph.clone();
+                            // Choosing the branch a legacy short-name selection
+                            // already shows keeps the graph (and its selected
+                            // commit) instead of reloading the same history.
+                            let already_shown = matches!(
+                                (&log_source, &legacy_selection),
+                                (LogSource::Branch(ref_name), Some(legacy)) if ref_name == legacy
+                            );
                             move |_: &mut Window, cx: &mut App| {
+                                if already_shown {
+                                    return;
+                                }
                                 git_graph
                                     .update(cx, |git_graph, cx| {
                                         git_graph.set_log_source(log_source.clone(), cx)

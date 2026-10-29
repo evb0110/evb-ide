@@ -10,6 +10,7 @@ use std::{borrow::Cow, path::Path, sync::Arc};
 use collections::HashMap;
 use dap::adapters::DebugAdapterName;
 use fs::Fs;
+use futures::{FutureExt as _, future::Shared};
 use gpui::{
     Action, App, AppContext as _, Context, Entity, EntityId, Global, IntoElement, ParentElement,
     Render, SharedString, Styled, Subscription, Task, TaskExt as _, WeakEntity, Window, actions,
@@ -312,7 +313,11 @@ pub struct RunController {
     /// cancelled: a save must not be cut off mid-write, and a superseded launch
     /// that already asked for a terminal still has to kill it when it arrives.
     /// Each removes itself when done; Stop is a flag the launch checks.
-    launches: HashMap<usize, Task<()>>,
+    launches: HashMap<usize, Shared<Task<()>>>,
+    /// The latest launch of each configuration. A rerun waits for it before
+    /// saving or spawning, so two generations never write the same files or
+    /// replace the same terminal at once.
+    latest_launch: HashMap<SharedString, Shared<Task<()>>>,
     next_generation: usize,
     menu_handle: PopoverMenuHandle<ContextMenu>,
     refresh_task: Task<()>,
@@ -351,6 +356,7 @@ impl RunController {
             selected: None,
             runs: HashMap::default(),
             launches: HashMap::default(),
+            latest_launch: HashMap::default(),
             next_generation: 0,
             menu_handle: PopoverMenuHandle::default(),
             refresh_task: Task::ready(()),
@@ -630,7 +636,12 @@ impl RunController {
 
         let project = self.project.clone();
         let workspace = workspace.downgrade();
+        let previous_launch = self.latest_launch.get(&configuration.id).cloned();
+        let configuration_id = configuration.id.clone();
         let launch = cx.spawn_in(window, async move |this, cx| {
+            if let Some(previous_launch) = previous_launch {
+                previous_launch.await;
+            }
             let task_contexts = task_contexts.await;
             let task_context = task_context_for(&configuration, &task_contexts)
                 .cloned()
@@ -692,7 +703,9 @@ impl RunController {
             this.update(cx, |this, _| this.launches.remove(&generation))
                 .log_err();
         });
-        self.launches.insert(generation, launch);
+        let launch = launch.shared();
+        self.launches.insert(generation, launch.clone());
+        self.latest_launch.insert(configuration_id, launch);
     }
 
     /// Whether the launch of `generation` may still start its process: it is

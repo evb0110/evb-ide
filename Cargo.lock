@@ -5901,6 +5901,7 @@ dependencies = [
  "db",
  "editor",
  "fs",
+ "futures 0.3.34",
  "gpui",
  "log",
  "project",
