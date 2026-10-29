@@ -23,7 +23,7 @@
   // WebStorm renders JetBrains Mono without ligatures by default.
   "buffer_font_features": { "calt": false },
   "buffer_line_height": { "custom": 1.4 },
-  "ui_font_family": ".SystemUIFont",
+  "ui_font_family": "Inter",
   "ui_font_size": 13,
   "title_bar": {
     "show_onboarding_banner": false,

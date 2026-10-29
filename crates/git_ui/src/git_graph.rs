@@ -54,11 +54,12 @@ use theme::AccentColors;
 use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
     Chip, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, ContextMenuEntry, DiffStat,
-    Disclosure, Divider, HeaderResizeInfo, HighlightedLabel, IndentGuideColors, ListItem,
-    ListItemSpacing, RedistributableColumnsState, ScrollableHandle, Table, TableInteractionState,
-    TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar, bind_redistributable_columns,
-    prelude::*, redistribute_hidden_fractions, redistribute_hidden_widths,
-    render_redistributable_columns_resize_handles, render_table_header, table_row::TableRow,
+    Disclosure, Divider, HeaderResizeInfo, HighlightedLabel, IconPosition, IndentGuideColors,
+    ListItem, ListItemSpacing, PopoverMenu, RedistributableColumnsState, ScrollableHandle, Table,
+    TableInteractionState, TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar,
+    bind_redistributable_columns, prelude::*, redistribute_hidden_fractions,
+    redistribute_hidden_widths, render_redistributable_columns_resize_handles, render_table_header,
+    table_row::TableRow,
 };
 use util::{ResultExt, debug_panic};
 use workspace::{
@@ -2222,6 +2223,101 @@ impl GitGraph {
         cx.notify();
     }
 
+    fn set_log_source(&mut self, log_source: LogSource, cx: &mut Context<Self>) {
+        if self.log_source == log_source {
+            return;
+        }
+        self.log_source = log_source;
+        self.selected_entry_idx = None;
+        self.hovered_entry_idx = None;
+        self.selected_commit_diff = None;
+        self.selected_commit_message = None;
+        self.invalidate_state(cx);
+    }
+
+    /// WebStorm's "Branch" filter of the Git log: show the history of every
+    /// branch, or of one branch.
+    fn render_branch_filter(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.is_path_history() {
+            return None;
+        }
+        let branches = self
+            .get_repository(cx)
+            .map(|repository| repository.read(cx).branch_list.clone())
+            .unwrap_or_default();
+        let selected = match &self.log_source {
+            LogSource::Branch(name) => Some(name.clone()),
+            _ => None,
+        };
+        let label: SharedString = match &selected {
+            Some(name) => format!("Branch: {name}").into(),
+            None => "Branch: All".into(),
+        };
+        let git_graph = cx.weak_entity();
+        Some(
+            PopoverMenu::new("git-graph-branch-filter")
+                .menu(move |window, cx| {
+                    let git_graph = git_graph.clone();
+                    let branches = branches.clone();
+                    let selected = selected.clone();
+                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        let choose = |log_source: LogSource| {
+                            let git_graph = git_graph.clone();
+                            move |_: &mut Window, cx: &mut App| {
+                                git_graph
+                                    .update(cx, |git_graph, cx| {
+                                        git_graph.set_log_source(log_source.clone(), cx)
+                                    })
+                                    .ok();
+                            }
+                        };
+                        menu = menu.toggleable_entry(
+                            "All",
+                            selected.is_none(),
+                            IconPosition::Start,
+                            None,
+                            choose(LogSource::All),
+                        );
+                        for remote in [false, true] {
+                            let mut names = branches
+                                .iter()
+                                .filter(|branch| branch.is_remote() == remote)
+                                .map(|branch| SharedString::from(branch.name().to_string()))
+                                .collect::<Vec<_>>();
+                            if names.is_empty() {
+                                continue;
+                            }
+                            names.sort();
+                            menu = menu
+                                .separator()
+                                .header(if remote { "Remote" } else { "Local" });
+                            for name in names {
+                                menu = menu.toggleable_entry(
+                                    name.clone(),
+                                    selected.as_ref() == Some(&name),
+                                    IconPosition::Start,
+                                    None,
+                                    choose(LogSource::Branch(name)),
+                                );
+                            }
+                        }
+                        menu
+                    }))
+                })
+                .trigger(
+                    Button::new("git-graph-branch-filter-trigger", label)
+                        .label_size(LabelSize::Small)
+                        .end_icon(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                )
+                .anchor(Anchor::TopLeft)
+                .into_any_element(),
+        )
+    }
+
     fn search(&mut self, query: SharedString, cx: &mut Context<Self>) {
         let Some(repo) = self.get_repository(cx) else {
             return;
@@ -2846,6 +2942,7 @@ impl GitGraph {
     }
 
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let branch_filter = self.render_branch_filter(cx);
         let color = cx.theme().colors();
         let query_focus_handle = self
             .search_state
@@ -2864,6 +2961,7 @@ impl GitGraph {
             .gap_1p5()
             .border_b_1()
             .border_color(color.border_variant)
+            .children(branch_filter)
             .child(
                 h_flex()
                     .h_8()
