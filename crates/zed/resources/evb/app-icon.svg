@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1F2A44"/>
+      <stop offset="1" stop-color="#0B1020"/>
+    </linearGradient>
+    <linearGradient id="stripe" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3574F0"/>
+      <stop offset="0.55" stop-color="#9B59FF"/>
+      <stop offset="1" stop-color="#FF7A45"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS squircle, ~85% of the canvas with ~8% margins -->
+  <path d="M512 82 C 845 82 942 179 942 512 C 942 845 845 942 512 942 C 179 942 82 845 82 512 C 82 179 179 82 512 82 Z" fill="url(#bg)"/>
+  <rect x="238" y="292" width="548" height="56" rx="28" fill="url(#stripe)"/>
+  <text x="512" y="690" text-anchor="middle" font-family="JetBrains Mono, Menlo, monospace" font-weight="800" font-size="300" letter-spacing="-12" fill="#FFFFFF">evb</text>
+  <rect x="238" y="738" width="190" height="40" rx="20" fill="#FFFFFF" opacity="0.85"/>
+</svg>

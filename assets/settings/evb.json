@@ -13,6 +13,8 @@
   },
   "buffer_font_family": "JetBrains Mono",
   "buffer_font_size": 13,
+  // WebStorm renders JetBrains Mono without ligatures by default.
+  "buffer_font_features": { "calt": false },
   "buffer_line_height": { "custom": 1.4 },
   "ui_font_family": ".SystemUIFont",
   "ui_font_size": 13,
@@ -20,6 +22,10 @@
     "show_onboarding_banner": false,
     "show_sign_in": false,
     "show_user_picture": false,
+  },
+  // WebStorm keeps Project and Commit as tool windows on the left.
+  "project_panel": {
+    "dock": "left",
   },
   "collaboration_panel": {
     "button": false,

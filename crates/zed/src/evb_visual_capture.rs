@@ -243,6 +243,15 @@ mod capture {
                 cx.bind_keys(bindings);
             }
         });
+        cx.update(|cx| {
+            use theme::ActiveTheme as _;
+            app_state.languages.set_theme(cx.theme().clone());
+            cx.observe_global::<theme::GlobalTheme>({
+                let languages = app_state.languages.clone();
+                move |cx| languages.set_theme(cx.theme().clone())
+            })
+            .detach();
+        });
         cx.run_until_parked();
 
         let output_dir = PathBuf::from(
@@ -272,7 +281,7 @@ mod capture {
         cx.dispatch_action(any_window, evb_run::ChooseConfiguration);
         settle(&mut cx, 5);
         save(&mut cx, any_window, &output_dir, "02-run-configurations")?;
-        cx.dispatch_action(any_window, menu::Cancel);
+        cx.dispatch_action(any_window, evb_run::ChooseConfiguration);
         settle(&mut cx, 3);
 
         cx.dispatch_action(any_window, evb_run::Run);
@@ -296,17 +305,17 @@ mod capture {
         wait_real_time(&mut cx, Duration::from_secs(3));
         save(&mut cx, any_window, &output_dir, "06-git-log")?;
 
-        cx.update(|cx| {
-            SettingsStore::update_global(cx, |store, cx| {
-                store.update_user_settings(cx, |settings| {
-                    settings.theme.theme = Some(settings::ThemeSelection::Static(
-                        settings::ThemeName("IntelliJ Dark".into()),
-                    ));
-                });
-            });
-        });
+        set_theme(&mut cx, "IntelliJ Dark");
         settle(&mut cx, 5);
         save(&mut cx, any_window, &output_dir, "07-git-log-dark")?;
+
+        open_file(&workspace, any_window, "app/components/AppBar.vue", &mut cx)?;
+        wait_real_time(&mut cx, Duration::from_secs(2));
+        save(&mut cx, any_window, &output_dir, "08-vue-dark")?;
+
+        set_theme(&mut cx, "IntelliJ Light");
+        settle(&mut cx, 5);
+        save(&mut cx, any_window, &output_dir, "09-vue-light")?;
 
         println!("Captures written to {}", output_dir.display());
         Ok(())
@@ -333,6 +342,18 @@ mod capture {
                 workspace.update(cx, |workspace, cx| f(workspace, window, cx))
             })
         }
+    }
+
+    fn set_theme(cx: &mut VisualTestAppContext, name: &str) {
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.theme.theme = Some(settings::ThemeSelection::Static(
+                        settings::ThemeName(name.into()),
+                    ));
+                });
+            });
+        });
     }
 
     fn settle(cx: &mut VisualTestAppContext, ticks: usize) {

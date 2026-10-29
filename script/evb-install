@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Builds EVB IDE in release mode, assembles "EVB IDE.app", signs it ad hoc and
+# installs it into /Applications (or the directory given with -d).
+#
+# Unlike script/bundle-mac this needs no cargo-bundle, Apple identity or
+# notarization, and uses the system git instead of a bundled one.
+#
+# Usage: script/evb-install [-n] [-d DIR]
+#   -n      build and assemble only; do not install
+#   -d DIR  install into DIR instead of /Applications
+
+set -euo pipefail
+
+install_dir="/Applications"
+install=true
+while getopts 'nd:h' flag; do
+    case "$flag" in
+        n) install=false ;;
+        d) install_dir="$OPTARG" ;;
+        h)
+            sed -n '2,12p' "$0"
+            exit 0
+            ;;
+        *) exit 2 ;;
+    esac
+done
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+
+app_name="EVB IDE"
+bundle_id="dev.evb.EVB-IDE"
+executable="evb-ide"
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)"
+commit="$(git rev-parse --short HEAD)"
+
+export ZED_RELEASE_CHANNEL=stable
+export ZED_COMMIT_SHA="$(git rev-parse HEAD)"
+export MACOSX_DEPLOYMENT_TARGET=12.0
+export CXXFLAGS="-stdlib=libc++"
+
+echo "Building $app_name $version ($commit)"
+cargo --config .cargo/bundle-config.toml build --release \
+    --package zed --bin "$executable" \
+    --package cli
+
+out_dir="target/evb-bundle"
+app_path="$out_dir/$app_name.app"
+rm -rf "$app_path"
+mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+
+cp "target/release/$executable" "$app_path/Contents/MacOS/$executable"
+cp "target/release/cli" "$app_path/Contents/MacOS/cli"
+cp crates/zed/resources/Document.icns "$app_path/Contents/Resources/Document.icns"
+
+icon_source="crates/zed/resources/evb/app-icon.png"
+iconset="$out_dir/AppIcon.iconset"
+rm -rf "$iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$icon_source" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    double=$((size * 2))
+    sips -z "$double" "$double" "$icon_source" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$app_path/Contents/Resources/AppIcon.icns"
+rm -rf "$iconset"
+
+python3 - "$app_path/Contents/Info.plist" "$app_name" "$bundle_id" "$executable" "$version" "$commit" <<'PY'
+import glob
+import plistlib
+import sys
+
+path, name, bundle_id, executable, version, commit = sys.argv[1:]
+info = {
+    "CFBundleDevelopmentRegion": "en",
+    "CFBundleDisplayName": name,
+    "CFBundleExecutable": executable,
+    "CFBundleIconFile": "AppIcon",
+    "CFBundleIdentifier": bundle_id,
+    "CFBundleInfoDictionaryVersion": "6.0",
+    "CFBundleName": name,
+    "CFBundlePackageType": "APPL",
+    "CFBundleShortVersionString": version,
+    "CFBundleVersion": f"{version}+{commit}",
+    "LSApplicationCategoryType": "public.app-category.developer-tools",
+    "LSMinimumSystemVersion": "12.0",
+    "NSHighResolutionCapable": True,
+    "NSPrincipalClass": "NSApplication",
+    "CFBundleURLTypes": [
+        {"CFBundleURLName": bundle_id, "CFBundleURLSchemes": ["evb-ide"]}
+    ],
+}
+# The fragments are bare <key>/<value> pairs, as cargo-bundle expects them.
+for fragment in sorted(glob.glob("crates/zed/resources/info/*.plist")):
+    with open(fragment, "rb") as handle:
+        body = handle.read()
+    wrapped = (
+        b'<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+        + body
+        + b"</dict></plist>"
+    )
+    for key, value in plistlib.loads(wrapped).items():
+        if isinstance(value, str):
+            value = value.replace("Zed", name)
+        info.setdefault(key, value)
+with open(path, "wb") as handle:
+    plistlib.dump(info, handle)
+PY
+
+codesign --force --sign - "$app_path/Contents/MacOS/cli"
+codesign --force --sign - --entitlements crates/zed/resources/zed.entitlements \
+    "$app_path/Contents/MacOS/$executable"
+codesign --force --sign - --entitlements crates/zed/resources/zed.entitlements "$app_path"
+codesign --verify --strict "$app_path"
+echo "Assembled $app_path"
+
+if [[ "$install" != true ]]; then
+    exit 0
+fi
+
+target="$install_dir/$app_name.app"
+if pgrep -f "$target/Contents/MacOS/$executable" >/dev/null; then
+    echo "$app_name is running from $target; quit it and run this script again." >&2
+    exit 1
+fi
+rm -rf "$target"
+ditto "$app_path" "$target"
+echo "Installed $target"
