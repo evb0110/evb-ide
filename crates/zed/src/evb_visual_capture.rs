@@ -233,14 +233,27 @@ mod capture {
                 &app_state.client.clone().into(),
             );
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
-            if let Some(bindings) = settings::KeymapFile::load_asset(
-                settings::EVB_KEYMAP_PATH,
-                Some(settings::KeybindSource::Base),
-                cx,
-            )
-            .log_err()
-            {
-                cx.bind_keys(bindings);
+            // Same layering as `zed::load_default_keymap` with the JetBrains base keymap.
+            for (path, source) in [
+                (
+                    settings::DEFAULT_KEYMAP_PATH,
+                    settings::KeybindSource::Default,
+                ),
+                (
+                    "keymaps/macos/jetbrains.json",
+                    settings::KeybindSource::Base,
+                ),
+                (settings::EVB_KEYMAP_PATH, settings::KeybindSource::Base),
+                (
+                    settings::SPECIFIC_OVERRIDES_KEYMAP_PATH,
+                    settings::KeybindSource::Default,
+                ),
+            ] {
+                if let Some(bindings) =
+                    settings::KeymapFile::load_asset(path, Some(source), cx).log_err()
+                {
+                    cx.bind_keys(bindings);
+                }
             }
         });
         cx.update(|cx| {
@@ -302,6 +315,24 @@ mod capture {
         cx.dispatch_action(any_window, evb_run::Stop);
         wait_real_time(&mut cx, Duration::from_secs(2));
         save(&mut cx, any_window, &output_dir, "04-stopped")?;
+
+        workspace
+            .update_in_window(any_window, &mut cx, |workspace, window, cx| {
+                workspace.focus_panel::<terminal_view::terminal_panel::TerminalPanel>(window, cx);
+            })
+            .log_err();
+        settle(&mut cx, 3);
+        cx.simulate_keystrokes(any_window, "cmd-j");
+        settle(&mut cx, 3);
+        let open_after_terminal = bottom_dock_open(&workspace, &mut cx);
+        save(&mut cx, any_window, &output_dir, "04b-cmd-j-from-terminal")?;
+        cx.simulate_keystrokes(any_window, "cmd-j");
+        settle(&mut cx, 3);
+        let open_after_editor = bottom_dock_open(&workspace, &mut cx);
+        println!(
+            "cmd-j: bottom dock open after pressing it in the terminal: {open_after_terminal}, \
+             then in the editor: {open_after_editor}"
+        );
 
         workspace
             .update_in_window(any_window, &mut cx, |workspace, window, cx| {
@@ -373,6 +404,16 @@ mod capture {
                 workspace.update(cx, |workspace, cx| f(workspace, window, cx))
             })
         }
+    }
+
+    fn bottom_dock_open(workspace: &Entity<Workspace>, cx: &mut VisualTestAppContext) -> bool {
+        cx.update(|cx| {
+            workspace
+                .read(cx)
+                .dock_at_position(workspace::dock::DockPosition::Bottom)
+                .read(cx)
+                .is_open()
+        })
     }
 
     fn right_click(

@@ -125,8 +125,32 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) {
         let assistant_enabled = self.assistant_enabled;
+        let workspace = self.workspace.clone();
         terminal_pane.update(cx, |pane, cx| {
             pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
+                // Like WebStorm's tool windows, the panel can always be hidden from its header.
+                let hide_button = {
+                    let workspace = workspace.clone();
+                    IconButton::new("hide_terminal_panel", IconName::Dash)
+                        .icon_size(IconSize::Small)
+                        .on_click(move |_, window, cx| {
+                            workspace
+                                .update(cx, |workspace, cx| {
+                                    let position = workspace.all_docks().iter().find_map(|dock| {
+                                        let dock = dock.read(cx);
+                                        (dock.is_open() && dock.panel::<TerminalPanel>().is_some())
+                                            .then(|| dock.position())
+                                    });
+                                    if let Some(position) = position {
+                                        workspace.toggle_dock(position, window, cx);
+                                    }
+                                })
+                                .log_err();
+                        })
+                        .tooltip(|_window, cx| {
+                            Tooltip::for_action("Hide", &workspace::CloseActiveDock, cx)
+                        })
+                };
                 let split_context = pane
                     .active_item()
                     .and_then(|item| item.downcast::<TerminalView>())
@@ -139,7 +163,7 @@ impl TerminalPanel {
                     && !pane.context_menu_focused(window, cx)
                     && !has_focused_rename_editor
                 {
-                    return (None, None);
+                    return (None, Some(hide_button.into_any_element()));
                 }
                 let focus_handle = pane.focus_handle(cx);
                 let right_children = h_flex()
@@ -219,6 +243,7 @@ impl TerminalPanel {
                                 )
                             })
                     })
+                    .child(hide_button)
                     .into_any_element()
                     .into();
                 (None, right_children)

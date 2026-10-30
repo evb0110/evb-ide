@@ -8,6 +8,7 @@
       "ctrl-d": "evb_run::Debug",
       "cmd-f2": "evb_run::Stop",
       "ctrl-alt-r": "evb_run::ChooseConfiguration",
+      "cmd-j": "workspace::ToggleBottomDock",
     },
   },
   {
@@ -18,6 +19,10 @@
       "ctrl-r": "evb_run::Run",
       "ctrl-d": "evb_run::Debug",
       "cmd-f2": "evb_run::Stop",
+      // JetBrains puts Hover on cmd-j; move it to F1 (WebStorm's Quick
+      // Documentation) so cmd-j toggles the bottom dock as in Zed.
+      "cmd-j": "workspace::ToggleBottomDock",
+      "f1": "editor::Hover",
     },
   },
   {
