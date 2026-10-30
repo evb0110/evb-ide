@@ -36,6 +36,7 @@
     // Enter adds a line in the commit message; cmd-enter saves it.
     "context": "CommitMessageModal > Editor",
     "bindings": {
+      "enter": "editor::Newline",
       "cmd-enter": "menu::Confirm",
     },
   },

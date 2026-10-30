@@ -13,9 +13,10 @@ use ui::{ContextMenu, KeyBinding, prelude::*};
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace, notifications::DetachAndPromptErr as _};
 
-/// Replaces the first `pick` of an interactive rebase todo list with `reword`.
-const REWORD_SEQUENCE_EDITOR: &str =
-    r#"sh -c 'sed "1s/^pick /reword /" "$1" > "$1.evb" && mv "$1.evb" "$1"' evb-sequence-editor"#;
+/// Turns the first line of an interactive rebase todo list into `reword`, after
+/// checking that it picks the commit in `EVB_REWORD_SHA`; any other todo list
+/// fails the rebase instead of rewording the wrong commit.
+const REWORD_SEQUENCE_EDITOR: &str = r#"sh -c 'read -r command sha rest < "$1" && [ "$command" = pick ] && [ -n "$sha" ] && case "$EVB_REWORD_SHA" in "$sha"*) ;; *) exit 1 ;; esac && sed "1s/^pick /reword /" "$1" > "$1.evb" && mv "$1.evb" "$1"' evb-sequence-editor"#;
 /// Writes `EVB_COMMIT_MESSAGE` into the file git asks to edit.
 const MESSAGE_EDITOR: &str =
     r#"sh -c 'printf "%s\n" "$EVB_COMMIT_MESSAGE" > "$1"' evb-commit-message-editor"#;
@@ -65,15 +66,6 @@ impl CommitTarget {
             (left.is_remote(), left.name()).cmp(&(right.is_remote(), right.name()))
         });
         branches
-    }
-
-    fn current_branch_name(&self, cx: &App) -> Option<SharedString> {
-        let repository = self.repository.upgrade()?;
-        let repository = repository.read(cx);
-        repository
-            .branch
-            .as_ref()
-            .map(|branch| SharedString::from(branch.name().to_string()))
     }
 
     /// Runs one git command and reports success in a toast, failure in a prompt.
@@ -164,14 +156,170 @@ async fn confirm(
     Ok(answer.await? == 0)
 }
 
+/// Where HEAD pointed when the user was asked to confirm an operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HeadState {
+    sha: String,
+    branch: Option<String>,
+}
+
+impl HeadState {
+    fn label(&self) -> String {
+        match &self.branch {
+            Some(branch) => format!("'{branch}'"),
+            None => "HEAD".to_string(),
+        }
+    }
+
+    fn label_with_commit(&self) -> String {
+        let short_sha = self.sha.get(..7).unwrap_or(&self.sha);
+        format!("{} at {short_sha}", self.label())
+    }
+}
+
+async fn read_head(
+    repository: &Entity<Repository>,
+    cx: &mut AsyncWindowContext,
+) -> Result<HeadState> {
+    let sha = git(
+        repository,
+        "Reading HEAD",
+        args(["rev-parse", "--verify", "HEAD"]),
+        HashMap::default(),
+        cx,
+    )
+    .await?
+    .trim()
+    .to_string();
+    let branch = git(
+        repository,
+        "Reading HEAD",
+        args(["symbolic-ref", "-q", "--short", "HEAD"]),
+        HashMap::default(),
+        cx,
+    )
+    .await
+    .ok()
+    .map(|branch| branch.trim().to_string())
+    .filter(|branch| !branch.is_empty());
+    Ok(HeadState { sha, branch })
+}
+
+/// Fails when HEAD moved since `expected` was read, so an operation confirmed
+/// for one branch never runs on another.
+async fn ensure_head_unchanged(
+    repository: &Entity<Repository>,
+    expected: &HeadState,
+    cx: &mut AsyncWindowContext,
+) -> Result<()> {
+    let current = read_head(repository, cx).await?;
+    anyhow::ensure!(
+        current == *expected,
+        "HEAD moved from {} to {} while the operation was waiting; nothing was changed.",
+        expected.label_with_commit(),
+        current.label_with_commit()
+    );
+    Ok(())
+}
+
+/// The rebase, merge, cherry-pick or revert that is stopped in the repository, if any.
+async fn operation_in_progress(
+    repository: &Entity<Repository>,
+    cx: &mut AsyncWindowContext,
+) -> Result<Option<&'static str>> {
+    let work_directory = repository.update(cx, |repository, _| {
+        repository.work_directory_abs_path.to_path_buf()
+    });
+    for (git_path, operation) in [
+        ("rebase-merge", "A rebase"),
+        ("rebase-apply", "A rebase"),
+        ("MERGE_HEAD", "A merge"),
+        ("CHERRY_PICK_HEAD", "A cherry-pick"),
+        ("REVERT_HEAD", "A revert"),
+    ] {
+        let path = git(
+            repository,
+            "Checking repository state",
+            args(["rev-parse", "--git-path", git_path]),
+            HashMap::default(),
+            cx,
+        )
+        .await?;
+        let path = work_directory.join(path.trim());
+        if cx.background_spawn(async move { path.exists() }).await {
+            return Ok(Some(operation));
+        }
+    }
+    Ok(None)
+}
+
+async fn ensure_no_operation_in_progress(
+    repository: &Entity<Repository>,
+    cx: &mut AsyncWindowContext,
+) -> Result<()> {
+    if let Some(operation) = operation_in_progress(repository, cx).await? {
+        anyhow::bail!("{operation} is in progress; finish or abort it first.");
+    }
+    Ok(())
+}
+
+/// Asks before rewriting a commit that a remote branch contains. Returns
+/// whether to go ahead.
+async fn confirm_rewriting_pushed_commit(
+    target: &CommitTarget,
+    repository: &Entity<Repository>,
+    action: &str,
+    cx: &mut AsyncWindowContext,
+) -> Result<bool> {
+    let pushed_to = git(
+        repository,
+        "Checking history",
+        args([
+            "branch",
+            "-r",
+            "--contains",
+            &target.sha.to_string(),
+            "--format=%(refname:short)",
+        ]),
+        HashMap::default(),
+        cx,
+    )
+    .await?;
+    let pushed_to = pushed_to
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if pushed_to.is_empty() {
+        return Ok(true);
+    }
+    confirm(
+        PromptLevel::Warning,
+        format!(
+            "{} is already pushed to {}",
+            target.short_sha(),
+            pushed_to.join(", ")
+        ),
+        Some(format!(
+            "{action} it means you will have to force push. Continue?"
+        )),
+        "Continue",
+        cx,
+    )
+    .await
+}
+
 /// Checks that rewriting history from `target` is possible with a linear
 /// rebase and asks before rewriting pushed commits. Returns the rebase base
-/// argument, or `None` when the user cancelled.
+/// argument and the HEAD the user agreed to rewrite, or `None` when the user
+/// cancelled.
 async fn prepare_history_rewrite(
     target: &CommitTarget,
     repository: &Entity<Repository>,
     cx: &mut AsyncWindowContext,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, HeadState)>> {
+    ensure_no_operation_in_progress(repository, cx).await?;
+    let head = read_head(repository, cx).await?;
     let sha = target.sha.to_string();
     let short_sha = target.short_sha();
     let parent_count = parent_count(repository, target.sha, cx).await?;
@@ -200,46 +348,20 @@ async fn prepare_history_rewrite(
         merges.trim().is_empty(),
         "The commits after {short_sha} include merge commits, which can't be rewritten here."
     );
-    let pushed_to = git(
-        repository,
-        "Checking history",
-        args([
-            "branch",
-            "-r",
-            "--contains",
-            &sha,
-            "--format=%(refname:short)",
-        ]),
-        HashMap::default(),
-        cx,
-    )
-    .await?;
-    let pushed_to = pushed_to
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    if !pushed_to.is_empty()
-        && !confirm(
-            PromptLevel::Warning,
-            format!("{short_sha} is already pushed to {}", pushed_to.join(", ")),
-            Some("Rewriting it means you will have to force push. Continue?".to_string()),
-            "Continue",
-            cx,
-        )
-        .await?
-    {
+    if !confirm_rewriting_pushed_commit(target, repository, "Rewriting", cx).await? {
         return Ok(None);
     }
-    Ok(Some(if parent_count == 0 {
+    let base = if parent_count == 0 {
         "--root".to_string()
     } else {
         format!("{sha}^")
-    }))
+    };
+    Ok(Some((base, head)))
 }
 
 /// Runs a rebase and aborts it when it fails, so a failed rewrite leaves the
-/// branch as it was.
+/// branch as it was. It refuses to start while another operation is stopped,
+/// so the abort only ever undoes this rebase.
 async fn rebase(
     repository: &Entity<Repository>,
     status: &str,
@@ -247,10 +369,20 @@ async fn rebase(
     env: HashMap<String, String>,
     cx: &mut AsyncWindowContext,
 ) -> Result<()> {
-    let mut command = args(["-c", "commit.cleanup=whitespace", "rebase"]);
+    ensure_no_operation_in_progress(repository, cx).await?;
+    let mut command = args([
+        "-c",
+        "commit.cleanup=whitespace",
+        "-c",
+        "rebase.abbreviateCommands=false",
+        "rebase",
+    ]);
     command.extend(rebase_args);
     let result = git(repository, status, command, env, cx).await;
     if let Err(error) = result {
+        if operation_in_progress(repository, cx).await?.is_none() {
+            return Err(error.context("The rebase failed"));
+        }
         git(
             repository,
             "Aborting rebase",
@@ -347,16 +479,14 @@ pub(crate) fn checkout_revision(target: &CommitTarget, window: &mut Window, cx: 
 
 pub(crate) fn reset_current_branch(target: &CommitTarget, window: &mut Window, cx: &mut App) {
     let target = target.clone();
-    let branch = target
-        .current_branch_name(cx)
-        .map(|name| format!("'{name}'"))
-        .unwrap_or_else(|| "HEAD".to_string());
     window
         .spawn(cx, async move |cx| {
             let repository = target
                 .repository
                 .upgrade()
                 .context("the repository was closed")?;
+            let head = read_head(&repository, cx).await?;
+            let branch = head.label();
             let modes = ["Soft", "Mixed", "Hard", "Keep", "Cancel"];
             let answer = cx.update(|window, cx| {
                 window.prompt(
@@ -376,6 +506,7 @@ pub(crate) fn reset_current_branch(target: &CommitTarget, window: &mut Window, c
                 return Ok(());
             };
             let flag = format!("--{}", mode.to_lowercase());
+            ensure_head_unchanged(&repository, &head, cx).await?;
             git(
                 &repository,
                 &format!("Resetting to {}", target.short_sha()),
@@ -404,44 +535,25 @@ pub(crate) fn undo_commit(target: &CommitTarget, window: &mut Window, cx: &mut A
                 .repository
                 .upgrade()
                 .context("the repository was closed")?;
+            ensure_no_operation_in_progress(&repository, cx).await?;
+            let head = read_head(&repository, cx).await?;
+            let sha = target.sha.to_string();
+            anyhow::ensure!(
+                head.sha == sha,
+                "Only the latest commit of the current branch can be undone."
+            );
             anyhow::ensure!(
                 parent_count(&repository, target.sha, cx).await? == 1,
                 "Only a commit with one parent can be undone."
             );
-            let pushed_to = git(
-                &repository,
-                "Checking history",
-                args([
-                    "branch",
-                    "-r",
-                    "--contains",
-                    &target.sha.to_string(),
-                    "--format=%(refname:short)",
-                ]),
-                HashMap::default(),
-                cx,
-            )
-            .await?;
-            if !pushed_to.trim().is_empty()
-                && !confirm(
-                    PromptLevel::Warning,
-                    format!(
-                        "{} is already pushed to {}",
-                        target.short_sha(),
-                        pushed_to.trim().replace('\n', ", ")
-                    ),
-                    Some("Undo it anyway? You will have to force push.".to_string()),
-                    "Undo",
-                    cx,
-                )
-                .await?
-            {
+            if !confirm_rewriting_pushed_commit(&target, &repository, "Undoing", cx).await? {
                 return Ok(());
             }
+            ensure_head_unchanged(&repository, &head, cx).await?;
             git(
                 &repository,
                 "Undoing commit",
-                args(["reset", "--soft", "HEAD^"]),
+                args(["reset", "--soft", &format!("{sha}^")]),
                 HashMap::default(),
                 cx,
             )
@@ -470,12 +582,9 @@ pub(crate) fn drop_commit(target: &CommitTarget, window: &mut Window, cx: &mut A
                 parent_count(&repository, target.sha, cx).await? == 1,
                 "Only a commit with one parent can be dropped."
             );
-            if prepare_history_rewrite(&target, &repository, cx)
-                .await?
-                .is_none()
-            {
+            let Some((_, head)) = prepare_history_rewrite(&target, &repository, cx).await? else {
                 return Ok(());
-            }
+            };
             if !confirm(
                 PromptLevel::Warning,
                 format!("Drop {}?", target.short_sha()),
@@ -488,10 +597,17 @@ pub(crate) fn drop_commit(target: &CommitTarget, window: &mut Window, cx: &mut A
                 return Ok(());
             }
             let sha = target.sha.to_string();
+            ensure_head_unchanged(&repository, &head, cx).await?;
             rebase(
                 &repository,
                 &format!("Dropping {}", target.short_sha()),
-                args(["--autostash", "--onto", &format!("{sha}^"), &sha]),
+                args([
+                    "--autostash",
+                    "--no-rebase-merges",
+                    "--onto",
+                    &format!("{sha}^"),
+                    &sha,
+                ]),
                 HashMap::default(),
                 cx,
             )
@@ -531,10 +647,12 @@ pub(crate) fn fixup(target: &CommitTarget, window: &mut Window, cx: &mut App) {
                 "Stage the changes to fold into {} first.",
                 target.short_sha()
             );
-            let Some(base) = prepare_history_rewrite(&target, &repository, cx).await? else {
+            let Some((base, head)) = prepare_history_rewrite(&target, &repository, cx).await?
+            else {
                 return Ok(());
             };
             let sha = target.sha.to_string();
+            ensure_head_unchanged(&repository, &head, cx).await?;
             git(
                 &repository,
                 "Committing fixup",
@@ -546,7 +664,13 @@ pub(crate) fn fixup(target: &CommitTarget, window: &mut Window, cx: &mut App) {
             rebase(
                 &repository,
                 &format!("Folding changes into {}", target.short_sha()),
-                args(["-i", "--autosquash", "--autostash", &base]),
+                args([
+                    "-i",
+                    "--autosquash",
+                    "--autostash",
+                    "--no-rebase-merges",
+                    &base,
+                ]),
                 HashMap::default(),
                 cx,
             )
@@ -583,20 +707,38 @@ pub(crate) fn push_up_to(target: &CommitTarget, window: &mut Window, cx: &mut Ap
             .await
             .map_err(|_| anyhow::anyhow!("HEAD is detached; check out a branch first."))?;
             let branch = branch.trim().to_string();
-            let upstream = async |key: &str, cx: &mut AsyncWindowContext| {
+            let config = async |key: String, cx: &mut AsyncWindowContext| {
                 git(
                     &repository,
-                    "Reading upstream",
-                    args(["config", &format!("branch.{branch}.{key}")]),
+                    "Reading push settings",
+                    args(["config", "--get", &key]),
                     HashMap::default(),
                     cx,
                 )
                 .await
+                .ok()
                 .map(|value| value.trim().to_string())
-                .map_err(|_| anyhow::anyhow!("'{branch}' has no upstream branch; push it first."))
+                .filter(|value| !value.is_empty())
             };
-            let remote = upstream("remote", cx).await?;
-            let merge_ref = upstream("merge", cx).await?;
+            // Git's own order: the branch's push remote, the default push
+            // remote, then the remote it pulls from.
+            let upstream_remote = config(format!("branch.{branch}.remote"), cx).await;
+            let push_remote = match config(format!("branch.{branch}.pushRemote"), cx).await {
+                Some(remote) => Some(remote),
+                None => match config("remote.pushDefault".to_string(), cx).await {
+                    Some(remote) => Some(remote),
+                    None => upstream_remote.clone(),
+                },
+            };
+            let remote = push_remote.with_context(|| {
+                format!("'{branch}' has no remote to push to; push it once first.")
+            })?;
+            // Pushing to the remote it pulls from updates the tracked branch;
+            // any other remote gets a branch of the same name.
+            let merge_ref = match config(format!("branch.{branch}.merge"), cx).await {
+                Some(merge_ref) if upstream_remote.as_ref() == Some(&remote) => merge_ref,
+                _ => format!("refs/heads/{branch}"),
+            };
             git(
                 &repository,
                 "Checking history",
@@ -649,6 +791,11 @@ pub(crate) fn create_patch(target: &CommitTarget, window: &mut Window, cx: &mut 
                 .repository
                 .upgrade()
                 .context("the repository was closed")?;
+            anyhow::ensure!(
+                parent_count(&repository, target.sha, cx).await? <= 1,
+                "{} is a merge commit; a patch can only be created for a regular commit.",
+                target.short_sha()
+            );
             let patch = git(
                 &repository,
                 "Creating patch",
@@ -675,13 +822,13 @@ pub(crate) fn create_patch(target: &CommitTarget, window: &mut Window, cx: &mut 
 
 pub(crate) fn edit_commit_message(target: &CommitTarget, window: &mut Window, cx: &mut App) {
     let target = target.clone();
-    let is_head = target.is_head(cx);
     window
         .spawn(cx, async move |cx| {
             let repository = target
                 .repository
                 .upgrade()
                 .context("the repository was closed")?;
+            let head = read_head(&repository, cx).await?;
             let details = repository
                 .update(cx, |repository, _| repository.show(target.sha.to_string()))
                 .await??;
@@ -692,7 +839,7 @@ pub(crate) fn edit_commit_message(target: &CommitTarget, window: &mut Window, cx
             workspace.update_in(cx, |workspace, window, cx| {
                 let target = target.clone();
                 workspace.toggle_modal(window, cx, |window, cx| {
-                    CommitMessageModal::new(target, is_head, details.message, window, cx)
+                    CommitMessageModal::new(target, head, details.message, window, cx)
                 });
             })?;
             Ok(())
@@ -702,14 +849,28 @@ pub(crate) fn edit_commit_message(target: &CommitTarget, window: &mut Window, cx
         });
 }
 
-fn reword(target: CommitTarget, is_head: bool, message: String, window: &mut Window, cx: &mut App) {
+/// Replaces the message of `target`. `head` is HEAD when the message dialog
+/// opened; the rewrite fails if HEAD moved since.
+fn reword(
+    target: CommitTarget,
+    head: HeadState,
+    message: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
     window
         .spawn(cx, async move |cx| {
             let repository = target
                 .repository
                 .upgrade()
                 .context("the repository was closed")?;
-            if is_head {
+            ensure_head_unchanged(&repository, &head, cx).await?;
+            if head.sha == target.sha.to_string() {
+                ensure_no_operation_in_progress(&repository, cx).await?;
+                if !confirm_rewriting_pushed_commit(&target, &repository, "Rewriting", cx).await? {
+                    return Ok(());
+                }
+                ensure_head_unchanged(&repository, &head, cx).await?;
                 git(
                     &repository,
                     "Editing commit message",
@@ -728,7 +889,8 @@ fn reword(target: CommitTarget, is_head: bool, message: String, window: &mut Win
                 )
                 .await?;
             } else {
-                let Some(base) = prepare_history_rewrite(&target, &repository, cx).await? else {
+                let Some((base, head)) = prepare_history_rewrite(&target, &repository, cx).await?
+                else {
                     return Ok(());
                 };
                 let env = HashMap::from_iter([
@@ -738,11 +900,19 @@ fn reword(target: CommitTarget, is_head: bool, message: String, window: &mut Win
                     ),
                     ("GIT_EDITOR".to_string(), MESSAGE_EDITOR.to_string()),
                     ("EVB_COMMIT_MESSAGE".to_string(), message),
+                    ("EVB_REWORD_SHA".to_string(), target.sha.to_string()),
                 ]);
+                ensure_head_unchanged(&repository, &head, cx).await?;
                 rebase(
                     &repository,
                     "Editing commit message",
-                    args(["-i", "--autostash", "--no-autosquash", &base]),
+                    args([
+                        "-i",
+                        "--autostash",
+                        "--no-autosquash",
+                        "--no-rebase-merges",
+                        &base,
+                    ]),
                     env,
                     cx,
                 )
@@ -808,13 +978,16 @@ pub(crate) fn branch_actions(
     current_branch: Option<&str>,
 ) -> ContextMenu {
     let name = branch.name().to_string();
+    // Revisions use the full ref: a local `origin/main`, the remote-tracking
+    // `origin/main` and a tag can share a short name.
+    let ref_name = branch.ref_name.to_string();
     let is_remote = branch.is_remote();
     let is_current = !is_remote && current_branch == Some(name.as_str());
     if !is_current {
         let target = target.clone();
-        let name = name.clone();
+        let branch = branch.clone();
         menu = menu.entry("Checkout", None, move |window, cx| {
-            checkout_branch(&target, &name, is_remote, window, cx)
+            checkout_branch(&target, &branch, window, cx)
         });
     }
     menu = menu.entry(format!("New Branch from '{name}'…"), None, {
@@ -824,6 +997,7 @@ pub(crate) fn branch_actions(
     if !is_current {
         let merge_target = target.clone();
         let merge_name = name.clone();
+        let merge_ref = ref_name.clone();
         menu = menu
             .entry(
                 format!("Merge '{name}' into Current"),
@@ -831,7 +1005,7 @@ pub(crate) fn branch_actions(
                 move |window, cx| {
                     merge_target.run(
                         format!("Merging {merge_name}"),
-                        args(["merge", "--no-edit", &merge_name]),
+                        args(["merge", "--no-edit", &merge_ref]),
                         format!("Merged '{merge_name}'"),
                         "Merge failed",
                         window,
@@ -842,7 +1016,7 @@ pub(crate) fn branch_actions(
             .entry(format!("Rebase Current onto '{name}'"), None, {
                 let target = target.clone();
                 let name = name.clone();
-                move |window, cx| rebase_onto(&target, &name, window, cx)
+                move |window, cx| rebase_onto(&target, &name, &ref_name, window, cx)
             });
     }
     if !is_remote && !is_current {
@@ -854,9 +1028,16 @@ pub(crate) fn branch_actions(
     menu
 }
 
-fn rebase_onto(target: &CommitTarget, name: &str, window: &mut Window, cx: &mut App) {
+fn rebase_onto(
+    target: &CommitTarget,
+    name: &str,
+    ref_name: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let target = target.clone();
     let name = name.to_string();
+    let ref_name = ref_name.to_string();
     window
         .spawn(cx, async move |cx| {
             let repository = target
@@ -866,7 +1047,7 @@ fn rebase_onto(target: &CommitTarget, name: &str, window: &mut Window, cx: &mut 
             rebase(
                 &repository,
                 &format!("Rebasing onto {name}"),
-                args(["--autostash", &name]),
+                args(["--autostash", &ref_name]),
                 HashMap::default(),
                 cx,
             )
@@ -879,29 +1060,38 @@ fn rebase_onto(target: &CommitTarget, name: &str, window: &mut Window, cx: &mut 
         });
 }
 
-fn checkout_branch(
-    target: &CommitTarget,
-    name: &str,
-    is_remote: bool,
-    window: &mut Window,
-    cx: &mut App,
-) {
+/// Checks out a local branch, or for a remote branch the local branch that
+/// tracks it, creating one when there is none. When a local branch of the
+/// same name tracks something else, asks for another name.
+fn checkout_branch(target: &CommitTarget, branch: &Branch, window: &mut Window, cx: &mut App) {
     let target = target.clone();
-    let name = name.to_string();
+    let branch = branch.clone();
     window
         .spawn(cx, async move |cx| {
             let repository = target
                 .repository
                 .upgrade()
                 .context("the repository was closed")?;
-            let mut command = args(["switch", &name]);
-            if is_remote {
-                // `origin/feature` checks out the local `feature`, creating it to
-                // track the remote branch when it doesn't exist yet.
-                let local_name = name
-                    .split_once('/')
-                    .map(|(_, local)| local)
-                    .unwrap_or(&name);
+            let name = branch.name().to_string();
+            let command = if branch.is_remote() {
+                let local_name = branch
+                    .remote_name()
+                    .and_then(|remote| name.strip_prefix(&format!("{remote}/")))
+                    .unwrap_or(&name)
+                    .to_string();
+                let local_upstream = git(
+                    &repository,
+                    "Checking branches",
+                    args([
+                        "for-each-ref",
+                        "--format=%(upstream)",
+                        &format!("refs/heads/{local_name}"),
+                    ]),
+                    HashMap::default(),
+                    cx,
+                )
+                .await?;
+                let local_upstream = local_upstream.trim();
                 let local_exists = git(
                     &repository,
                     "Checking branches",
@@ -916,12 +1106,57 @@ fn checkout_branch(
                 )
                 .await
                 .is_ok();
-                command = if local_exists {
-                    args(["switch", local_name])
+                if !local_exists {
+                    args(["switch", "-c", &local_name, "--track", &branch.ref_name])
+                } else if local_upstream == branch.ref_name.as_ref() {
+                    args(["switch", &local_name])
                 } else {
-                    args(["switch", "--track", &name])
-                };
-            }
+                    let note = if local_upstream.is_empty() {
+                        format!("A local '{local_name}' already exists and tracks no branch.")
+                    } else {
+                        format!(
+                            "A local '{local_name}' already exists and tracks {}.",
+                            local_upstream
+                                .strip_prefix("refs/remotes/")
+                                .unwrap_or(local_upstream)
+                        )
+                    };
+                    let suggested =
+                        format!("{local_name}-{}", branch.remote_name().unwrap_or("remote"));
+                    cx.update(|window, cx| {
+                        let workspace = target.workspace.clone();
+                        prompt_for_text(
+                            &workspace,
+                            format!("Check Out '{name}' as"),
+                            IconName::GitBranch,
+                            "Local branch name",
+                            Some(&suggested),
+                            Some(note.into()),
+                            move |local_name, window, cx| {
+                                target.run(
+                                    format!("Checking out {name}"),
+                                    args([
+                                        "switch",
+                                        "-c",
+                                        &local_name,
+                                        "--track",
+                                        &branch.ref_name,
+                                    ]),
+                                    format!("Checked out '{name}' as '{local_name}'"),
+                                    "Checkout failed",
+                                    window,
+                                    cx,
+                                );
+                            },
+                            window,
+                            cx,
+                        )
+                    })?;
+                    return Ok(());
+                }
+            } else {
+                args(["switch", &name])
+            };
             git(
                 &repository,
                 &format!("Checking out {name}"),
@@ -1098,14 +1333,14 @@ impl Render for TextInputModal {
 
 struct CommitMessageModal {
     target: CommitTarget,
-    is_head: bool,
+    head: HeadState,
     editor: Entity<Editor>,
 }
 
 impl CommitMessageModal {
     fn new(
         target: CommitTarget,
-        is_head: bool,
+        head: HeadState,
         message: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1117,7 +1352,7 @@ impl CommitMessageModal {
         });
         Self {
             target,
-            is_head,
+            head,
             editor,
         }
     }
@@ -1131,7 +1366,7 @@ impl CommitMessageModal {
         if message.is_empty() {
             return;
         }
-        reword(self.target.clone(), self.is_head, message, window, cx);
+        reword(self.target.clone(), self.head.clone(), message, window, cx);
         cx.emit(DismissEvent);
     }
 }
@@ -1323,6 +1558,30 @@ mod tests {
         panic!("timed out waiting for a prompt");
     }
 
+    fn head_state(directory: &Path) -> HeadState {
+        HeadState {
+            sha: run_git(directory, &["rev-parse", "HEAD"]),
+            branch: try_run_git(directory, &["symbolic-ref", "-q", "--short", "HEAD"]).ok(),
+        }
+    }
+
+    /// Waits until the operation started last has stopped changing the repository.
+    fn settle_operation(cx: &mut VisualTestContext, directory: &Path) {
+        let mut previous = None;
+        for _ in 0..50 {
+            cx.run_until_parked();
+            let state = (
+                try_run_git(directory, &["rev-parse", "HEAD"]).ok(),
+                try_run_git(directory, &["status", "--porcelain"]).ok(),
+            );
+            if previous.as_ref() == Some(&state) {
+                return;
+            }
+            previous = Some(state);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn target(
         sha: &str,
         repository: &Entity<Repository>,
@@ -1348,7 +1607,7 @@ mod tests {
         cx.update(|window, cx| {
             reword(
                 target(&shas[1], &repository, &workspace),
-                false,
+                head_state(root),
                 message,
                 window,
                 cx,
@@ -1369,7 +1628,7 @@ mod tests {
         cx.update(|window, cx| {
             reword(
                 target(&head, &repository, &workspace),
-                true,
+                head_state(root),
                 "C edited".into(),
                 window,
                 cx,
@@ -1471,7 +1730,7 @@ mod tests {
         cx.update(|window, cx| {
             reword(
                 target(&shas[1], &repository, &workspace),
-                false,
+                head_state(&root),
                 "B2".into(),
                 window,
                 cx,
@@ -1480,5 +1739,153 @@ mod tests {
         wait_for_prompt(&mut cx, "Cancel");
         cx.run_until_parked();
         assert_eq!(subjects(&root), ["C", "B", "A"]);
+    }
+
+    #[gpui::test]
+    async fn test_reword_with_unusual_rebase_settings(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let tree = TempTree::new(json!({}));
+        let root = tree.path();
+        let shas = create_repository(root);
+        // Both change the todo list git generates.
+        run_git(root, &["config", "rebase.abbreviateCommands", "true"]);
+        run_git(root, &["config", "rebase.rebaseMerges", "true"]);
+        let (mut cx, repository, workspace) = open(root, cx).await;
+
+        cx.update(|window, cx| {
+            reword(
+                target(&shas[0], &repository, &workspace),
+                head_state(root),
+                "A edited".into(),
+                window,
+                cx,
+            )
+        });
+        wait_for(&mut cx, |_| {
+            (subjects(root) == ["C", "B", "A edited"]).then_some(())
+        });
+    }
+
+    #[gpui::test]
+    async fn test_operations_leave_a_stopped_rebase_alone(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let tree = TempTree::new(json!({}));
+        let root = tree.path();
+        let shas = create_repository(root);
+        // Stop a rebase on a conflict: `side` changes c.txt like C does.
+        run_git(root, &["switch", "-q", "-c", "side", &shas[1]]);
+        commit_file(root, "c.txt", "side\n", "side C");
+        let conflict = try_run_git(root, &["rebase", "main"]);
+        assert!(
+            conflict.is_err(),
+            "the fixture rebase should stop on a conflict"
+        );
+        let rebase_head = run_git(root, &["rev-parse", "HEAD"]);
+        let (mut cx, repository, workspace) = open(root, cx).await;
+
+        let branch = Branch {
+            is_head: false,
+            ref_name: "refs/heads/main".into(),
+            upstream: None,
+            most_recent_commit: None,
+        };
+        cx.update(|window, cx| {
+            rebase_onto(
+                &target(&shas[2], &repository, &workspace),
+                branch.name(),
+                &branch.ref_name,
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| drop_commit(&target(&shas[1], &repository, &workspace), window, cx));
+        settle_operation(&mut cx, root);
+        assert!(
+            root.join(".git/rebase-merge").exists(),
+            "the stopped rebase must not be aborted"
+        );
+        assert_eq!(run_git(root, &["rev-parse", "HEAD"]), rebase_head);
+    }
+
+    #[gpui::test]
+    async fn test_operations_refuse_a_moved_head(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let tree = TempTree::new(json!({}));
+        let root = tree.path();
+        let shas = create_repository(root);
+        let (mut cx, repository, workspace) = open(root, cx).await;
+
+        // The message dialog opened on C, then another commit was made.
+        let stale_head = head_state(root);
+        let d = commit_file(root, "d.txt", "1\n", "D");
+        cx.update(|window, cx| {
+            reword(
+                target(&shas[2], &repository, &workspace),
+                stale_head,
+                "C edited".into(),
+                window,
+                cx,
+            )
+        });
+        wait_for_prompt(&mut cx, "OK");
+        assert_eq!(subjects(root), ["D", "C", "B", "A"]);
+
+        // The reset dialog is answered after HEAD moved to another branch.
+        run_git(root, &["branch", "other", &shas[0]]);
+        cx.update(|window, cx| {
+            reset_current_branch(&target(&shas[0], &repository, &workspace), window, cx)
+        });
+        for _ in 0..3000 {
+            cx.run_until_parked();
+            if cx.has_pending_prompt() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        run_git(root, &["switch", "-q", "other"]);
+        cx.simulate_prompt_answer("Hard");
+        wait_for_prompt(&mut cx, "OK");
+        assert_eq!(run_git(root, &["rev-parse", "main"]), d);
+        assert_eq!(run_git(root, &["rev-parse", "other"]), shas[0]);
+    }
+
+    #[gpui::test]
+    async fn test_push_up_to_commit_uses_the_push_remote(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let tree = TempTree::new(json!({ "repo": {}, "upstream.git": {}, "fork.git": {} }));
+        let root = tree.path().join("repo");
+        let upstream = tree.path().join("upstream.git");
+        let fork = tree.path().join("fork.git");
+        for bare in [&upstream, &fork] {
+            run_git(bare, &["init", "-q", "--bare", "-b", "main"]);
+        }
+        let shas = create_repository(&root);
+        run_git(
+            &root,
+            &["remote", "add", "upstream", &upstream.to_string_lossy()],
+        );
+        run_git(&root, &["remote", "add", "fork", &fork.to_string_lossy()]);
+        run_git(
+            &root,
+            &[
+                "push",
+                "-q",
+                "upstream",
+                &format!("{}:refs/heads/main", shas[0]),
+            ],
+        );
+        run_git(&root, &["branch", "--set-upstream-to", "upstream/main"]);
+        run_git(&root, &["config", "branch.main.pushRemote", "fork"]);
+        let (mut cx, repository, workspace) = open(&root, cx).await;
+
+        cx.update(|window, cx| push_up_to(&target(&shas[1], &repository, &workspace), window, cx));
+        wait_for(&mut cx, |_| {
+            (try_run_git(&fork, &["rev-parse", "main"]).as_ref() == Ok(&shas[1])).then_some(())
+        });
+        assert_eq!(run_git(&upstream, &["rev-parse", "main"]), shas[0]);
     }
 }

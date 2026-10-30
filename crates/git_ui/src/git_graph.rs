@@ -1080,6 +1080,40 @@ impl GraphData {
 
 const MAX_LISTED_AUTHORS: usize = 30;
 
+/// Stores a log filter as JSON, for the Git Log tab and the Git Log panel.
+pub(crate) fn encode_log_filter(filter: &LogFilter) -> String {
+    serde_json::json!({
+        "revision": filter.revision.as_deref(),
+        "author": filter.author.as_deref(),
+        "since": filter.since.as_deref(),
+        "paths": filter.paths.iter().map(|path| path.as_unix_str()).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+pub(crate) fn decode_log_filter(encoded: &str) -> Option<LogFilter> {
+    let value = serde_json::from_str::<serde_json::Value>(encoded).log_err()?;
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(|text| SharedString::from(text.to_string()))
+    };
+    Some(LogFilter {
+        revision: text("revision"),
+        author: text("author"),
+        since: text("since"),
+        paths: value
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|path| RepoPath::new(path).log_err())
+            .collect(),
+    })
+}
+
 const DATE_FILTERS: &[(&str, &str)] = &[
     ("Last 24 Hours", "24 hours ago"),
     ("Last 7 Days", "7 days ago"),
@@ -1421,11 +1455,16 @@ pub fn open_or_reuse_graph(
     {
         workspace.focus_panel::<crate::git_log_panel::GitLogPanel>(window, cx);
         if let Some(graph) = panel.read(cx).graph().cloned() {
-            graph.update(cx, |graph, cx| {
-                graph.set_repo_id(repo_id, cx);
-                if let Some(sha) = sha {
-                    graph.select_commit_by_sha(sha.as_str(), cx);
-                }
+            // Selecting reads the workspace, which is being updated here.
+            cx.defer(move |cx| {
+                graph.update(cx, |graph, cx| {
+                    graph.set_repo_id(repo_id, cx);
+                    if let Some(sha) = sha {
+                        // A filter could hide the commit.
+                        graph.set_log_source(LogSource::All, cx);
+                        graph.select_commit_by_sha(sha.as_str(), cx);
+                    }
+                });
             });
         }
         return;
@@ -3366,9 +3405,43 @@ impl GitGraph {
                 .contains_key(&repo_id)
         {
             self.repo_id = repo_id;
+            self.selected_entry_idx = None;
+            self.hovered_entry_idx = None;
+            self.pending_select_sha = None;
+            self.selected_commit_diff = None;
+            self.selected_commit_diff_stats = None;
+            self._commit_diff_task = None;
+            self.selected_commit_message = None;
+            self._selected_commit_message_task = None;
+            self.selected_commit_branches = None;
+            self._selected_commit_branches_task = None;
+            // Branch and path filters name refs and files of the previous repository.
+            if !self.is_path_history() {
+                self.log_source = LogSource::All;
+            }
             self.invalidate_state(cx);
             self.load_authors(cx);
         }
+    }
+
+    /// The whole log's filter (branch, user, date, paths), or `None` for a file history.
+    pub fn log_filter_state(&self) -> Option<LogFilter> {
+        (!self.is_path_history()).then(|| self.log_filter())
+    }
+
+    pub fn restore_log_filter(&mut self, filter: LogFilter, cx: &mut Context<Self>) {
+        if !self.is_path_history() {
+            self.set_log_filter(filter, cx);
+        }
+    }
+
+    pub fn repo_id(&self) -> RepositoryId {
+        self.repo_id
+    }
+
+    /// The handle of the whole view; `focus_handle` is its search field.
+    pub fn root_focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
     }
 
     pub fn select_commit_by_sha(&mut self, sha: impl TryInto<Oid>, cx: &mut Context<Self>) {
@@ -3382,6 +3455,9 @@ impl GitGraph {
                 .get_graph_data(this.log_source.clone(), this.log_order)
                 .and_then(|data| data.commit_oid_to_index.get(&oid))
                 .copied()
+                // The repository's cache can know the row before this view has
+                // loaded it, right after a filter change.
+                .filter(|index| *index < this.graph_data.commits.len())
             else {
                 this.pending_select_sha = Some(oid);
                 return;
@@ -5182,6 +5258,21 @@ impl GitGraph {
                 } else {
                     (0, false)
                 };
+                // Rows served from the repository's cache send no event, so a
+                // selection waiting for them is applied here, after rendering.
+                if let Some(oid) = self.pending_select_sha
+                    && commit_count > 0
+                {
+                    let this = cx.weak_entity();
+                    cx.defer(move |cx| {
+                        this.update(cx, |this, cx| {
+                            if this.pending_select_sha == Some(oid) {
+                                this.select_commit_by_sha(oid, cx);
+                            }
+                        })
+                        .ok();
+                    });
+                }
 
                 (commit_count, is_loading)
             }
@@ -6049,6 +6140,7 @@ mod persistence {
     pub const LOG_SOURCE_BRANCH: i32 = 1;
     pub const LOG_SOURCE_SHA: i32 = 2;
     pub const LOG_SOURCE_PATH: i32 = 3;
+    pub const LOG_SOURCE_FILTERED: i32 = 4;
 
     pub const LOG_ORDER_DATE: i32 = 0;
     pub const LOG_ORDER_TOPO: i32 = 1;
@@ -6061,8 +6153,7 @@ mod persistence {
             LogSource::Branch(_) => LOG_SOURCE_BRANCH,
             LogSource::Sha(_) => LOG_SOURCE_SHA,
             LogSource::Path(_) => LOG_SOURCE_PATH,
-            LogSource::Filtered(filter) if filter.revision.is_some() => LOG_SOURCE_BRANCH,
-            LogSource::Filtered(_) => LOG_SOURCE_ALL,
+            LogSource::Filtered(_) => LOG_SOURCE_FILTERED,
         }
     }
 
@@ -6072,7 +6163,7 @@ mod persistence {
             LogSource::Branch(branch) => Some(branch.to_string()),
             LogSource::Sha(oid) => Some(oid.to_string()),
             LogSource::Path(path) => Some(path.as_unix_str().to_string()),
-            LogSource::Filtered(filter) => filter.revision.as_ref().map(ToString::to_string),
+            LogSource::Filtered(filter) => Some(super::encode_log_filter(filter)),
         }
     }
 
@@ -6104,6 +6195,12 @@ mod persistence {
                 .as_ref()
                 .and_then(|v| RepoPath::new(v).ok())
                 .map(LogSource::Path)
+                .unwrap_or_default(),
+            Some(LOG_SOURCE_FILTERED) => state
+                .log_source_value
+                .as_deref()
+                .and_then(super::decode_log_filter)
+                .map(LogSource::Filtered)
                 .unwrap_or_default(),
             None | Some(_) => LogSource::default(),
         }
@@ -7238,9 +7335,25 @@ mod tests {
         );
 
         git_graph.update(cx, |graph, cx| {
+            graph.select_entry(0, ScrollStrategy::Nearest, cx);
+            graph.update_log_filter(cx, |filter| filter.author = Some("Author".into()));
+        });
+        cx.run_until_parked();
+        git_graph.update(cx, |graph, cx| {
             graph.set_repo_id(second_repository.read(cx).id, cx)
         });
         cx.run_until_parked();
+        git_graph.read_with(&*cx, |graph, _| {
+            assert_eq!(
+                graph.selected_entry_idx, None,
+                "selection belongs to the old repository"
+            );
+            assert_eq!(
+                graph.log_source,
+                LogSource::All,
+                "filters belong to the old repository"
+            );
+        });
 
         let commit_count_after_clear =
             git_graph.read_with(&*cx, |graph, _| graph.graph_data.commits.len());
@@ -8774,6 +8887,122 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_open_at_commit_in_the_git_log_panel(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            Path::new("/project"),
+            json!({ ".git": {}, "file.txt": "content" }),
+        )
+        .await;
+
+        let first_sha = Oid::from_bytes(&[1; 20]).expect("valid commit SHA");
+        let second_sha = Oid::from_bytes(&[2; 20]).expect("valid commit SHA");
+        fs.set_graph_commits(
+            Path::new("/project/.git"),
+            vec![
+                Arc::new(InitialGraphCommitData {
+                    sha: second_sha,
+                    parents: smallvec![first_sha],
+                    ref_names: vec!["HEAD -> main".into()],
+                }),
+                Arc::new(InitialGraphCommitData {
+                    sha: first_sha,
+                    parents: smallvec![],
+                    ref_names: Vec::new(),
+                }),
+            ],
+        );
+        fs.set_commit_data(
+            Path::new("/project/.git"),
+            [first_sha, second_sha].map(|sha| {
+                (
+                    CommitData {
+                        sha,
+                        parents: smallvec![],
+                        author_name: "Author".into(),
+                        author_email: "author@example.com".into(),
+                        commit_timestamp: 1_700_000_000,
+                        subject: "Commit subject".into(),
+                        message: "Commit message".into(),
+                    },
+                    false,
+                )
+            }),
+        );
+
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        cx.run_until_parked();
+
+        let repository = project.read_with(cx, |project, cx| {
+            project
+                .active_repository(cx)
+                .expect("should have a repository")
+        });
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(&*cx, |multi, _| multi.workspace().clone());
+        let git_graph = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = crate::git_log_panel::GitLogPanel::new(workspace, window, cx);
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+                .read(cx)
+                .graph()
+                .cloned()
+                .expect("the panel shows the active repository")
+        });
+        cx.run_until_parked();
+
+        git_graph.update(cx, |graph, cx| {
+            graph.select_commit_by_sha(first_sha, cx);
+        });
+        cx.run_until_parked();
+        git_graph.update(cx, |graph, cx| {
+            graph.select_commit_by_sha(second_sha, cx);
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_or_reuse_graph(
+                workspace,
+                repository.read(cx).id,
+                project.read(cx).git_store().clone(),
+                LogSource::All,
+                Some(first_sha.to_string()),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        // The second commit is selected with cached data, and a User filter
+        // is set; revealing the first commit clears the filter.
+        git_graph.update(cx, |graph, cx| {
+            graph.update_log_filter(cx, |filter| filter.author = Some("Nobody".into()))
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_or_reuse_graph(
+                workspace,
+                repository.read(cx).id,
+                project.read(cx).git_store().clone(),
+                LogSource::All,
+                Some(first_sha.to_string()),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        git_graph.read_with(&*cx, |graph, _| {
+            assert_eq!(graph.log_source, LogSource::All);
+            assert_eq!(graph.selected_entry_idx, Some(1));
+        });
+    }
+
+    #[gpui::test]
     async fn test_go_back_from_commit_view_returns_to_git_graph(cx: &mut TestAppContext) {
         init_test(cx);
 
@@ -9438,6 +9667,31 @@ mod tests {
         let older = at(3 * 24 * 60 * 60);
         assert!(older.ends_with(", 11:00"), "{older}");
         assert!(!older.starts_with("Today") && !older.starts_with("Yesterday"));
+    }
+
+    #[test]
+    fn test_filtered_log_source_persistence() {
+        let filter = LogFilter {
+            revision: Some("refs/heads/main".into()),
+            author: Some("Ann \"A\" Lee".into()),
+            since: Some("7 days ago".into()),
+            paths: vec![
+                RepoPath::new("src").unwrap(),
+                RepoPath::new("docs/a b.md").unwrap(),
+            ],
+        };
+        assert_eq!(
+            decode_log_filter(&encode_log_filter(&filter)),
+            Some(filter.clone())
+        );
+
+        let source = LogSource::Filtered(filter);
+        let state = persistence::SerializedGitGraphState {
+            log_source_type: Some(persistence::serialize_log_source_type(&source)),
+            log_source_value: persistence::serialize_log_source_value(&source),
+            ..Default::default()
+        };
+        assert_eq!(persistence::deserialize_log_source(&state), source);
     }
 
     #[test]

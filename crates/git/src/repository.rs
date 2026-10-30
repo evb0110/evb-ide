@@ -3481,10 +3481,41 @@ impl GitRepository for RealGitRepository {
         let git = self.git_binary();
 
         async move {
-            let log_source_args = log_source.get_args();
-            let mut args = vec!["log", SEARCH_COMMIT_FORMAT];
             let hash_query = commit_hash_search_query(search_args.query.as_str())
                 .map(|query| query.to_ascii_lowercase());
+            // `--regexp-ignore-case` would also loosen the User filter's
+            // `--author`, so the search runs without it and keeps only the
+            // commits the log itself shows.
+            let (log_source, shown_commits) = match &log_source {
+                LogSource::Filtered(filter)
+                    if filter.author.is_some()
+                        && hash_query.is_none()
+                        && !search_args.case_sensitive =>
+                {
+                    let mut shown_args = vec![Cow::Borrowed("log"), Cow::Borrowed("--format=%H")];
+                    shown_args.extend(log_source.get_args());
+                    let shown = git
+                        .run(
+                            &shown_args
+                                .iter()
+                                .map(|arg| arg.as_ref())
+                                .collect::<Vec<&str>>(),
+                        )
+                        .await?;
+                    let shown = shown
+                        .lines()
+                        .filter_map(|line| Oid::from_str(line.trim()).ok())
+                        .collect::<HashSet<_>>();
+                    let without_author = LogFilter {
+                        author: None,
+                        ..filter.clone()
+                    };
+                    (LogSource::Filtered(without_author), Some(shown))
+                }
+                _ => (log_source, None),
+            };
+            let log_source_args = log_source.get_args();
+            let mut args = vec!["log", SEARCH_COMMIT_FORMAT];
 
             if hash_query.is_none() {
                 args.push("--fixed-strings");
@@ -3523,9 +3554,16 @@ impl GitRepository for RealGitRepository {
                     continue;
                 }
 
-                if let Ok(oid) = Oid::from_str(sha)
-                    && request_tx.send(oid).await.is_err()
+                let Ok(oid) = Oid::from_str(sha) else {
+                    continue;
+                };
+                if shown_commits
+                    .as_ref()
+                    .is_some_and(|shown| !shown.contains(&oid))
                 {
+                    continue;
+                }
+                if request_tx.send(oid).await.is_err() {
                     break;
                 }
             }
@@ -6785,6 +6823,38 @@ mod tests {
             .unwrap();
         let commits = rx.try_recv().unwrap();
         assert_eq!(commits[0].parents.as_slice(), [lib]);
+        // A case-insensitive search must not widen the case-sensitive User filter:
+        // "ann" matches every commit message's file name case-insensitively
+        // but no author is "ann".
+        let search = async |filter: LogFilter, query: &str| {
+            let (tx, rx) = smol::channel::unbounded();
+            repo.search_commits(
+                LogSource::Filtered(filter),
+                SearchCommitArgs {
+                    query: query.to_string().into(),
+                    case_sensitive: false,
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+            let mut shas = Vec::new();
+            while let Ok(sha) = rx.try_recv() {
+                shas.push(sha);
+            }
+            shas
+        };
+        let by_lowercase_ann = LogFilter {
+            author: Some("ann".into()),
+            ..LogFilter::default()
+        };
+        assert!(shas(by_lowercase_ann.clone()).await.is_empty());
+        assert!(search(by_lowercase_ann, "S").await.is_empty());
+        let by_ann = LogFilter {
+            author: Some("Ann".into()),
+            ..LogFilter::default()
+        };
+        assert_eq!(search(by_ann, "SRC").await, [side]);
         // `--since` compares commit dates, which are all "now" in this repository.
         let since = |date: &str| LogFilter {
             since: Some(date.to_string().into()),

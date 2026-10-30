@@ -1,10 +1,11 @@
-use crate::git_graph::GitGraph;
+use crate::git_graph::{GitGraph, decode_log_filter, encode_log_filter};
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Subscription,
     WeakEntity, Window, actions, px,
 };
 use project::git_store::{GitStore, GitStoreEvent};
 use ui::prelude::*;
+use util::ResultExt as _;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -33,7 +34,10 @@ pub struct GitLogPanel {
     graph: Option<Entity<GitGraph>>,
     focus_handle: FocusHandle,
     position: DockPosition,
+    /// The filter last written for a repository, to skip redundant writes.
+    saved_filter: Option<(String, String)>,
     _subscription: Subscription,
+    _graph_subscription: Option<Subscription>,
 }
 
 impl GitLogPanel {
@@ -60,7 +64,9 @@ impl GitLogPanel {
                 graph: None,
                 focus_handle: cx.focus_handle(),
                 position: DockPosition::Bottom,
+                saved_filter: None,
                 _subscription: subscription,
+                _graph_subscription: None,
             };
             panel.follow_active_repository(window, cx);
             panel
@@ -76,17 +82,63 @@ impl GitLogPanel {
         else {
             return;
         };
-        match &self.graph {
-            Some(graph) => graph.update(cx, |graph, cx| graph.set_repo_id(repo_id, cx)),
+        let graph = match &self.graph {
+            Some(graph) => {
+                if graph.read(cx).repo_id() == repo_id {
+                    return;
+                }
+                graph.update(cx, |graph, cx| graph.set_repo_id(repo_id, cx));
+                graph.clone()
+            }
             None => {
                 let git_store = self.git_store.clone();
                 let workspace = self.workspace.clone();
-                self.graph = Some(
-                    cx.new(|cx| GitGraph::new(repo_id, git_store, workspace, None, window, cx)),
-                );
+                let graph =
+                    cx.new(|cx| GitGraph::new(repo_id, git_store, workspace, None, window, cx));
+                self._graph_subscription =
+                    Some(cx.observe(&graph, |this, _, cx| this.save_filter(cx)));
+                self.graph = Some(graph.clone());
+                graph
             }
+        };
+        if let Some(key) = self.filter_key(cx)
+            && let Some(filter) = db::kvp::KeyValueStore::global(cx)
+                .read_kvp(&key)
+                .log_err()
+                .flatten()
+                .and_then(|encoded| decode_log_filter(&encoded))
+        {
+            graph.update(cx, |graph, cx| graph.restore_log_filter(filter, cx));
         }
         cx.notify();
+    }
+
+    /// Filters are remembered per repository, like WebStorm's log filters.
+    fn filter_key(&self, cx: &App) -> Option<String> {
+        let repository = self.git_store.read(cx).active_repository()?;
+        let path = repository.read(cx).work_directory_abs_path.clone();
+        Some(format!("evb_git_log_filter:{}", path.display()))
+    }
+
+    fn save_filter(&mut self, cx: &mut Context<Self>) {
+        let Some(filter) = self
+            .graph
+            .as_ref()
+            .and_then(|graph| graph.read(cx).log_filter_state())
+        else {
+            return;
+        };
+        let Some(key) = self.filter_key(cx) else {
+            return;
+        };
+        let encoded = encode_log_filter(&filter);
+        if self.saved_filter.as_ref() == Some(&(key.clone(), encoded.clone())) {
+            return;
+        }
+        self.saved_filter = Some((key.clone(), encoded.clone()));
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        cx.background_spawn(async move { kvp.write_kvp(key, encoded).await })
+            .detach_and_log_err(cx);
     }
 
     pub fn graph(&self) -> Option<&Entity<GitGraph>> {
@@ -99,7 +151,7 @@ impl EventEmitter<PanelEvent> for GitLogPanel {}
 impl Focusable for GitLogPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match &self.graph {
-            Some(graph) => graph.focus_handle(cx),
+            Some(graph) => graph.read(cx).root_focus_handle(),
             None => self.focus_handle.clone(),
         }
     }
