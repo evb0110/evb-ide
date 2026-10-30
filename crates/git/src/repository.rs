@@ -909,6 +909,16 @@ pub trait GitRepository: Send + Sync {
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
 
+    /// Runs `git <args>` in the working directory and returns its standard output.
+    /// Used for operations without a dedicated method, such as cherry-pick or revert.
+    fn run_command(
+        &self,
+        _args: Vec<String>,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<String>> {
+        async { anyhow::bail!("this repository cannot run git commands") }.boxed()
+    }
+
     /// Restores `paths` in the working tree.
     ///
     /// With `Some(commit)`, both the index and the working tree are reset to the
@@ -1575,6 +1585,34 @@ impl GitRepository for RealGitRepository {
                 String::from_utf8_lossy(&output.stderr),
             );
             Ok(())
+        }
+        .boxed()
+    }
+
+    fn run_command(
+        &self,
+        args: Vec<String>,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<String>> {
+        let git = self.git_binary_in_worktree();
+        async move {
+            let git = git?;
+            let output = git.build_command(&args).envs(env.iter()).output().await?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Conflicts are reported on stdout, the reason for most other failures on stderr.
+                let message = [stderr.trim(), stdout.trim()]
+                    .into_iter()
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if message.is_empty() {
+                    anyhow::bail!("git exited with {}", output.status);
+                }
+                anyhow::bail!("{message}");
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         }
         .boxed()
     }

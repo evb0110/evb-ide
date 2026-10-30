@@ -896,6 +896,18 @@ impl ContextMenu {
         self.selected_index
     }
 
+    /// The label of each item, by index; `None` for items without one.
+    pub fn item_labels(&self) -> Vec<Option<SharedString>> {
+        self.items
+            .iter()
+            .map(|item| match item {
+                ContextMenuItem::Entry(entry) => Some(entry.label.clone()),
+                ContextMenuItem::Submenu { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.selected_index else {
             return cx.emit(DismissEvent);

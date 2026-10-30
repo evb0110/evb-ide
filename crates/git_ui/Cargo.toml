@@ -92,6 +92,7 @@ settings = { workspace = true, features = ["test-support"] }
 task.workspace = true
 tree-sitter-md.workspace = true
 unindent.workspace = true
+util = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
 zlog.workspace = true
 

@@ -1,5 +1,9 @@
-use crate::{commit_view::CommitView, create_tag_at_commit};
-use git::Oid;
+use crate::{
+    commit_operations::{self, CommitTarget},
+    commit_view::CommitView,
+    create_tag_at_commit,
+};
+use git::{BuildCommitPermalinkParams, GitHostingProviderRegistry, Oid, parse_git_remote_url};
 use gpui::{Action, ClipboardItem, Entity, FocusHandle, SharedString, WeakEntity, Window, actions};
 use project::{GIT_COMMAND_TASK_TAG, git_store::Repository};
 
@@ -17,6 +21,10 @@ actions!(
         CopyCommitTag,
         /// Opens the commit view for the selected commit.
         OpenCommitView,
+        /// Selects the first parent of the selected commit.
+        GoToParentCommit,
+        /// Selects a child of the selected commit.
+        GoToChildCommit,
     ]
 );
 
@@ -55,12 +63,83 @@ pub(crate) fn commit_context_menu(
         Some(ref_name) => format!("Ref {ref_name}"),
         None => format!("Commit {sha_short}"),
     };
+    let target = repository.clone().map(|repository| CommitTarget {
+        sha,
+        repository,
+        workspace: workspace.clone(),
+    });
+    let is_head = target.as_ref().is_some_and(|target| target.is_head(cx));
+    let branches = target
+        .as_ref()
+        .map(|target| target.branches_at_commit(cx))
+        .unwrap_or_default();
+    let current_branch = repository
+        .as_ref()
+        .and_then(WeakEntity::upgrade)
+        .and_then(|repository| {
+            repository
+                .read(cx)
+                .branch
+                .as_ref()
+                .map(|branch| branch.name().to_string())
+        });
+    let permalink = repository
+        .as_ref()
+        .and_then(WeakEntity::upgrade)
+        .and_then(|repository| {
+            let remote_url = repository.read(cx).default_remote_url()?;
+            let provider_registry = GitHostingProviderRegistry::default_global(cx);
+            let (provider, parsed) = parse_git_remote_url(provider_registry, &remote_url)?;
+            let url = provider.build_commit_permalink(
+                &parsed,
+                BuildCommitPermalinkParams {
+                    sha: &sha.to_string(),
+                },
+            );
+            Some((provider.name(), url.to_string()))
+        });
 
     ContextMenu::build(window, cx, move |context_menu, _, _| {
+        let operation = |run: fn(&CommitTarget, &mut Window, &mut App)| {
+            let target = target.clone();
+            move |window: &mut Window, cx: &mut App| {
+                if let Some(target) = &target {
+                    run(target, window, cx);
+                }
+            }
+        };
         context_menu
             .context(focus_handle)
             .header(header)
-            .entry("View Diff", Some(OpenCommitView.boxed_clone()), {
+            .entry(
+                "Copy Revision Number",
+                Some(CopyCommitSha.boxed_clone()),
+                move |_window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(sha.to_string()));
+                },
+            )
+            .when_some(ref_name.clone(), |menu, ref_name| {
+                menu.entry("Copy Ref Name", None, move |_window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(ref_name.to_string()));
+                })
+            })
+            .entry(
+                "Create Patch…",
+                None,
+                operation(commit_operations::create_patch),
+            )
+            .entry(
+                "Cherry-Pick",
+                None,
+                operation(commit_operations::cherry_pick),
+            )
+            .separator()
+            .entry(
+                "Checkout Revision",
+                None,
+                operation(commit_operations::checkout_revision),
+            )
+            .entry("Show Diff", Some(OpenCommitView.boxed_clone()), {
                 let repository = repository.clone();
                 let workspace = workspace.clone();
                 move |window, cx| {
@@ -78,17 +157,81 @@ pub(crate) fn commit_context_menu(
                     );
                 }
             })
-            .entry(
-                "Copy SHA",
-                Some(CopyCommitSha.boxed_clone()),
-                move |_window, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(sha.to_string()));
-                },
-            )
-            .when_some(ref_name.clone(), |menu, ref_name| {
-                menu.entry("Copy Ref Name", None, move |_window, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(ref_name.to_string()));
+            .when(source == CommitContextMenuSource::GitPanel, |menu| {
+                menu.entry("Show in Git Log", None, move |window, cx| {
+                    window.dispatch_action(
+                        Box::new(crate::git_graph::OpenAtCommit {
+                            sha: sha.to_string(),
+                        }),
+                        cx,
+                    );
                 })
+            })
+            .separator()
+            .entry(
+                "Reset Current Branch to Here…",
+                None,
+                operation(commit_operations::reset_current_branch),
+            )
+            .entry("Revert Commit", None, operation(commit_operations::revert))
+            .item(
+                ContextMenuEntry::new("Undo Commit…")
+                    .disabled(!is_head)
+                    .handler(operation(commit_operations::undo_commit)),
+            )
+            .separator()
+            .entry(
+                "Edit Commit Message…",
+                None,
+                operation(commit_operations::edit_commit_message),
+            )
+            .entry(
+                "Fixup with Staged Changes…",
+                None,
+                operation(commit_operations::fixup),
+            )
+            .entry(
+                "Drop Commit…",
+                None,
+                operation(commit_operations::drop_commit),
+            )
+            .entry(
+                "Push All up to Here",
+                None,
+                operation(commit_operations::push_up_to),
+            )
+            .separator()
+            .map(|mut menu| {
+                if let Some(target) = &target {
+                    for branch in &branches {
+                        menu = commit_operations::branch_submenu(
+                            menu,
+                            target,
+                            branch,
+                            current_branch.as_deref(),
+                        );
+                    }
+                }
+                menu
+            })
+            .entry(
+                "New Branch…",
+                None,
+                operation(commit_operations::new_branch),
+            )
+            .entry("New Tag…", None, {
+                let repository = repository.clone();
+                let workspace = workspace.clone();
+                move |window, cx| {
+                    let Some(repository) = repository.as_ref().and_then(WeakEntity::upgrade) else {
+                        return;
+                    };
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            create_tag_at_commit(sha, false, repository, workspace, window, cx);
+                        })
+                        .log_err();
+                }
             })
             .when(ref_name.is_none(), |menu| {
                 menu.map(|menu| {
@@ -130,29 +273,19 @@ pub(crate) fn commit_context_menu(
                     }
                 })
             })
-            .entry("Create Tag…", None, {
-                let repository = repository.clone();
-                let workspace = workspace.clone();
-                move |window, cx| {
-                    let Some(repository) = repository.as_ref().and_then(WeakEntity::upgrade) else {
-                        return;
-                    };
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            create_tag_at_commit(sha, false, repository, workspace, window, cx);
-                        })
-                        .log_err();
-                }
+            .when(source == CommitContextMenuSource::GitGraph, |menu| {
+                menu.separator()
+                    .action("Go to Child Commit", GoToChildCommit.boxed_clone())
+                    .action("Go to Parent Commit", GoToParentCommit.boxed_clone())
             })
-            .when(source == CommitContextMenuSource::GitPanel, |menu| {
-                menu.entry("Show in Git Graph", None, move |window, cx| {
-                    window.dispatch_action(
-                        Box::new(crate::git_graph::OpenAtCommit {
-                            sha: sha.to_string(),
-                        }),
-                        cx,
-                    );
-                })
+            .when_some(permalink.clone(), |menu, (provider, url)| {
+                menu.separator().item(
+                    ContextMenuEntry::new(format!("View on {provider}"))
+                        .icon(IconName::ArrowUpRight)
+                        .icon_color(Color::Muted)
+                        .icon_position(IconPosition::End)
+                        .handler(move |_window, cx| cx.open_url(&url)),
+                )
             })
             .map(|mut menu| {
                 menu = menu.separator().header("Custom Commands");

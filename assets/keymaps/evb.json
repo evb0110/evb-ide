@@ -26,6 +26,13 @@
     },
   },
   {
+    // Enter adds a line in the commit message; cmd-enter saves it.
+    "context": "CommitMessageModal > Editor",
+    "bindings": {
+      "cmd-enter": "menu::Confirm",
+    },
+  },
+  {
     "context": "GitPanel || CommitEditor > Editor",
     "bindings": {
       "cmd-alt-k": "git_panel::CommitAndPush",

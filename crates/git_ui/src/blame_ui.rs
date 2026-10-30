@@ -834,7 +834,10 @@ mod tests {
     fn blame_gutter_shows_the_last_name() {
         assert_eq!(blame_author_short_name("Ada Lovelace"), "Lovelace");
         assert_eq!(blame_author_short_name("  Grace  Hopper "), "Hopper");
-        assert_eq!(blame_author_short_name("dependabot[bot]"), "dependabot[bot]");
+        assert_eq!(
+            blame_author_short_name("dependabot[bot]"),
+            "dependabot[bot]"
+        );
         assert_eq!(blame_author_short_name(""), "");
         assert_eq!(GitBlameRenderer.author_display_length("Анна Иванова"), 7);
     }

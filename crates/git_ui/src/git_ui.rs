@@ -40,6 +40,7 @@ pub mod branch_diff;
 pub mod branch_picker;
 mod commit_context_menu;
 mod commit_modal;
+mod commit_operations;
 pub mod commit_tooltip;
 pub mod commit_view;
 mod conflict_view;
@@ -1680,9 +1681,15 @@ mod view_commit_tests {
         });
 
         context_menu.update_in(cx, |menu, window, cx| {
+            let new_tag_index = menu
+                .item_labels()
+                .iter()
+                .position(|label| label.as_deref() == Some("New Tag…"))
+                .expect("the menu has a New Tag entry");
             menu.select_first(&menu::SelectFirst, window, cx);
-            menu.select_next(&menu::SelectNext, window, cx);
-            menu.select_next(&menu::SelectNext, window, cx);
+            while menu.selected_index() != Some(new_tag_index) {
+                menu.select_next(&menu::SelectNext, window, cx);
+            }
             menu.confirm(&Confirm, window, cx);
         });
 

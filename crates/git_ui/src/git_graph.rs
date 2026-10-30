@@ -1,4 +1,6 @@
-pub use crate::commit_context_menu::{CopyCommitSha, CopyCommitTag, OpenCommitView};
+pub use crate::commit_context_menu::{
+    CopyCommitSha, CopyCommitTag, GoToChildCommit, GoToParentCommit, OpenCommitView,
+};
 use crate::{
     commit_context_menu::{
         CUSTOM_GIT_COMMANDS_DOCS_SLUG, CommitContextMenuData, CommitContextMenuSource,
@@ -2696,6 +2698,55 @@ impl GitGraph {
         );
     }
 
+    fn go_to_parent_commit(
+        &mut self,
+        _: &GoToParentCommit,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(parent) = self
+            .selected_entry_idx
+            .and_then(|index| self.graph_data.commits.get(index))
+            .and_then(|commit| commit.data.parents.first().copied())
+        else {
+            return;
+        };
+        if let Some(index) = self
+            .graph_data
+            .commits
+            .iter()
+            .position(|commit| commit.data.sha == parent)
+        {
+            self.select_entry(index, ScrollStrategy::Nearest, cx);
+        }
+    }
+
+    fn go_to_child_commit(
+        &mut self,
+        _: &GoToChildCommit,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected) = self.selected_entry_idx else {
+            return;
+        };
+        let Some(sha) = self
+            .graph_data
+            .commits
+            .get(selected)
+            .map(|commit| commit.data.sha)
+        else {
+            return;
+        };
+        // Children are listed above their parents; take the nearest one.
+        if let Some(index) = self.graph_data.commits[..selected]
+            .iter()
+            .rposition(|commit| commit.data.parents.contains(&sha))
+        {
+            self.select_entry(index, ScrollStrategy::Nearest, cx);
+        }
+    }
+
     fn copy_commit_sha(&mut self, entry_index: usize, cx: &mut Context<Self>) {
         let Some(commit) = self.graph_data.commits.get(entry_index) else {
             return;
@@ -4241,6 +4292,9 @@ impl GitGraph {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Like WebStorm, right-clicking a commit selects it, so the details and
+        // the parent/child navigation follow the menu's commit.
+        self.select_entry(entry_idx, ScrollStrategy::Nearest, cx);
         self.deploy_entry_context_menu(event.position, entry_idx, None, window, cx);
         cx.stop_propagation();
     }
@@ -4824,6 +4878,8 @@ impl Render for GitGraph {
             }))
             .on_action(cx.listener(Self::copy_selected_commit_sha))
             .on_action(cx.listener(Self::copy_selected_commit_tag))
+            .on_action(cx.listener(Self::go_to_parent_commit))
+            .on_action(cx.listener(Self::go_to_child_commit))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.search_state

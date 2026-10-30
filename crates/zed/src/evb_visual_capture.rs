@@ -346,6 +346,11 @@ mod capture {
         cx.dispatch_action(any_window, git_ui::git_graph::Open);
         wait_real_time(&mut cx, Duration::from_secs(3));
         save(&mut cx, any_window, &output_dir, "06-git-log")?;
+        // The fixture's third commit, the tip of `fix/map-tiles`.
+        right_click(&mut cx, any_window, point(px(550.), px(167.)));
+        save(&mut cx, any_window, &output_dir, "06b-git-log-menu")?;
+        cx.simulate_keystrokes(any_window, "escape");
+        settle(&mut cx, 3);
 
         set_theme(&mut cx, "IntelliJ Dark");
         settle(&mut cx, 5);

@@ -7111,6 +7111,59 @@ impl Repository {
         receiver
     }
 
+    /// Runs `git <args>` in a local repository and returns its standard output.
+    /// `env` is added to the project environment; editors are disabled so that
+    /// commands such as `revert` or `rebase` never wait for input.
+    pub fn run_git_command(
+        &mut self,
+        status: impl Into<SharedString>,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+        cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<Result<String>> {
+        let receiver = self.send_job(
+            "run_git_command",
+            Some(status.into()),
+            move |git_repo, _| async move {
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => {
+                        let mut command_environment = (*environment).clone();
+                        command_environment.insert("GIT_EDITOR".into(), "true".into());
+                        command_environment.insert("GIT_SEQUENCE_EDITOR".into(), "true".into());
+                        command_environment.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+                        command_environment.extend(env);
+                        backend
+                            .run_command(args, Arc::new(command_environment))
+                            .await
+                    }
+                    RepositoryState::Remote(_) => {
+                        anyhow::bail!("this git operation is only available for local projects")
+                    }
+                }
+            },
+        );
+
+        let scan_updates_tx =
+            self.git_store()
+                .and_then(|git_store| match &git_store.read(cx).state {
+                    GitStoreState::Local { downstream, .. } => Some(
+                        downstream
+                            .as_ref()
+                            .map(|downstream| downstream.updates_tx.clone()),
+                    ),
+                    _ => None,
+                });
+        if let Some(updates_tx) = scan_updates_tx {
+            self.schedule_scan(updates_tx, cx);
+        }
+
+        receiver
+    }
+
     pub fn show(&mut self, commit: String) -> oneshot::Receiver<Result<CommitDetails>> {
         let id = self.id;
         self.send_job("show", None, move |state, _cx| {
