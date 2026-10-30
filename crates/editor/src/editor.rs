@@ -4505,11 +4505,7 @@ impl Editor {
             "Set Breakpoint"
         };
 
-        let git_blame_msg = if self.show_git_blame_gutter {
-            "Close Git Blame"
-        } else {
-            "Open Git Blame"
-        };
+        let show_git_blame_gutter = self.show_git_blame_gutter;
 
         let bookmark = self.bookmark_at_row(row, window, cx);
 
@@ -4683,16 +4679,22 @@ impl Editor {
                     }
                 })
                 .separator()
-                .entry(git_blame_msg, Some(Blame.boxed_clone()), {
-                    let weak_editor = weak_editor.clone();
-                    move |window, cx| {
-                        weak_editor
-                            .update(cx, |this, cx| {
-                                this.toggle_git_blame(&Blame, window, cx);
-                            })
-                            .log_err();
-                    }
-                })
+                .toggleable_entry(
+                    "Annotate with Git Blame",
+                    show_git_blame_gutter,
+                    IconPosition::Start,
+                    Some(Blame.boxed_clone()),
+                    {
+                        let weak_editor = weak_editor.clone();
+                        move |window, cx| {
+                            weak_editor
+                                .update(cx, |this, cx| {
+                                    this.toggle_git_blame(&Blame, window, cx);
+                                })
+                                .log_err();
+                        }
+                    },
+                )
                 .separator()
                 .entry(set_bookmark_msg, Some(ToggleBookmark.boxed_clone()), {
                     let weak_editor = weak_editor.clone();
@@ -12547,11 +12549,7 @@ impl EditorSnapshot {
                 self.git_blame_gutter_max_author_length
                     .map(|max_author_length| {
                         let renderer = cx.global::<GlobalBlameRenderer>().0.clone();
-                        const MAX_RELATIVE_TIMESTAMP: &str = "2 years, 11 months ago";
-
-                        let max_char_count = max_author_length.min(renderer.max_author_length())
-                            + ::git::SHORT_SHA_LENGTH
-                            + MAX_RELATIVE_TIMESTAMP.len();
+                        let max_char_count = renderer.max_entry_text_length(max_author_length);
 
                         ch_advance * max_char_count
                             + renderer.blame_entry_non_text_width(window, cx)

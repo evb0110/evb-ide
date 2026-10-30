@@ -11,8 +11,9 @@ use git::{
     repository::{CommitSummary, RepoPath},
 };
 use gpui::{
-    ClipboardItem, Entity, Hsla, MouseButton, Pixels, Rems, ScrollHandle, Subscription, TextStyle,
-    TextStyleRefinement, UnderlineStyle, WeakEntity, prelude::*,
+    Action as _, ClipboardItem, Entity, Focusable as _, Hsla, MouseButton, Pixels, Rems,
+    ScrollHandle, Subscription, TextStyle, TextStyleRefinement, UnderlineStyle, WeakEntity,
+    prelude::*,
 };
 use markdown::{Markdown, MarkdownElement};
 use project::{
@@ -137,9 +138,17 @@ impl BlameRenderer for GitBlameRenderer {
         GIT_BLAME_MAX_AUTHOR_CHARS_DISPLAYED
     }
 
+    fn author_display_length(&self, author: &str) -> usize {
+        blame_author_short_name(author).chars().count()
+    }
+
+    fn max_entry_text_length(&self, max_author_length: usize) -> usize {
+        blame_date_text_length() + max_author_length.min(GIT_BLAME_MAX_AUTHOR_CHARS_DISPLAYED)
+    }
+
     fn blame_entry_non_text_width(&self, window: &Window, cx: &App) -> Pixels {
         let show_avatar = ProjectSettings::get_global(cx).git.blame.show_avatar;
-        let gap_count = if show_avatar { 3. } else { 2. };
+        let gap_count = if show_avatar { 2. } else { 1. };
         let width = GIT_BLAME_GUTTER_MARGIN.to_pixels(window.rem_size())
             + GIT_BLAME_GUTTER_GAP.to_pixels(window.rem_size()) * gap_count;
 
@@ -164,10 +173,12 @@ impl BlameRenderer for GitBlameRenderer {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let relative_timestamp = blame_entry_relative_timestamp(&blame_entry);
-        let short_commit_id = blame_entry.sha.display_short();
+        let date = blame_entry_date(&blame_entry);
         let author_name = blame_entry.author.as_deref().unwrap_or("<no name>");
-        let name = util::truncate_and_trailoff(author_name, GIT_BLAME_MAX_AUTHOR_CHARS_DISPLAYED);
+        let name = util::truncate_and_trailoff(
+            blame_author_short_name(author_name),
+            GIT_BLAME_MAX_AUTHOR_CHARS_DISPLAYED,
+        );
         let is_highlighted = editor
             .read(cx)
             .blame()
@@ -203,21 +214,15 @@ impl BlameRenderer for GitBlameRenderer {
                         .id(("blame", ix))
                         .w_full()
                         .gap_2()
-                        .justify_between()
                         .font(style.font())
                         .line_height(style.line_height)
                         .text_color(cx.theme().status().hint)
                         .when(is_highlighted, |this| {
                             this.bg(cx.theme().colors().element_selected)
                         })
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(div().text_color(sha_color).child(short_commit_id))
-                                .children(avatar)
-                                .child(name),
-                        )
-                        .child(relative_timestamp)
+                        .child(div().text_color(sha_color).child(date))
+                        .children(avatar)
+                        .child(name)
                         .hover(|style| style.bg(cx.theme().colors().element_hover))
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Right, {
@@ -558,52 +563,69 @@ fn deploy_blame_entry_context_menu(
         .read(cx)
         .blame()
         .and_then(|blame| blame.read(cx).highlighted_sha());
-    let context_menu = ContextMenu::build(window, cx, move |menu, _, _| {
-        let sha = format!("{}", blame_entry.sha);
-        let blame_revision = blame_entry.revision_target(highlighted_sha);
-        let blame_previous_revision = blame_entry.previous_revision_target();
-        let has_blame_targets = blame_revision.is_some() || blame_previous_revision.is_some();
-        menu.on_blur_subscription(Subscription::new(|| {}))
-            .entry("Copy Commit SHA", None, move |_, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
-            })
-            .when_some(
-                details.and_then(|details| details.permalink.clone()),
-                |this, url| {
-                    this.entry("Open Commit Permalink", None, move |_, cx| {
-                        cx.open_url(url.as_str())
+    let focus_handle = editor.read(cx).focus_handle(cx);
+    let context_menu = ContextMenu::build(window, cx, {
+        let editor = editor.clone();
+        move |menu, _, _| {
+            let sha = format!("{}", blame_entry.sha);
+            let blame_revision = blame_entry.revision_target(highlighted_sha);
+            let blame_previous_revision = blame_entry.previous_revision_target();
+            let has_blame_targets = blame_revision.is_some() || blame_previous_revision.is_some();
+            menu.on_blur_subscription(Subscription::new(|| {}))
+                .context(focus_handle)
+                .toggleable_entry(
+                    "Annotate with Git Blame",
+                    true,
+                    IconPosition::Start,
+                    Some(git::Blame.boxed_clone()),
+                    move |window, cx| {
+                        editor.update(cx, |editor, cx| {
+                            editor.toggle_git_blame(&git::Blame, window, cx);
+                        });
+                    },
+                )
+                .separator()
+                .entry("Copy Commit SHA", None, move |_, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
+                })
+                .when_some(
+                    details.and_then(|details| details.permalink.clone()),
+                    |this, url| {
+                        this.entry("Open Commit Permalink", None, move |_, cx| {
+                            cx.open_url(url.as_str())
+                        })
+                    },
+                )
+                .when(has_blame_targets, |this| this.separator())
+                .when_some(blame_revision, |this, (revision, path)| {
+                    let repository = repository.clone();
+                    let workspace = workspace.clone();
+                    this.entry("Blame Revision", None, move |window, cx| {
+                        open_buffer_blame_at_revision(
+                            repository.clone(),
+                            workspace.clone(),
+                            path.clone(),
+                            revision,
+                            window,
+                            cx,
+                        );
                     })
-                },
-            )
-            .when(has_blame_targets, |this| this.separator())
-            .when_some(blame_revision, |this, (revision, path)| {
-                let repository = repository.clone();
-                let workspace = workspace.clone();
-                this.entry("Blame Revision", None, move |window, cx| {
-                    open_buffer_blame_at_revision(
-                        repository.clone(),
-                        workspace.clone(),
-                        path.clone(),
-                        revision,
-                        window,
-                        cx,
-                    );
                 })
-            })
-            .when_some(blame_previous_revision, |this, (revision, path)| {
-                let repository = repository.clone();
-                let workspace = workspace.clone();
-                this.entry("Blame Previous Revision", None, move |window, cx| {
-                    open_buffer_blame_at_revision(
-                        repository.clone(),
-                        workspace.clone(),
-                        path.clone(),
-                        revision,
-                        window,
-                        cx,
-                    );
+                .when_some(blame_previous_revision, |this, (revision, path)| {
+                    let repository = repository.clone();
+                    let workspace = workspace.clone();
+                    this.entry("Blame Previous Revision", None, move |window, cx| {
+                        open_buffer_blame_at_revision(
+                            repository.clone(),
+                            workspace.clone(),
+                            path.clone(),
+                            revision,
+                            window,
+                            cx,
+                        );
+                    })
                 })
-            })
+        }
     });
 
     editor.update(cx, move |editor, cx| {
@@ -759,6 +781,35 @@ fn existing_blame_editor(
         })
 }
 
+/// Like WebStorm's annotations, the gutter shows only the author's last name.
+fn blame_author_short_name(author: &str) -> &str {
+    author.split_whitespace().last().unwrap_or(author)
+}
+
+fn format_blame_date(timestamp: OffsetDateTime) -> String {
+    let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    time_format::format_date(
+        timestamp.to_offset(local_offset),
+        OffsetDateTime::now_utc(),
+        false,
+    )
+}
+
+fn blame_entry_date(blame_entry: &BlameEntry) -> String {
+    match blame_entry.author_offset_date_time() {
+        Ok(timestamp) => format_blame_date(timestamp),
+        Err(_) => "?".to_string(),
+    }
+}
+
+/// Width of the locale's short date, measured on a date with two-digit day and month.
+fn blame_date_text_length() -> usize {
+    time::Date::from_calendar_date(2026, time::Month::December, 28)
+        .and_then(|date| date.with_hms(12, 0, 0))
+        .map(|date_time| format_blame_date(date_time.assume_utc()).chars().count())
+        .unwrap_or(10)
+}
+
 fn blame_entry_relative_timestamp(blame_entry: &BlameEntry) -> String {
     match blame_entry.author_offset_date_time() {
         Ok(timestamp) => {
@@ -772,5 +823,30 @@ fn blame_entry_relative_timestamp(blame_entry: &BlameEntry) -> String {
             )
         }
         Err(_) => "Error parsing date".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blame_gutter_shows_the_last_name() {
+        assert_eq!(blame_author_short_name("Ada Lovelace"), "Lovelace");
+        assert_eq!(blame_author_short_name("  Grace  Hopper "), "Hopper");
+        assert_eq!(blame_author_short_name("dependabot[bot]"), "dependabot[bot]");
+        assert_eq!(blame_author_short_name(""), "");
+        assert_eq!(GitBlameRenderer.author_display_length("Анна Иванова"), 7);
+    }
+
+    #[test]
+    fn blame_gutter_width_fits_date_and_capped_author() {
+        let date_length = blame_date_text_length();
+        assert!(date_length >= 6, "short date is {date_length} characters");
+        assert_eq!(GitBlameRenderer.max_entry_text_length(7), date_length + 7);
+        assert_eq!(
+            GitBlameRenderer.max_entry_text_length(40),
+            date_length + GIT_BLAME_MAX_AUTHOR_CHARS_DISPLAYED
+        );
     }
 }

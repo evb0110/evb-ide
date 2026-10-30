@@ -260,6 +260,8 @@ mod evb_default_settings_tests {
         assert_eq!(merged["disable_ai"], false);
         // Keys the EVB layer does not mention keep their upstream values.
         assert_eq!(merged["git_panel"]["button"], true);
+        assert_eq!(merged["git"]["blame"]["show_avatar"], false);
+        assert_eq!(merged["git"]["inline_blame"]["enabled"], true);
 
         let content = UserSettingsContent::parse_json_with_comments(&app_default_settings());
         assert!(content.is_ok(), "{:?}", content.err());

@@ -194,8 +194,8 @@ mod capture {
     use anyhow::{Context as _, Result};
     use assets::Assets;
     use gpui::{
-        AnyWindowHandle, AppContext as _, Bounds, Entity, UpdateGlobal as _, VisualTestAppContext,
-        WindowBounds, WindowHandle, WindowOptions, point, px, size,
+        AnyWindowHandle, AppContext as _, Bounds, Entity, MouseButton, UpdateGlobal as _,
+        VisualTestAppContext, WindowBounds, WindowHandle, WindowOptions, point, px, size,
     };
     use project::Project;
     use settings::SettingsStore;
@@ -328,6 +328,26 @@ mod capture {
         settle(&mut cx, 5);
         save(&mut cx, any_window, &output_dir, "09-vue-light")?;
 
+        open_file(
+            &workspace,
+            any_window,
+            "server/api/trip.get.ts",
+            &mut cx,
+        )?;
+        cx.dispatch_action(any_window, git::Blame);
+        wait_real_time(&mut cx, Duration::from_secs(3));
+        save(&mut cx, any_window, &output_dir, "10-blame")?;
+
+        // Points in the fixed 1440x900 window: a blame entry, the first item of its
+        // context menu, and a line number.
+        right_click(&mut cx, any_window, point(px(400.), px(200.)));
+        save(&mut cx, any_window, &output_dir, "11-blame-menu")?;
+        cx.simulate_click(any_window, point(px(487.), px(213.)), Default::default());
+        settle(&mut cx, 5);
+        save(&mut cx, any_window, &output_dir, "12-blame-closed")?;
+        right_click(&mut cx, any_window, point(px(402.), px(200.)));
+        save(&mut cx, any_window, &output_dir, "13-gutter-menu")?;
+
         println!("Captures written to {}", output_dir.display());
         Ok(())
     }
@@ -353,6 +373,16 @@ mod capture {
                 workspace.update(cx, |workspace, cx| f(workspace, window, cx))
             })
         }
+    }
+
+    fn right_click(
+        cx: &mut VisualTestAppContext,
+        window: AnyWindowHandle,
+        position: gpui::Point<gpui::Pixels>,
+    ) {
+        cx.simulate_mouse_down(window, position, MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(window, position, MouseButton::Right, Default::default());
+        settle(cx, 5);
     }
 
     fn set_theme(cx: &mut VisualTestAppContext, name: &str) {

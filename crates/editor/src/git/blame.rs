@@ -109,6 +109,19 @@ pub struct GitBlame {
 pub trait BlameRenderer {
     fn max_author_length(&self) -> usize;
 
+    /// How many characters of `author` the blame gutter displays.
+    fn author_display_length(&self, author: &str) -> usize {
+        author.len()
+    }
+
+    /// Characters in the widest blame gutter entry, given the longest displayed author.
+    fn max_entry_text_length(&self, max_author_length: usize) -> usize {
+        const MAX_RELATIVE_TIMESTAMP: &str = "2 years, 11 months ago";
+        max_author_length.min(self.max_author_length())
+            + git::SHORT_SHA_LENGTH
+            + MAX_RELATIVE_TIMESTAMP.len()
+    }
+
     fn blame_entry_non_text_width(&self, _: &Window, _: &App) -> Pixels {
         Pixels::ZERO
     }
@@ -426,6 +439,9 @@ impl GitBlame {
     pub fn max_author_length(&mut self, cx: &mut App) -> usize {
         let mut max_author_length = 0;
         self.sync_all(cx);
+        let renderer = cx
+            .try_global::<GlobalBlameRenderer>()
+            .map(|renderer| renderer.0.clone());
 
         for buffer in self.buffers.values() {
             for entry in buffer.entries.iter() {
@@ -433,7 +449,10 @@ impl GitBlame {
                     .blame
                     .as_ref()
                     .and_then(|entry| entry.author.as_ref())
-                    .map(|author| author.len());
+                    .map(|author| match &renderer {
+                        Some(renderer) => renderer.author_display_length(author),
+                        None => author.len(),
+                    });
                 if let Some(author_len) = author_len
                     && author_len > max_author_length
                 {
