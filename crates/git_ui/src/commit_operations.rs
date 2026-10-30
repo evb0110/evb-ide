@@ -1230,21 +1230,24 @@ mod tests {
     }
 
     #[allow(clippy::disallowed_methods)]
-    #[track_caller]
-    fn run_git(directory: &Path, arguments: &[&str]) -> String {
+    fn try_run_git(directory: &Path, arguments: &[&str]) -> Result<String, String> {
         let output = std::process::Command::new("git")
             .current_dir(directory)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .args(arguments)
             .output()
-            .expect("running git");
-        assert!(
-            output.status.success(),
-            "git {arguments:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    #[track_caller]
+    fn run_git(directory: &Path, arguments: &[&str]) -> String {
+        try_run_git(directory, arguments)
+            .unwrap_or_else(|error| panic!("git {arguments:?} failed: {error}"))
     }
 
     fn commit_file(directory: &Path, file: &str, contents: &str, message: &str) -> String {
@@ -1392,7 +1395,8 @@ mod tests {
         run_git(root, &["add", "a.txt"]);
         cx.update(|window, cx| fixup(&target(&shas[0], &repository, &workspace), window, cx));
         wait_for(&mut cx, |_| {
-            (run_git(root, &["show", "HEAD~2:a.txt"]) == "2").then_some(())
+            // Mid-rebase HEAD~2 may not exist yet.
+            (try_run_git(root, &["show", "HEAD~2:a.txt"]).as_deref() == Ok("2")).then_some(())
         });
         assert_eq!(subjects(root), ["C", "B", "A"]);
         assert_eq!(run_git(root, &["status", "--porcelain"]), "");
@@ -1460,7 +1464,7 @@ mod tests {
 
         cx.update(|window, cx| push_up_to(&target(&shas[1], &repository, &workspace), window, cx));
         wait_for(&mut cx, |_| {
-            (run_git(&origin, &["rev-parse", "main"]) == shas[1]).then_some(())
+            (try_run_git(&origin, &["rev-parse", "main"]).as_ref() == Ok(&shas[1])).then_some(())
         });
 
         // Rewriting a pushed commit asks first; cancelling leaves history alone.

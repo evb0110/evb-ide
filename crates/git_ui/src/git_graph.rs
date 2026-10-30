@@ -620,25 +620,35 @@ fn short_ref_name(ref_name: &str) -> &str {
         .unwrap_or(ref_name)
 }
 
-fn timestamp_format() -> &'static [BorrowedFormatItem<'static>] {
+fn time_of_day_format() -> &'static [BorrowedFormatItem<'static>] {
     static FORMAT: OnceLock<Vec<BorrowedFormatItem<'static>>> = OnceLock::new();
-    FORMAT.get_or_init(|| {
-        time::format_description::parse("[day] [month repr:short] [year] [hour]:[minute]")
-            .unwrap_or_default()
-    })
+    FORMAT.get_or_init(|| time::format_description::parse("[hour]:[minute]").unwrap_or_default())
 }
 
 fn format_timestamp(timestamp: i64) -> String {
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    format_log_timestamp(timestamp, OffsetDateTime::now_utc(), local_offset)
+}
+
+/// WebStorm's log dates: "Today 09:21", "Yesterday 23:05", otherwise the
+/// locale's short date and the time.
+fn format_log_timestamp(timestamp: i64, now: OffsetDateTime, local_offset: UtcOffset) -> String {
     let Ok(datetime) = OffsetDateTime::from_unix_timestamp(timestamp) else {
         return "Unknown".to_string();
     };
-
-    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let local_datetime = datetime.to_offset(local_offset);
-
-    local_datetime
-        .format(timestamp_format())
-        .unwrap_or_default()
+    let today = now.to_offset(local_offset).date();
+    let time = local_datetime
+        .format(time_of_day_format())
+        .unwrap_or_default();
+    if local_datetime.date() == today {
+        format!("Today {time}")
+    } else if today.previous_day() == Some(local_datetime.date()) {
+        format!("Yesterday {time}")
+    } else {
+        let date = time_format::format_date(local_datetime, now, false);
+        format!("{date}, {time}")
+    }
 }
 
 fn accent_colors_count(accents: &AccentColors) -> usize {
@@ -1690,6 +1700,9 @@ pub struct GitGraph {
     _authors_task: Option<Task<()>>,
     show_branches: bool,
     collapsed_branch_groups: HashSet<SharedString>,
+    /// Branches containing the selected commit, for "In N branches".
+    selected_commit_branches: Option<(Oid, Vec<SharedString>)>,
+    _selected_commit_branches_task: Option<Task<()>>,
 }
 
 impl GitGraph {
@@ -1958,6 +1971,8 @@ impl GitGraph {
             _authors_task: None,
             show_branches: true,
             collapsed_branch_groups: HashSet::default(),
+            selected_commit_branches: None,
+            _selected_commit_branches_task: None,
         };
 
         this.fetch_initial_graph_data(cx);
@@ -2489,6 +2504,48 @@ impl GitGraph {
         let mut filter = self.log_filter();
         update(&mut filter);
         self.set_log_filter(filter, cx);
+    }
+
+    fn load_selected_commit_branches(
+        &mut self,
+        sha: Oid,
+        repository: &Entity<Repository>,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_commit_branches = None;
+        if !self.git_store.read(cx).is_local() {
+            return;
+        }
+        let branches = repository.update(cx, |repository, cx| {
+            repository.run_git_command(
+                None,
+                vec![
+                    "branch".into(),
+                    "--all".into(),
+                    "--contains".into(),
+                    sha.to_string(),
+                    "--format=%(refname:short)".into(),
+                ],
+                HashMap::default(),
+                cx,
+            )
+        });
+        self._selected_commit_branches_task = Some(cx.spawn(async move |this, cx| {
+            let Some(output) = branches.await.ok().and_then(Result::ok) else {
+                return;
+            };
+            let names = output
+                .lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty() && !name.ends_with("/HEAD"))
+                .map(|name| SharedString::from(name.to_string()))
+                .collect();
+            this.update(cx, |this, cx| {
+                this.selected_commit_branches = Some((sha, names));
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn load_authors(&mut self, cx: &mut Context<Self>) {
@@ -3171,6 +3228,7 @@ impl GitGraph {
         let diff_handle = commit.data.sha.to_string();
 
         self.load_selected_commit_message(cx, &commit_message_handle, &repository);
+        self.load_selected_commit_branches(commit_message_handle, &repository, cx);
 
         let diff_task =
             repository.update(cx, |repo, cx| repo.load_commit_diff(diff_handle, false, cx));
@@ -3920,6 +3978,11 @@ impl GitGraph {
 
         let date_string = commit_timestamp.map(format_timestamp).unwrap_or_default();
 
+        let containing_branches = self
+            .selected_commit_branches
+            .as_ref()
+            .filter(|(sha, _)| *sha == commit_entry.data.sha)
+            .map(|(_, branches)| branches.clone());
         let remote = repository.update(cx, |repo, cx| {
             let remote_url = repo.default_remote_url()?;
             let provider_registry = GitHostingProviderRegistry::default_global(cx);
@@ -4252,6 +4315,36 @@ impl GitGraph {
                                                 cx.open_url(&url);
                                             },
                                         ),
+                                    )
+                                })
+                                .when_some(containing_branches.clone(), |this, branches| {
+                                    let summary = match branches.as_slice() {
+                                        [] => "In no branch".to_string(),
+                                        [branch] => format!("In 1 branch: {branch}"),
+                                        _ => format!(
+                                            "In {} branches: {}",
+                                            branches.len(),
+                                            branches.join(", ")
+                                        ),
+                                    };
+                                    this.child(
+                                        h_flex()
+                                            .gap_1()
+                                            .px_1()
+                                            .min_w_0()
+                                            .child(
+                                                Icon::new(IconName::GitBranch)
+                                                    .size(IconSize::Small)
+                                                    .color(Color::Muted),
+                                            )
+                                            .child(
+                                                Label::new(summary.clone())
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Muted)
+                                                    .truncate(),
+                                            )
+                                            .id("commit-containing-branches")
+                                            .tooltip(Tooltip::text(summary)),
                                     )
                                 }),
                         )
@@ -9330,6 +9423,21 @@ mod tests {
                 "    main (refs/remotes/upstream/main)",
             ]
         );
+    }
+
+    #[test]
+    fn test_log_timestamps() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let offset = UtcOffset::from_hms(3, 0, 0).unwrap();
+        let at = |seconds_ago: i64| {
+            format_log_timestamp(now.unix_timestamp() - seconds_ago, now, offset)
+        };
+        // `now` is 2027-01-15 11:00 at UTC+3.
+        assert_eq!(at(60 * 60), "Today 10:00");
+        assert_eq!(at(12 * 60 * 60), "Yesterday 23:00");
+        let older = at(3 * 24 * 60 * 60);
+        assert!(older.ends_with(", 11:00"), "{older}");
+        assert!(!older.starts_with("Today") && !older.starts_with("Yesterday"));
     }
 
     #[test]
