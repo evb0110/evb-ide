@@ -10,13 +10,15 @@ use crate::{
     commit_view::CommitView,
     git_status_icon,
 };
-use collections::{BTreeMap, HashMap, IndexSet};
+use collections::{BTreeMap, HashMap, HashSet, IndexSet};
 use editor::Editor;
 use file_icons::FileIcons;
 use git::{
     BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, Oid, ParsedGitRemote,
     parse_git_remote_url,
-    repository::{InitialGraphCommitData, LogOrder, LogSource, RepoPath, SearchCommitArgs},
+    repository::{
+        Branch, InitialGraphCommitData, LogFilter, LogOrder, LogSource, RepoPath, SearchCommitArgs,
+    },
     status::{FileStatus, StatusCode, TrackedStatus},
 };
 use gpui::{
@@ -1066,6 +1068,193 @@ impl GraphData {
     }
 }
 
+const MAX_LISTED_AUTHORS: usize = 30;
+
+const DATE_FILTERS: &[(&str, &str)] = &[
+    ("Last 24 Hours", "24 hours ago"),
+    ("Last 7 Days", "7 days ago"),
+    ("Last 30 Days", "30 days ago"),
+    ("Last Year", "1 year ago"),
+];
+
+fn date_filter_label(since: &str) -> String {
+    DATE_FILTERS
+        .iter()
+        .find(|(_, value)| *value == since)
+        .map(|(label, _)| label.to_string())
+        .unwrap_or_else(|| format!("Since {since}"))
+}
+
+/// Distinct names from `git log --format=%aN` output, most commits first.
+fn authors_by_activity(log_output: &str) -> Vec<SharedString> {
+    let mut counts = HashMap::<&str, usize>::default();
+    for name in log_output
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        *counts.entry(name).or_default() += 1;
+    }
+    let mut authors = counts.into_iter().collect::<Vec<_>>();
+    authors.sort_by(|(left_name, left_count), (right_name, right_count)| {
+        right_count.cmp(left_count).then(left_name.cmp(right_name))
+    });
+    authors
+        .into_iter()
+        .map(|(name, _)| SharedString::from(name.to_string()))
+        .collect()
+}
+
+fn filter_dropdown(
+    id: &'static str,
+    label: SharedString,
+    build: impl Fn(ContextMenu) -> ContextMenu + 'static,
+) -> AnyElement {
+    let build = Rc::new(build);
+    PopoverMenu::new(id)
+        .menu(move |window, cx| {
+            let build = build.clone();
+            Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                build(menu)
+            }))
+        })
+        .trigger(
+            Button::new(SharedString::from(format!("{id}-trigger")), label)
+                .label_size(LabelSize::Small)
+                .end_icon(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                ),
+        )
+        .anchor(Anchor::TopLeft)
+        .into_any_element()
+}
+
+#[derive(Debug, PartialEq)]
+struct BranchTreeRow {
+    depth: usize,
+    kind: BranchTreeRowKind,
+}
+
+#[derive(Debug, PartialEq)]
+enum BranchTreeRowKind {
+    Head,
+    Group {
+        key: SharedString,
+        label: SharedString,
+        collapsed: bool,
+    },
+    Branch {
+        branch: Branch,
+        label: SharedString,
+    },
+}
+
+/// Lays out WebStorm's branches tree: HEAD, then "Local" and "Remote" (one
+/// group per remote), with branch names split into folders at `/`. Groups
+/// whose key is in `collapsed` hide their contents.
+fn branch_tree_rows(branches: &[Branch], collapsed: &HashSet<SharedString>) -> Vec<BranchTreeRow> {
+    fn add_branches(
+        rows: &mut Vec<BranchTreeRow>,
+        group_key: &str,
+        depth: usize,
+        branches: Vec<(&str, &Branch)>,
+        collapsed: &HashSet<SharedString>,
+    ) {
+        let mut folders = BTreeMap::<&str, Vec<(&str, &Branch)>>::new();
+        let mut leaves = Vec::new();
+        for (name, branch) in branches {
+            match name.split_once('/') {
+                Some((folder, rest)) => folders.entry(folder).or_default().push((rest, branch)),
+                None => leaves.push((name, branch)),
+            }
+        }
+        for (folder, children) in folders {
+            let key = SharedString::from(format!("{group_key}/{folder}"));
+            let is_collapsed = collapsed.contains(&key);
+            rows.push(BranchTreeRow {
+                depth,
+                kind: BranchTreeRowKind::Group {
+                    key: key.clone(),
+                    label: folder.to_string().into(),
+                    collapsed: is_collapsed,
+                },
+            });
+            if !is_collapsed {
+                add_branches(rows, &key, depth + 1, children, collapsed);
+            }
+        }
+        leaves.sort_by_key(|(name, _)| *name);
+        for (name, branch) in leaves {
+            rows.push(BranchTreeRow {
+                depth,
+                kind: BranchTreeRowKind::Branch {
+                    branch: branch.clone(),
+                    label: name.to_string().into(),
+                },
+            });
+        }
+    }
+
+    let mut rows = vec![BranchTreeRow {
+        depth: 0,
+        kind: BranchTreeRowKind::Head,
+    }];
+    let local = branches
+        .iter()
+        .filter(|branch| !branch.is_remote())
+        .map(|branch| (branch.name(), branch))
+        .collect::<Vec<_>>();
+    let mut remotes = BTreeMap::<&str, Vec<(&str, &Branch)>>::new();
+    for branch in branches.iter().filter(|branch| branch.is_remote()) {
+        // `origin/HEAD` is an alias of the remote's default branch.
+        if let Some((remote, name)) = branch.name().split_once('/')
+            && name != "HEAD"
+        {
+            remotes.entry(remote).or_default().push((name, branch));
+        }
+    }
+    for (key, label, depth, children) in [("local", "Local", 0, local)]
+        .into_iter()
+        .chain((!remotes.is_empty()).then(|| ("remote", "Remote", 0, Vec::new())))
+    {
+        let key = SharedString::from(key);
+        let is_collapsed = collapsed.contains(&key);
+        rows.push(BranchTreeRow {
+            depth,
+            kind: BranchTreeRowKind::Group {
+                key: key.clone(),
+                label: label.into(),
+                collapsed: is_collapsed,
+            },
+        });
+        if is_collapsed {
+            continue;
+        }
+        if key == "local" {
+            add_branches(&mut rows, &key, depth + 1, children, collapsed);
+        } else {
+            for (remote, remote_branches) in std::mem::take(&mut remotes) {
+                let remote_key = SharedString::from(format!("remote/{remote}"));
+                let remote_collapsed = collapsed.contains(&remote_key);
+                rows.push(BranchTreeRow {
+                    depth: 1,
+                    kind: BranchTreeRowKind::Group {
+                        key: remote_key.clone(),
+                        label: remote.to_string().into(),
+                        collapsed: remote_collapsed,
+                    },
+                });
+                if !remote_collapsed {
+                    add_branches(&mut rows, &remote_key, 2, remote_branches, collapsed);
+                }
+            }
+        }
+    }
+    rows
+}
+
 pub fn init(cx: &mut App) {
     workspace::register_serializable_item::<GitGraph>(cx);
 
@@ -1215,6 +1404,23 @@ pub fn open_or_reuse_graph(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    // The whole-repository log lives in the Git Log panel, as in WebStorm; file
+    // histories still open as editor tabs.
+    if log_source == LogSource::All
+        && let Some(panel) = workspace.panel::<crate::git_log_panel::GitLogPanel>(cx)
+    {
+        workspace.focus_panel::<crate::git_log_panel::GitLogPanel>(window, cx);
+        if let Some(graph) = panel.read(cx).graph().cloned() {
+            graph.update(cx, |graph, cx| {
+                graph.set_repo_id(repo_id, cx);
+                if let Some(sha) = sha {
+                    graph.select_commit_by_sha(sha.as_str(), cx);
+                }
+            });
+        }
+        return;
+    }
+
     let existing = workspace.items_of_type::<GitGraph>(cx).find(|graph| {
         let graph = graph.read(cx);
         graph.repo_id == repo_id && graph.log_source == log_source
@@ -1478,6 +1684,12 @@ pub struct GitGraph {
     changed_files_expanded_dirs: HashMap<RepoPath, bool>,
     pending_select_sha: Option<Oid>,
     nav_history: Option<ItemNavHistory>,
+    /// Authors of recent commits, most active first, for the User filter.
+    authors: Vec<SharedString>,
+    current_user_name: Option<SharedString>,
+    _authors_task: Option<Task<()>>,
+    show_branches: bool,
+    collapsed_branch_groups: HashSet<SharedString>,
 }
 
 impl GitGraph {
@@ -1741,9 +1953,15 @@ impl GitGraph {
             changed_files_expanded_dirs: HashMap::default(),
             pending_select_sha: None,
             nav_history: None,
+            authors: Vec::new(),
+            current_user_name: None,
+            _authors_task: None,
+            show_branches: true,
+            collapsed_branch_groups: HashSet::default(),
         };
 
         this.fetch_initial_graph_data(cx);
+        this.load_authors(cx);
         this
     }
 
@@ -2245,6 +2463,457 @@ impl GitGraph {
         self.invalidate_state(cx);
     }
 
+    fn log_filter(&self) -> LogFilter {
+        match &self.log_source {
+            LogSource::Filtered(filter) => filter.clone(),
+            LogSource::Branch(revision) => LogFilter {
+                revision: Some(revision.clone()),
+                ..LogFilter::default()
+            },
+            _ => LogFilter::default(),
+        }
+    }
+
+    fn set_log_filter(&mut self, filter: LogFilter, cx: &mut Context<Self>) {
+        let log_source = if !filter.is_empty() {
+            LogSource::Filtered(filter)
+        } else if let Some(revision) = filter.revision {
+            LogSource::Branch(revision)
+        } else {
+            LogSource::All
+        };
+        self.set_log_source(log_source, cx);
+    }
+
+    fn update_log_filter(&mut self, cx: &mut Context<Self>, update: impl FnOnce(&mut LogFilter)) {
+        let mut filter = self.log_filter();
+        update(&mut filter);
+        self.set_log_filter(filter, cx);
+    }
+
+    fn load_authors(&mut self, cx: &mut Context<Self>) {
+        self.authors.clear();
+        self.current_user_name = None;
+        let Some(repository) = self.get_repository(cx) else {
+            return;
+        };
+        if !self.git_store.read(cx).is_local() {
+            return;
+        }
+        let run = |args: &[&str], cx: &mut Context<Self>| {
+            let args = args.iter().map(|arg| arg.to_string()).collect();
+            repository.update(cx, |repository, cx| {
+                repository.run_git_command(None, args, HashMap::default(), cx)
+            })
+        };
+        let authors = run(&["log", "--all", "--format=%aN", "-n", "5000"], cx);
+        let user_name = run(&["config", "user.name"], cx);
+        self._authors_task = Some(cx.spawn(async move |this, cx| {
+            let authors = authors.await.ok().and_then(Result::ok).unwrap_or_default();
+            let user_name = user_name
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty());
+            this.update(cx, |this, cx| {
+                this.authors = authors_by_activity(&authors);
+                this.current_user_name = user_name.map(SharedString::from);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// WebStorm's User, Date and Paths filters. They run `git log` with extra
+    /// arguments the collaboration protocol can't carry, so remote projects
+    /// don't show them.
+    fn render_log_filters(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if self.is_path_history() || !self.git_store.read(cx).is_local() {
+            return Vec::new();
+        }
+        let filter = self.log_filter();
+        let git_graph = cx.weak_entity();
+        let set = {
+            let git_graph = git_graph.clone();
+            move |update: Box<dyn Fn(&mut LogFilter)>| {
+                let git_graph = git_graph.clone();
+                move |_: &mut Window, cx: &mut App| {
+                    git_graph
+                        .update(cx, |git_graph, cx| {
+                            git_graph.update_log_filter(cx, |filter| update(filter))
+                        })
+                        .ok();
+                }
+            }
+        };
+        let ask = {
+            let workspace = self.workspace.clone();
+            move |title: &'static str,
+                  placeholder: &'static str,
+                  initial: Option<String>,
+                  apply: fn(&mut LogFilter, String)| {
+                let git_graph = git_graph.clone();
+                let workspace = workspace.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    let git_graph = git_graph.clone();
+                    crate::commit_operations::prompt_for_text(
+                        &workspace,
+                        title,
+                        IconName::Filter,
+                        placeholder,
+                        initial.as_deref(),
+                        None,
+                        move |text, _, cx| {
+                            git_graph
+                                .update(cx, |git_graph, cx| {
+                                    git_graph.update_log_filter(cx, |filter| apply(filter, text))
+                                })
+                                .ok();
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            }
+        };
+
+        let user_label: SharedString = match &filter.author {
+            Some(author) => format!("User: {author}").into(),
+            None => "User: All".into(),
+        };
+        let authors = self.authors.clone();
+        let current_user = self.current_user_name.clone();
+        let selected_author = filter.author.clone();
+        let user_filter = {
+            let set = set.clone();
+            let ask = ask.clone();
+            filter_dropdown("git-graph-user-filter", user_label, move |menu| {
+                let mut menu = menu.toggleable_entry(
+                    "All",
+                    selected_author.is_none(),
+                    IconPosition::Start,
+                    None,
+                    set(Box::new(|filter| filter.author = None)),
+                );
+                if let Some(me) = current_user.clone() {
+                    let author = me.clone();
+                    menu = menu.toggleable_entry(
+                        format!("me ({me})"),
+                        selected_author.as_ref() == Some(&me),
+                        IconPosition::Start,
+                        None,
+                        set(Box::new(move |filter| filter.author = Some(author.clone()))),
+                    );
+                }
+                if authors
+                    .iter()
+                    .any(|author| current_user.as_ref() != Some(author))
+                {
+                    menu = menu.separator();
+                }
+                for author in authors
+                    .iter()
+                    .filter(|author| current_user.as_ref() != Some(*author))
+                    .take(MAX_LISTED_AUTHORS)
+                {
+                    let chosen = author.clone();
+                    menu = menu.toggleable_entry(
+                        author.clone(),
+                        selected_author.as_ref() == Some(author),
+                        IconPosition::Start,
+                        None,
+                        set(Box::new(move |filter| filter.author = Some(chosen.clone()))),
+                    );
+                }
+                menu.separator().entry(
+                    "Select…",
+                    None,
+                    ask(
+                        "Show Commits by User",
+                        "Name or email",
+                        selected_author.as_ref().map(ToString::to_string),
+                        |filter, text| filter.author = Some(text.into()),
+                    ),
+                )
+            })
+        };
+
+        let date_label: SharedString = match &filter.since {
+            Some(since) => format!("Date: {}", date_filter_label(since)).into(),
+            None => "Date: All".into(),
+        };
+        let selected_since = filter.since.clone();
+        let date_filter = {
+            let set = set.clone();
+            let ask = ask.clone();
+            filter_dropdown("git-graph-date-filter", date_label, move |menu| {
+                let mut menu = menu.toggleable_entry(
+                    "All",
+                    selected_since.is_none(),
+                    IconPosition::Start,
+                    None,
+                    set(Box::new(|filter| filter.since = None)),
+                );
+                for (label, since) in DATE_FILTERS {
+                    menu = menu.toggleable_entry(
+                        *label,
+                        selected_since.as_deref() == Some(*since),
+                        IconPosition::Start,
+                        None,
+                        set(Box::new(move |filter| filter.since = Some((*since).into()))),
+                    );
+                }
+                menu.separator().entry(
+                    "Since…",
+                    None,
+                    ask(
+                        "Show Commits Since",
+                        "A date, such as 2026-01-31 or \"2 weeks ago\"",
+                        selected_since.as_ref().map(ToString::to_string),
+                        |filter, text| filter.since = Some(text.into()),
+                    ),
+                )
+            })
+        };
+
+        let paths_label: SharedString = match filter.paths.as_slice() {
+            [] => "Paths: All".into(),
+            [path] => format!("Paths: {}", path.as_unix_str()).into(),
+            [first, rest @ ..] => format!("Paths: {} +{}", first.as_unix_str(), rest.len()).into(),
+        };
+        let active_file = self.active_file_repo_path(cx);
+        let selected_paths = filter.paths;
+        let paths_filter = filter_dropdown("git-graph-paths-filter", paths_label, move |menu| {
+            let mut menu = menu.toggleable_entry(
+                "All",
+                selected_paths.is_empty(),
+                IconPosition::Start,
+                None,
+                set(Box::new(|filter| filter.paths.clear())),
+            );
+            if let Some(file) = active_file.clone() {
+                let folder = file
+                    .parent()
+                    .filter(|folder| !folder.is_empty())
+                    .map(RepoPath::from_rel_path);
+                for path in [Some(file), folder].into_iter().flatten() {
+                    let label = path.as_unix_str().to_string();
+                    let chosen = path.clone();
+                    menu = menu.toggleable_entry(
+                        label,
+                        selected_paths.as_slice() == [path.clone()],
+                        IconPosition::Start,
+                        None,
+                        set(Box::new(move |filter| filter.paths = vec![chosen.clone()])),
+                    );
+                }
+            }
+            menu.separator().entry(
+                "Select…",
+                None,
+                ask(
+                    "Show Commits Changing Paths",
+                    "Paths relative to the repository, separated by commas",
+                    (!selected_paths.is_empty()).then(|| {
+                        selected_paths
+                            .iter()
+                            .map(|path| path.as_unix_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }),
+                    |filter, text| {
+                        filter.paths = text
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|path| !path.is_empty())
+                            .filter_map(|path| RepoPath::new(path.trim_matches('/')).log_err())
+                            .collect();
+                    },
+                ),
+            )
+        });
+
+        vec![user_filter, date_filter, paths_filter]
+    }
+
+    /// The active editor's file, as a path in this graph's repository.
+    fn active_file_repo_path(&self, cx: &Context<Self>) -> Option<RepoPath> {
+        let workspace = self.workspace.upgrade()?;
+        let workspace = workspace.read(cx);
+        let item = workspace.active_item(cx)?;
+        // This graph may be the active item; it is being rendered and can't be read.
+        if item.item_id() == cx.entity_id() {
+            return None;
+        }
+        let editor = item.downcast::<Editor>()?;
+        let project_path = workspace::ItemHandle::project_path(&editor, cx)?;
+        let (repository, repo_path) = workspace
+            .project()
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repository_and_path_for_project_path(&project_path, cx)?;
+        (repository.read(cx).id == self.repo_id).then_some(repo_path)
+    }
+
+    /// WebStorm's branches tree beside the log: HEAD, local branches and each
+    /// remote, grouped into folders at `/`. Clicking a branch shows its log.
+    fn render_branches_sidebar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.show_branches || self.is_path_history() {
+            return None;
+        }
+        let repository = self.get_repository(cx)?;
+        let branches = repository.read(cx).branch_list.clone();
+        let current_branch = repository
+            .read(cx)
+            .branch
+            .as_ref()
+            .map(|branch| branch.name().to_string());
+        let selected_revision = self.log_filter().revision;
+        let rows = branch_tree_rows(&branches, &self.collapsed_branch_groups);
+        let colors = cx.theme().colors();
+
+        let row_elements = rows.into_iter().enumerate().map(|(index, row)| {
+            let indent = px(8. + 14. * row.depth as f32);
+            let base = h_flex()
+                .id(("git-graph-branch-row", index))
+                .w_full()
+                .h_6()
+                .pl(indent)
+                .pr_2()
+                .gap_1()
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.element_hover));
+            match row.kind {
+                BranchTreeRowKind::Head => {
+                    let is_selected = selected_revision.as_deref() == Some("HEAD");
+                    base.when(is_selected, |this| this.bg(colors.element_selected))
+                        .child(
+                            Icon::new(IconName::GitCommit)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(Label::new("HEAD (Current Branch)").size(LabelSize::Small))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.update_log_filter(cx, |filter| {
+                                filter.revision =
+                                    (!is_selected).then(|| SharedString::from("HEAD"));
+                            });
+                        }))
+                        .into_any_element()
+                }
+                BranchTreeRowKind::Group {
+                    key,
+                    label,
+                    collapsed,
+                } => base
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(label).size(LabelSize::Small).truncate())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed_branch_groups.remove(&key) {
+                            this.collapsed_branch_groups.insert(key.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                BranchTreeRowKind::Branch { branch, label } => {
+                    let is_selected = selected_revision.as_ref() == Some(&branch.ref_name);
+                    let is_current =
+                        !branch.is_remote() && current_branch.as_deref() == Some(branch.name());
+                    let ref_name = branch.ref_name.clone();
+                    let tip = branch
+                        .most_recent_commit
+                        .as_ref()
+                        .and_then(|commit| commit.sha.parse::<Oid>().ok());
+                    let current = current_branch.clone();
+                    base.when(is_selected, |this| this.bg(colors.element_selected))
+                        .child(
+                            Icon::new(if is_current {
+                                IconName::Check
+                            } else {
+                                IconName::GitBranch
+                            })
+                            .size(IconSize::Small)
+                            .color(if is_current {
+                                Color::Accent
+                            } else {
+                                Color::Muted
+                            }),
+                        )
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::Small)
+                                .truncate()
+                                .when(is_current, |label| label.weight(gpui::FontWeight::SEMIBOLD)),
+                        )
+                        .tooltip(Tooltip::text(branch.name().to_string()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let ref_name = ref_name.clone();
+                            this.update_log_filter(cx, |filter| {
+                                filter.revision = (!is_selected).then_some(ref_name);
+                            });
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                let (Some(tip), Some(repository)) = (tip, this.get_repository(cx))
+                                else {
+                                    return;
+                                };
+                                let target = crate::commit_operations::CommitTarget {
+                                    sha: tip,
+                                    repository: repository.downgrade(),
+                                    workspace: this.workspace.clone(),
+                                };
+                                let branch = branch.clone();
+                                let current = current.clone();
+                                let menu = ContextMenu::build(window, cx, move |menu, _, _| {
+                                    crate::commit_operations::branch_actions(
+                                        menu.header(format!("Branch {}", branch.name())),
+                                        &target,
+                                        &branch,
+                                        current.as_deref(),
+                                    )
+                                });
+                                this.set_context_menu(menu, event.position, None, window, cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .into_any_element()
+                }
+            }
+        });
+
+        Some(
+            v_flex()
+                .id("git-graph-branches")
+                .w(px(240.))
+                .h_full()
+                .flex_none()
+                .py_1()
+                .overflow_y_scroll()
+                .border_r_1()
+                .border_color(colors.border_variant)
+                .bg(colors.panel_background)
+                .children(row_elements)
+                .into_any_element(),
+        )
+    }
+
     /// WebStorm's "Branch" filter of the Git log: show the history of every
     /// branch, or of one branch.
     fn render_branch_filter(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2255,10 +2924,7 @@ impl GitGraph {
             .get_repository(cx)
             .map(|repository| repository.read(cx).branch_list.clone())
             .unwrap_or_default();
-        let selected = match &self.log_source {
-            LogSource::Branch(name) => Some(name.clone()),
-            _ => None,
-        };
+        let selected = self.log_filter().revision;
         let label: SharedString = match &selected {
             Some(ref_name) => format!("Branch: {}", short_ref_name(ref_name)).into(),
             None => "Branch: All".into(),
@@ -2299,9 +2965,15 @@ impl GitGraph {
                                 if already_shown {
                                     return;
                                 }
+                                let revision = match &log_source {
+                                    LogSource::Branch(ref_name) => Some(ref_name.clone()),
+                                    _ => None,
+                                };
                                 git_graph
                                     .update(cx, |git_graph, cx| {
-                                        git_graph.set_log_source(log_source.clone(), cx)
+                                        git_graph.update_log_filter(cx, |filter| {
+                                            filter.revision = revision
+                                        })
                                     })
                                     .ok();
                             }
@@ -2637,6 +3309,7 @@ impl GitGraph {
         {
             self.repo_id = repo_id;
             self.invalidate_state(cx);
+            self.load_authors(cx);
         }
     }
 
@@ -3030,6 +3703,18 @@ impl GitGraph {
 
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let branch_filter = self.render_branch_filter(cx);
+        let log_filters = self.render_log_filters(cx);
+        let branches_toggle = (!self.is_path_history()).then(|| {
+            IconButton::new("git-graph-toggle-branches", IconName::GitBranch)
+                .shape(ui::IconButtonShape::Square)
+                .icon_size(IconSize::Small)
+                .toggle_state(self.show_branches)
+                .tooltip(Tooltip::text("Branches"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_branches = !this.show_branches;
+                    cx.notify();
+                }))
+        });
         let color = cx.theme().colors();
         let query_focus_handle = self
             .search_state
@@ -3048,7 +3733,9 @@ impl GitGraph {
             .gap_1p5()
             .border_b_1()
             .border_color(color.border_variant)
+            .children(branches_toggle)
             .children(branch_filter)
+            .children(log_filters)
             .child(
                 h_flex()
                     .h_8()
@@ -4910,10 +5597,17 @@ impl Render for GitGraph {
                 cx.notify();
             }))
             .child(
-                v_flex()
+                h_flex()
                     .size_full()
-                    .child(self.render_search_bar(cx))
-                    .child(div().flex_1().child(content)),
+                    .children(self.render_branches_sidebar(cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(self.render_search_bar(cx))
+                            .child(div().flex_1().child(content)),
+                    ),
             )
             .children(self.context_menu.as_ref().map(|context_menu| {
                 deferred(
@@ -5274,6 +5968,8 @@ mod persistence {
             LogSource::Branch(_) => LOG_SOURCE_BRANCH,
             LogSource::Sha(_) => LOG_SOURCE_SHA,
             LogSource::Path(_) => LOG_SOURCE_PATH,
+            LogSource::Filtered(filter) if filter.revision.is_some() => LOG_SOURCE_BRANCH,
+            LogSource::Filtered(_) => LOG_SOURCE_ALL,
         }
     }
 
@@ -5283,6 +5979,7 @@ mod persistence {
             LogSource::Branch(branch) => Some(branch.to_string()),
             LogSource::Sha(oid) => Some(oid.to_string()),
             LogSource::Path(path) => Some(path.as_unix_str().to_string()),
+            LogSource::Filtered(filter) => filter.revision.as_ref().map(ToString::to_string),
         }
     }
 
@@ -8557,6 +9254,92 @@ mod tests {
             resolved_task.resolved.args,
             vec!["checkout".to_string(), "feature-x".to_string()]
         );
+    }
+
+    #[test]
+    fn test_branch_tree_rows() {
+        let branch = |ref_name: &str| Branch {
+            is_head: false,
+            ref_name: ref_name.to_string().into(),
+            upstream: None,
+            most_recent_commit: None,
+        };
+        let branches = [
+            "refs/heads/main",
+            "refs/heads/codex/pdf-fixes",
+            "refs/heads/codex/sub/deep",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/chore/deps",
+            "refs/remotes/upstream/main",
+        ]
+        .map(branch);
+        let describe = |rows: Vec<BranchTreeRow>| {
+            rows.into_iter()
+                .map(|row| {
+                    let text = match row.kind {
+                        BranchTreeRowKind::Head => "HEAD".to_string(),
+                        BranchTreeRowKind::Group {
+                            label, collapsed, ..
+                        } => {
+                            format!("{label}{}", if collapsed { " +" } else { "/" })
+                        }
+                        BranchTreeRowKind::Branch { branch, label } => {
+                            format!("{label} ({})", branch.ref_name)
+                        }
+                    };
+                    format!("{}{text}", "  ".repeat(row.depth))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            describe(branch_tree_rows(&branches, &HashSet::default())),
+            [
+                "HEAD",
+                "Local/",
+                "  codex/",
+                "    sub/",
+                "      deep (refs/heads/codex/sub/deep)",
+                "    pdf-fixes (refs/heads/codex/pdf-fixes)",
+                "  main (refs/heads/main)",
+                "Remote/",
+                "  origin/",
+                "    chore/",
+                "      deps (refs/remotes/origin/chore/deps)",
+                "    main (refs/remotes/origin/main)",
+                "  upstream/",
+                "    main (refs/remotes/upstream/main)",
+            ]
+        );
+
+        let collapsed = HashSet::from_iter([
+            SharedString::from("local/codex"),
+            SharedString::from("remote/origin"),
+        ]);
+        assert_eq!(
+            describe(branch_tree_rows(&branches, &collapsed)),
+            [
+                "HEAD",
+                "Local/",
+                "  codex +",
+                "  main (refs/heads/main)",
+                "Remote/",
+                "  origin +",
+                "  upstream/",
+                "    main (refs/remotes/upstream/main)",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_authors_by_activity() {
+        assert_eq!(
+            authors_by_activity("Bob\nAnn\nBob\n\nCy\nAnn\nBob\n"),
+            ["Bob", "Ann", "Cy"]
+        );
+        assert_eq!(date_filter_label("7 days ago"), "Last 7 Days");
+        assert_eq!(date_filter_label("2026-01-01"), "Since 2026-01-01");
     }
 
     #[test]

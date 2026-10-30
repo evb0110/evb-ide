@@ -7116,14 +7116,14 @@ impl Repository {
     /// commands such as `revert` or `rebase` never wait for input.
     pub fn run_git_command(
         &mut self,
-        status: impl Into<SharedString>,
+        status: Option<SharedString>,
         args: Vec<String>,
         env: HashMap<String, String>,
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<Result<String>> {
         let receiver = self.send_job(
             "run_git_command",
-            Some(status.into()),
+            status,
             move |git_repo, _| async move {
                 match git_repo {
                     RepositoryState::Local(LocalRepositoryState {
@@ -11111,6 +11111,12 @@ fn log_source_to_proto(log_source: &LogSource) -> proto::GitLogSource {
             LogSource::Path(path) => {
                 proto::git_log_source::Source::Path(path.as_unix_str().to_owned())
             }
+            // The log filters have no protocol message yet, so remote projects
+            // don't offer them; a filtered source falls back to its revision.
+            LogSource::Filtered(filter) => match &filter.revision {
+                Some(revision) => proto::git_log_source::Source::Branch(revision.to_string()),
+                None => proto::git_log_source::Source::All(proto::GitLogSourceAll {}),
+            },
         }),
     }
 }

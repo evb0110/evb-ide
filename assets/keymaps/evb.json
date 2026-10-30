@@ -12,6 +12,13 @@
     },
   },
   {
+    // WebStorm's Git tool window; the JetBrains keymap leaves cmd-9 unbound.
+    "context": "Pane || Workspace",
+    "bindings": {
+      "cmd-9": "git_log_panel::ToggleFocus",
+    },
+  },
+  {
     // JetBrains binds these in the editor too, replacing the macOS
     // delete-forward and select-all-occurrences defaults.
     "context": "Editor && mode == full",

@@ -169,6 +169,11 @@ const { pending, refresh } = await useFetch('/api/trip')
         "-X",
         "theirs",
     ])?;
+    // More refs for the branches tree: folders and a remote.
+    git(&["branch", "codex/pdf-fixes", "HEAD~1"])?;
+    git(&["branch", "codex/editor-perf", "HEAD~2"])?;
+    git(&["update-ref", "refs/remotes/origin/master", "HEAD~1"])?;
+    git(&["update-ref", "refs/remotes/origin/chore/deps-vitest", "HEAD~2"])?;
 
     // Leave an uncommitted change for the Commit panel.
     let api = path.join("server/api/trip.get.ts");
@@ -346,11 +351,27 @@ mod capture {
         cx.dispatch_action(any_window, git_ui::git_graph::Open);
         wait_real_time(&mut cx, Duration::from_secs(3));
         save(&mut cx, any_window, &output_dir, "06-git-log")?;
-        // The fixture's third commit, the tip of `fix/map-tiles`.
-        right_click(&mut cx, any_window, point(px(550.), px(167.)));
+        // Points in the Git Log panel of the fixed 1440x900 window: the third
+        // commit, the `codex/pdf-fixes` and `fix/map-tiles` branch rows, and the
+        // User filter.
+        right_click(&mut cx, any_window, point(px(975.), px(643.)));
         save(&mut cx, any_window, &output_dir, "06b-git-log-menu")?;
         cx.simulate_keystrokes(any_window, "escape");
         settle(&mut cx, 3);
+        right_click(&mut cx, any_window, point(px(431.), px(606.)));
+        save(&mut cx, any_window, &output_dir, "06c-branch-menu")?;
+        cx.simulate_keystrokes(any_window, "escape");
+        settle(&mut cx, 3);
+        cx.simulate_click(any_window, point(px(720.), px(534.)), Default::default());
+        settle(&mut cx, 5);
+        save(&mut cx, any_window, &output_dir, "06d-user-filter")?;
+        cx.simulate_keystrokes(any_window, "escape");
+        settle(&mut cx, 3);
+        cx.simulate_click(any_window, point(px(435.), px(645.)), Default::default());
+        wait_real_time(&mut cx, Duration::from_secs(2));
+        save(&mut cx, any_window, &output_dir, "06e-branch-selected")?;
+        cx.simulate_click(any_window, point(px(435.), px(645.)), Default::default());
+        wait_real_time(&mut cx, Duration::from_secs(2));
 
         set_theme(&mut cx, "IntelliJ Dark");
         settle(&mut cx, 5);
@@ -600,6 +621,10 @@ mod capture {
         let git_panel = cx
             .foreground_executor
             .block_test(git_ui::git_panel::GitPanel::load(weak_workspace, async_cx));
+        workspace.update_in_window(window, cx, |workspace, window, cx| {
+            let git_log_panel = git_ui::git_log_panel::GitLogPanel::new(workspace, window, cx);
+            workspace.add_panel(git_log_panel, window, cx);
+        })?;
         cx.background_executor.forbid_parking();
         let (project_panel, terminal_panel, git_panel) = (
             project_panel.context("loading the project panel")?,

@@ -108,10 +108,10 @@ async fn git(
     env: HashMap<String, String>,
     cx: &mut AsyncWindowContext,
 ) -> Result<String> {
-    let status = status.to_string();
+    let status = SharedString::from(status.to_string());
     repository
         .update(cx, |repository, cx| {
-            repository.run_git_command(status, args, env, cx)
+            repository.run_git_command(Some(status), args, env, cx)
         })
         .await?
 }
@@ -761,15 +761,28 @@ fn reword(target: CommitTarget, is_head: bool, message: String, window: &mut Win
 }
 
 pub(crate) fn new_branch(target: &CommitTarget, window: &mut Window, cx: &mut App) {
-    let Some(workspace) = target.workspace.upgrade() else {
-        return;
-    };
     let target = target.clone();
-    workspace.update(cx, |workspace, cx| {
-        workspace.toggle_modal(window, cx, |window, cx| {
-            NewBranchModal::new(target, window, cx)
-        });
-    });
+    let title = format!("New Branch from {}", target.short_sha());
+    prompt_for_text(
+        &target.workspace.clone(),
+        title,
+        IconName::GitBranch,
+        "Branch name",
+        None,
+        Some("The new branch is checked out.".into()),
+        move |name, window, cx| {
+            target.run(
+                format!("Creating {name}"),
+                args(["switch", "-c", &name, &target.sha.to_string()]),
+                format!("Created and checked out '{name}' at {}", target.short_sha()),
+                "Create branch failed",
+                window,
+                cx,
+            );
+        },
+        window,
+        cx,
+    );
 }
 
 /// Adds WebStorm's per-branch submenu ("Branch 'main'") for a branch at the commit.
@@ -779,74 +792,91 @@ pub(crate) fn branch_submenu(
     branch: &Branch,
     current_branch: Option<&str>,
 ) -> ContextMenu {
+    let target = target.clone();
+    let branch = branch.clone();
+    let current_branch = current_branch.map(str::to_string);
+    menu.submenu(format!("Branch '{}'", branch.name()), move |menu, _, _| {
+        branch_actions(menu, &target, &branch, current_branch.as_deref())
+    })
+}
+
+/// The actions of WebStorm's branch menus, for `branch` whose tip is `target`.
+pub(crate) fn branch_actions(
+    mut menu: ContextMenu,
+    target: &CommitTarget,
+    branch: &Branch,
+    current_branch: Option<&str>,
+) -> ContextMenu {
     let name = branch.name().to_string();
     let is_remote = branch.is_remote();
     let is_current = !is_remote && current_branch == Some(name.as_str());
+    if !is_current {
+        let target = target.clone();
+        let name = name.clone();
+        menu = menu.entry("Checkout", None, move |window, cx| {
+            checkout_branch(&target, &name, is_remote, window, cx)
+        });
+    }
+    menu = menu.entry(format!("New Branch from '{name}'…"), None, {
+        let target = target.clone();
+        move |window, cx| new_branch(&target, window, cx)
+    });
+    if !is_current {
+        let merge_target = target.clone();
+        let merge_name = name.clone();
+        menu = menu
+            .entry(
+                format!("Merge '{name}' into Current"),
+                None,
+                move |window, cx| {
+                    merge_target.run(
+                        format!("Merging {merge_name}"),
+                        args(["merge", "--no-edit", &merge_name]),
+                        format!("Merged '{merge_name}'"),
+                        "Merge failed",
+                        window,
+                        cx,
+                    )
+                },
+            )
+            .entry(format!("Rebase Current onto '{name}'"), None, {
+                let target = target.clone();
+                let name = name.clone();
+                move |window, cx| rebase_onto(&target, &name, window, cx)
+            });
+    }
+    if !is_remote && !is_current {
+        let target = target.clone();
+        menu = menu.separator().entry("Delete", None, move |window, cx| {
+            delete_branch(&target, &name, window, cx)
+        });
+    }
+    menu
+}
+
+fn rebase_onto(target: &CommitTarget, name: &str, window: &mut Window, cx: &mut App) {
     let target = target.clone();
-    menu.submenu(format!("Branch '{name}'"), move |mut menu, _, _| {
-        if !is_current {
-            let target = target.clone();
-            let name = name.clone();
-            menu = menu.entry("Checkout", None, move |window, cx| {
-                checkout_branch(&target, &name, is_remote, window, cx)
-            });
-        }
-        if !is_current {
-            let target_for_merge = target.clone();
-            let merge_name = name.clone();
-            menu = menu
-                .entry(
-                    format!("Merge '{name}' into Current"),
-                    None,
-                    move |window, cx| {
-                        target_for_merge.run(
-                            format!("Merging {merge_name}"),
-                            args(["merge", "--no-edit", &merge_name]),
-                            format!("Merged '{merge_name}'"),
-                            "Merge failed",
-                            window,
-                            cx,
-                        )
-                    },
-                )
-                .entry(format!("Rebase Current onto '{name}'"), None, {
-                    let target = target.clone();
-                    let name = name.clone();
-                    move |window, cx| {
-                        let target = target.clone();
-                        let name = name.clone();
-                        window
-                            .spawn(cx, async move |cx| {
-                                let repository = target
-                                    .repository
-                                    .upgrade()
-                                    .context("the repository was closed")?;
-                                rebase(
-                                    &repository,
-                                    &format!("Rebasing onto {name}"),
-                                    args(["--autostash", &name]),
-                                    HashMap::default(),
-                                    cx,
-                                )
-                                .await?;
-                                show_toast(&target.workspace, format!("Rebased onto '{name}'"), cx);
-                                Ok(())
-                            })
-                            .detach_and_prompt_err("Rebase failed", window, cx, |error, _, _| {
-                                Some(format!("{error:#}"))
-                            });
-                    }
-                });
-        }
-        if !is_remote && !is_current {
-            let target = target.clone();
-            let name = name.clone();
-            menu = menu.separator().entry("Delete", None, move |window, cx| {
-                delete_branch(&target, &name, window, cx)
-            });
-        }
-        menu
-    })
+    let name = name.to_string();
+    window
+        .spawn(cx, async move |cx| {
+            let repository = target
+                .repository
+                .upgrade()
+                .context("the repository was closed")?;
+            rebase(
+                &repository,
+                &format!("Rebasing onto {name}"),
+                args(["--autostash", &name]),
+                HashMap::default(),
+                cx,
+            )
+            .await?;
+            show_toast(&target.workspace, format!("Rebased onto '{name}'"), cx);
+            Ok(())
+        })
+        .detach_and_prompt_err("Rebase failed", window, cx, |error, _, _| {
+            Some(format!("{error:#}"))
+        });
 }
 
 fn checkout_branch(
@@ -968,57 +998,79 @@ fn delete_branch(target: &CommitTarget, name: &str, window: &mut Window, cx: &mu
         });
 }
 
-struct NewBranchModal {
-    target: CommitTarget,
-    editor: Entity<Editor>,
+/// Opens a one-line input dialog and passes the trimmed, non-empty text to `on_confirm`.
+pub(crate) fn prompt_for_text(
+    workspace: &WeakEntity<Workspace>,
+    title: impl Into<SharedString>,
+    icon: IconName,
+    placeholder: &str,
+    initial_text: Option<&str>,
+    note: Option<SharedString>,
+    on_confirm: impl Fn(String, &mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(workspace) = workspace.upgrade() else {
+        return;
+    };
+    let title = title.into();
+    workspace.update(cx, |workspace, cx| {
+        workspace.toggle_modal(window, cx, |window, cx| {
+            let editor = cx.new(|cx| {
+                let mut editor = Editor::single_line(window, cx);
+                editor.set_placeholder_text(placeholder, window, cx);
+                if let Some(text) = initial_text {
+                    editor.set_text(text, window, cx);
+                    editor.select_all(&editor::actions::SelectAll, window, cx);
+                }
+                editor
+            });
+            TextInputModal {
+                title,
+                icon,
+                note,
+                editor,
+                on_confirm: Box::new(on_confirm),
+            }
+        });
+    });
 }
 
-impl NewBranchModal {
-    fn new(target: CommitTarget, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Branch name", window, cx);
-            editor
-        });
-        Self { target, editor }
-    }
+struct TextInputModal {
+    title: SharedString,
+    icon: IconName,
+    note: Option<SharedString>,
+    editor: Entity<Editor>,
+    on_confirm: Box<dyn Fn(String, &mut Window, &mut App)>,
+}
 
+impl TextInputModal {
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.editor.read(cx).text(cx).trim().to_string();
-        if name.is_empty() {
+        let text = self.editor.read(cx).text(cx).trim().to_string();
+        if text.is_empty() {
             return;
         }
-        self.target.run(
-            format!("Creating {name}"),
-            args(["switch", "-c", &name, &self.target.sha.to_string()]),
-            format!(
-                "Created and checked out '{name}' at {}",
-                self.target.short_sha()
-            ),
-            "Create branch failed",
-            window,
-            cx,
-        );
+        (self.on_confirm)(text, window, cx);
         cx.emit(DismissEvent);
     }
 }
 
-impl EventEmitter<DismissEvent> for NewBranchModal {}
-impl ModalView for NewBranchModal {}
-impl Focusable for NewBranchModal {
+impl EventEmitter<DismissEvent> for TextInputModal {}
+impl ModalView for TextInputModal {}
+impl Focusable for TextInputModal {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.editor.focus_handle(cx)
     }
 }
 
-impl Render for NewBranchModal {
+impl Render for TextInputModal {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .key_context("NewBranchModal")
+            .key_context("TextInputModal")
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::confirm))
             .elevation_2(cx)
@@ -1029,20 +1081,18 @@ impl Render for NewBranchModal {
                     .pt_2()
                     .pb_1()
                     .gap_1p5()
-                    .child(Icon::new(IconName::GitBranch).size(IconSize::XSmall))
-                    .child(
-                        Headline::new(format!("New Branch from {}", self.target.short_sha()))
-                            .size(HeadlineSize::XSmall),
-                    ),
+                    .child(Icon::new(self.icon).size(IconSize::XSmall))
+                    .child(Headline::new(self.title.clone()).size(HeadlineSize::XSmall)),
             )
-            .child(div().px_3().pb_1().child(self.editor.clone()))
-            .child(
-                div().px_3().pb_2().child(
-                    Label::new("The new branch is checked out.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                ),
-            )
+            .child(div().px_3().pb_2().child(self.editor.clone()))
+            .when_some(self.note.clone(), |this, note| {
+                this.child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .child(Label::new(note).size(LabelSize::Small).color(Color::Muted)),
+                )
+            })
     }
 }
 
@@ -1248,7 +1298,7 @@ mod tests {
     /// Pumps the app until `condition` returns a value; git runs in real processes.
     #[track_caller]
     fn wait_for<T>(cx: &mut VisualTestContext, mut condition: impl FnMut(&App) -> Option<T>) -> T {
-        for _ in 0..500 {
+        for _ in 0..3000 {
             cx.run_until_parked();
             if let Some(value) = cx.update(|_, cx| condition(cx)) {
                 return value;
@@ -1259,7 +1309,7 @@ mod tests {
     }
 
     fn wait_for_prompt(cx: &mut VisualTestContext, answer: &str) {
-        for _ in 0..500 {
+        for _ in 0..3000 {
             cx.run_until_parked();
             if cx.has_pending_prompt() {
                 cx.simulate_prompt_answer(answer);
@@ -1301,7 +1351,10 @@ mod tests {
                 cx,
             )
         });
-        wait_for(&mut cx, |_| (subjects(root)[1] == "B edited").then_some(()));
+        // Mid-rebase the log is shorter, so compare whole lists.
+        wait_for(&mut cx, |_| {
+            (subjects(root) == ["C", "B edited", "A"]).then_some(())
+        });
         assert_eq!(subjects(root), ["C", "B edited", "A"]);
         assert_eq!(
             run_git(root, &["log", "-1", "--format=%b", "HEAD~1"]),
@@ -1319,7 +1372,9 @@ mod tests {
                 cx,
             )
         });
-        wait_for(&mut cx, |_| (subjects(root)[0] == "C edited").then_some(()));
+        wait_for(&mut cx, |_| {
+            (subjects(root) == ["C edited", "B edited", "A"]).then_some(())
+        });
         assert_eq!(subjects(root), ["C edited", "B edited", "A"]);
         assert_eq!(run_git(root, &["status", "--porcelain"]), "");
     }

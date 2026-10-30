@@ -109,7 +109,7 @@ pub struct CommitData {
     pub message: SharedString,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct InitialGraphCommitData {
     pub sha: Oid,
     pub parents: SmallVec<[Oid; 1]>,
@@ -734,6 +734,25 @@ pub enum LogSource {
     Branch(SharedString),
     Sha(Oid),
     Path(RepoPath),
+    /// The log of `revision` (all refs when `None`) limited like WebStorm's
+    /// User, Date and Paths filters.
+    Filtered(LogFilter),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct LogFilter {
+    pub revision: Option<SharedString>,
+    /// Matched as a fixed string against the author name and email.
+    pub author: Option<SharedString>,
+    /// Any date `git log --since` accepts, such as "7 days ago".
+    pub since: Option<SharedString>,
+    pub paths: Vec<RepoPath>,
+}
+
+impl LogFilter {
+    pub fn is_empty(&self) -> bool {
+        self.author.is_none() && self.since.is_none() && self.paths.is_empty()
+    }
 }
 
 impl LogSource {
@@ -753,6 +772,33 @@ impl LogSource {
                 Cow::Borrowed("--"),
                 Cow::Borrowed(path.as_unix_str()),
             ],
+            LogSource::Filtered(filter) => {
+                let mut args = match &filter.revision {
+                    Some(revision) => vec![Cow::Borrowed(revision.as_str())],
+                    None => LogSource::All
+                        .get_args()
+                        .into_iter()
+                        .filter(|arg| arg != "--")
+                        .collect(),
+                };
+                if let Some(author) = &filter.author {
+                    args.push(Cow::Borrowed("--fixed-strings"));
+                    args.push(Cow::Owned(format!("--author={author}")));
+                }
+                if let Some(since) = &filter.since {
+                    args.push(Cow::Owned(format!("--since={since}")));
+                }
+                // Path limiting then reports the nearest shown ancestors as parents.
+                args.push(Cow::Borrowed("--parents"));
+                args.push(Cow::Borrowed("--"));
+                args.extend(
+                    filter
+                        .paths
+                        .iter()
+                        .map(|path| Cow::Borrowed(path.as_unix_str())),
+                );
+                return args;
+            }
         };
         // Without a terminator git cannot tell a branch named `docs/rewrite` from a
         // `docs/rewrite` directory in the working tree, and refuses the argument as
@@ -762,6 +808,26 @@ impl LogSource {
         }
         args
     }
+}
+
+fn prune_missing_parents(
+    commits: Vec<Arc<InitialGraphCommitData>>,
+) -> Vec<Arc<InitialGraphCommitData>> {
+    let shown = commits
+        .iter()
+        .map(|commit| commit.sha)
+        .collect::<std::collections::HashSet<_>>();
+    commits
+        .into_iter()
+        .map(|commit| {
+            if commit.parents.iter().all(|parent| shown.contains(parent)) {
+                return commit;
+            }
+            let mut commit = (*commit).clone();
+            commit.parents.retain(|parent| shown.contains(parent));
+            Arc::new(commit)
+        })
+        .collect()
 }
 
 pub struct SearchCommitArgs {
@@ -3327,6 +3393,9 @@ impl GitRepository for RealGitRepository {
     ) -> BoxFuture<'_, Result<()>> {
         let git = self.git_binary();
 
+        // User and date filters leave parents that aren't in the log; the whole
+        // log is read first so those parents can be dropped.
+        let prune_parents = matches!(log_source, LogSource::Filtered(_));
         async move {
             let log_source_args = log_source.get_args();
             let mut git_log_command = vec!["log", GRAPH_COMMIT_FORMAT, log_order.as_arg()];
@@ -3348,7 +3417,19 @@ impl GitRepository for RealGitRepository {
                 let bytes_read = reader.read_line(&mut line_buffer).await?;
 
                 if bytes_read == 0 {
-                    if !lines.is_empty() {
+                    if prune_parents {
+                        let commits = prune_missing_parents(parse_initial_graph_output(
+                            lines.iter().map(|s| s.as_str()),
+                        ));
+                        for chunk in commits.chunks(GRAPH_CHUNK_SIZE) {
+                            if request_tx.send(chunk.to_vec()).await.is_err() {
+                                log::warn!(
+                                    "initial_graph_data: receiver dropped while sending commits"
+                                );
+                                break;
+                            }
+                        }
+                    } else if !lines.is_empty() {
                         let commits = parse_initial_graph_output(lines.iter().map(|s| s.as_str()));
                         if request_tx.send(commits).await.is_err() {
                             log::warn!(
@@ -3362,7 +3443,7 @@ impl GitRepository for RealGitRepository {
                 let line = line_buffer.trim_end_matches('\n').to_string();
                 lines.push(line);
 
-                if lines.len() >= GRAPH_CHUNK_SIZE {
+                if !prune_parents && lines.len() >= GRAPH_CHUNK_SIZE {
                     let commits = parse_initial_graph_output(lines.iter().map(|s| s.as_str()));
                     if request_tx.send(commits).await.is_err() {
                         log::warn!("initial_graph_data: receiver dropped while streaming commits");
@@ -6621,6 +6702,96 @@ mod tests {
             "untracked"
         );
         assert!(!path.join("deleted").exists());
+    }
+
+    #[gpui::test]
+    async fn test_initial_graph_data_filtered(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let path = repo_dir.path();
+        git_init_repo(path);
+        let commit = |file: &str, author: &str, date: &str| {
+            fs::create_dir_all(path.join("src")).unwrap();
+            fs::write(path.join(file), author).unwrap();
+            git_command(path, ["add", "--all"]);
+            git_command(
+                path,
+                [
+                    "commit",
+                    "-m",
+                    file,
+                    &format!("--author={author} <{author}@example.com>"),
+                    &format!("--date={date}"),
+                ],
+            );
+            git_command_output(path, ["rev-parse", "HEAD"])
+                .parse::<Oid>()
+                .unwrap()
+        };
+        let old_readme = commit("README.md", "Ann", "2001-01-01T00:00:00");
+        let lib = commit("src/lib.rs", "Bob", "2001-01-02T00:00:00");
+        git_command(path, ["checkout", "-q", "-b", "side"]);
+        let side = commit("src/side.rs", "Ann", "2001-01-03T00:00:00");
+        git_command(path, ["checkout", "-q", "main"]);
+
+        let repo =
+            RealGitRepository::new(&path.join(".git"), None, Some("git".into()), cx.executor())
+                .unwrap();
+        let shas = async |filter: LogFilter| {
+            let (tx, rx) = smol::channel::unbounded();
+            repo.initial_graph_data(LogSource::Filtered(filter), LogOrder::DateOrder, tx)
+                .await
+                .unwrap();
+            let mut shas = Vec::new();
+            while let Ok(chunk) = rx.try_recv() {
+                shas.extend(chunk.iter().map(|commit| commit.sha));
+            }
+            shas
+        };
+
+        let by_ann = LogFilter {
+            author: Some("Ann".into()),
+            ..LogFilter::default()
+        };
+        assert_eq!(shas(by_ann.clone()).await, [side, old_readme]);
+        // Ann's commits have Bob's commit between them, so the graph shows no parent link.
+        let (tx, rx) = smol::channel::unbounded();
+        repo.initial_graph_data(LogSource::Filtered(by_ann.clone()), LogOrder::DateOrder, tx)
+            .await
+            .unwrap();
+        let side_commit = rx
+            .try_recv()
+            .unwrap()
+            .into_iter()
+            .find(|commit| commit.sha == side)
+            .unwrap();
+        assert!(side_commit.parents.is_empty());
+        let ann_on_main = LogFilter {
+            revision: Some("main".into()),
+            ..by_ann
+        };
+        assert_eq!(shas(ann_on_main).await, [old_readme]);
+        let in_src = LogFilter {
+            paths: vec![RepoPath::new("src").unwrap()],
+            ..LogFilter::default()
+        };
+        assert_eq!(shas(in_src.clone()).await, [side, lib]);
+        // Path limiting rewrites parents to the nearest commit touching the paths.
+        let (tx, rx) = smol::channel::unbounded();
+        repo.initial_graph_data(LogSource::Filtered(in_src), LogOrder::DateOrder, tx)
+            .await
+            .unwrap();
+        let commits = rx.try_recv().unwrap();
+        assert_eq!(commits[0].parents.as_slice(), [lib]);
+        // `--since` compares commit dates, which are all "now" in this repository.
+        let since = |date: &str| LogFilter {
+            since: Some(date.to_string().into()),
+            ..LogFilter::default()
+        };
+        assert_eq!(shas(since("2000-01-01")).await.len(), 3);
+        assert!(shas(since("2090-01-01")).await.is_empty());
     }
 
     #[gpui::test]

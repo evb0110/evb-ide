@@ -811,6 +811,11 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
 
+        workspace_handle.update_in(cx, |workspace, window, cx| {
+            let git_log_panel = git_ui::git_log_panel::GitLogPanel::new(workspace, window, cx);
+            workspace.add_panel(git_log_panel, window, cx);
+        })?;
+
         workspace_handle.update(cx, |workspace, cx| {
             workspace.finish_dock_restoration(cx);
         })?;
