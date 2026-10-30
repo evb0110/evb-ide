@@ -1,6 +1,7 @@
 use crate::git_graph::{GitGraph, decode_log_filter, encode_log_filter};
+use collections::HashMap;
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Subscription,
+    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Subscription, Task,
     WeakEntity, Window, actions, px,
 };
 use project::git_store::{GitStore, GitStoreEvent};
@@ -34,8 +35,11 @@ pub struct GitLogPanel {
     graph: Option<Entity<GitGraph>>,
     focus_handle: FocusHandle,
     position: DockPosition,
-    /// The filter last written for a repository, to skip redundant writes.
-    saved_filter: Option<(String, String)>,
+    /// The latest filter of each repository this session, ahead of the
+    /// asynchronous writes to the database.
+    filters: HashMap<String, String>,
+    /// Database writes run one after another, so an older filter never lands last.
+    write_task: Option<Task<()>>,
     _subscription: Subscription,
     _graph_subscription: Option<Subscription>,
 }
@@ -64,7 +68,8 @@ impl GitLogPanel {
                 graph: None,
                 focus_handle: cx.focus_handle(),
                 position: DockPosition::Bottom,
-                saved_filter: None,
+                filters: HashMap::default(),
+                write_task: None,
                 _subscription: subscription,
                 _graph_subscription: None,
             };
@@ -102,10 +107,16 @@ impl GitLogPanel {
             }
         };
         if let Some(key) = self.filter_key(cx)
-            && let Some(filter) = db::kvp::KeyValueStore::global(cx)
-                .read_kvp(&key)
-                .log_err()
-                .flatten()
+            && let Some(filter) = self
+                .filters
+                .get(&key)
+                .cloned()
+                .or_else(|| {
+                    db::kvp::KeyValueStore::global(cx)
+                        .read_kvp(&key)
+                        .log_err()
+                        .flatten()
+                })
                 .and_then(|encoded| decode_log_filter(&encoded))
         {
             graph.update(cx, |graph, cx| graph.restore_log_filter(filter, cx));
@@ -115,7 +126,13 @@ impl GitLogPanel {
 
     /// Filters are remembered per repository, like WebStorm's log filters.
     fn filter_key(&self, cx: &App) -> Option<String> {
-        let repository = self.git_store.read(cx).active_repository()?;
+        let repo_id = self.graph.as_ref()?.read(cx).repo_id();
+        let repository = self
+            .git_store
+            .read(cx)
+            .repositories()
+            .get(&repo_id)?
+            .clone();
         let path = repository.read(cx).work_directory_abs_path.clone();
         Some(format!("evb_git_log_filter:{}", path.display()))
     }
@@ -132,13 +149,18 @@ impl GitLogPanel {
             return;
         };
         let encoded = encode_log_filter(&filter);
-        if self.saved_filter.as_ref() == Some(&(key.clone(), encoded.clone())) {
+        if self.filters.get(&key) == Some(&encoded) {
             return;
         }
-        self.saved_filter = Some((key.clone(), encoded.clone()));
+        self.filters.insert(key.clone(), encoded.clone());
         let kvp = db::kvp::KeyValueStore::global(cx);
-        cx.background_spawn(async move { kvp.write_kvp(key, encoded).await })
-            .detach_and_log_err(cx);
+        let previous_write = self.write_task.take();
+        self.write_task = Some(cx.background_spawn(async move {
+            if let Some(previous_write) = previous_write {
+                previous_write.await;
+            }
+            kvp.write_kvp(key, encoded).await.log_err();
+        }));
     }
 
     pub fn graph(&self) -> Option<&Entity<GitGraph>> {

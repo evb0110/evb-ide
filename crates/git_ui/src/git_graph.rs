@@ -7254,6 +7254,95 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_git_log_panel_remembers_filters_per_repository(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            Path::new("/project_a"),
+            json!({
+                ".git": {},
+                "file.txt": "content",
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            Path::new("/project_b"),
+            json!({
+                ".git": {},
+                "other.txt": "content",
+            }),
+        )
+        .await;
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let commits = generate_random_commit_dag(&mut rng, 10, false);
+        fs.set_graph_commits(Path::new("/project_a/.git"), commits.clone());
+
+        let project = Project::test(
+            fs.clone(),
+            [Path::new("/project_a"), Path::new("/project_b")],
+            cx,
+        )
+        .await;
+        cx.run_until_parked();
+
+        let (first_repository, second_repository) = project.read_with(cx, |project, cx| {
+            let mut first_repository = None;
+            let mut second_repository = None;
+
+            for repository in project.repositories(cx).values() {
+                let work_directory_abs_path = &repository.read(cx).work_directory_abs_path;
+                if work_directory_abs_path.as_ref() == Path::new("/project_a") {
+                    first_repository = Some(repository.clone());
+                } else if work_directory_abs_path.as_ref() == Path::new("/project_b") {
+                    second_repository = Some(repository.clone());
+                }
+            }
+
+            (
+                first_repository.expect("should have repository for /project_a"),
+                second_repository.expect("should have repository for /project_b"),
+            )
+        });
+        first_repository.update(cx, |repository, cx| repository.set_as_active_repository(cx));
+        cx.run_until_parked();
+
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+
+        let workspace = multi_workspace.read_with(&*cx, |multi, _| multi.workspace().clone());
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = crate::git_log_panel::GitLogPanel::new(workspace, window, cx);
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        cx.run_until_parked();
+        let graph = panel.read_with(&*cx, |panel, _| panel.graph().cloned().unwrap());
+        let author = |graph: &Entity<GitGraph>, cx: &mut gpui::VisualTestContext| {
+            graph.read_with(&*cx, |graph, _| graph.log_filter().author)
+        };
+
+        graph.update(cx, |graph, cx| {
+            graph.update_log_filter(cx, |filter| filter.author = Some("Ann".into()))
+        });
+        cx.run_until_parked();
+
+        second_repository.update(cx, |repository, cx| repository.set_as_active_repository(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            author(&graph, cx),
+            None,
+            "each repository has its own filters"
+        );
+
+        first_repository.update(cx, |repository, cx| repository.set_as_active_repository(cx));
+        cx.run_until_parked();
+        assert_eq!(author(&graph, cx), Some("Ann".into()));
+    }
+
+    #[gpui::test]
     async fn test_graph_data_repopulated_from_cache_after_repo_switch(cx: &mut TestAppContext) {
         init_test(cx);
 
