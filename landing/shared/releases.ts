@@ -1,10 +1,14 @@
 export const repositoryUrl = "https://github.com/evb0110/evb-ide";
 
+export type TPlatform = "macos" | "linux" | "windows";
+
 export interface IInstaller {
   name: string;
   url: string;
   size: number;
+  platform: TPlatform;
   architecture: "arm64" | "x64";
+  format: "dmg" | "tar.gz" | "zip";
 }
 
 export interface IRelease {
@@ -52,20 +56,22 @@ export function parseRelease(value: unknown): IRelease | null {
     return null;
   }
 
+  const version = tag.slice(1);
   const installers: IInstaller[] = [];
   for (const asset of assets) {
-    const architecture =
-      asset.name === `EVB-IDE-${tag.slice(1)}-macos-arm64.dmg`
-        ? "arm64"
-        : asset.name === `EVB-IDE-${tag.slice(1)}-macos-x64.dmg`
-          ? "x64"
-          : null;
-    if (architecture) {
+    const match = new RegExp(
+      `^EVB-IDE-${version.replaceAll(".", "\\.")}-(macos|linux|windows)-(arm64|x64)\\.(dmg|tar\\.gz|zip)$`,
+    ).exec(String(asset.name));
+    const [, platform, architecture, format] = match ?? [];
+    const expectedFormat = platform === "macos" ? "dmg" : platform === "linux" ? "tar.gz" : "zip";
+    if (platform && architecture && format === expectedFormat) {
       installers.push({
         name: String(asset.name),
         url: String(asset.browser_download_url),
         size: Number(asset.size),
-        architecture,
+        platform: platform as TPlatform,
+        architecture: architecture as IInstaller["architecture"],
+        format: expectedFormat,
       });
     }
   }

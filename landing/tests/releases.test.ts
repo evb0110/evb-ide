@@ -24,6 +24,27 @@ test("offers a stable Mac download with matching source and checksums", () => {
   assert.equal(release?.sourceUrl, `${repositoryUrl}/releases/download/v0.1.0/EVB-IDE-0.1.0-source.tar.gz`);
 });
 
+test("offers Linux and Windows downloads beside the Mac one", () => {
+  const value = fixture();
+  for (const name of [
+    "EVB-IDE-0.1.0-linux-x64.tar.gz",
+    "EVB-IDE-0.1.0-windows-x64.zip",
+    "EVB-IDE-0.1.0-linux-x64.dmg",
+    "EVB-IDE-0.1.0-windows-x64.exe",
+  ]) {
+    value.assets.push({ name, size: 100, browser_download_url: `${repositoryUrl}/releases/download/v0.1.0/${name}` });
+  }
+  const release = parseRelease(value);
+  assert.deepEqual(
+    release?.installers.map((installer) => [installer.platform, installer.architecture, installer.format]),
+    [
+      ["macos", "arm64", "dmg"],
+      ["linux", "x64", "tar.gz"],
+      ["windows", "x64", "zip"],
+    ],
+  );
+});
+
 test("does not offer downloads without corresponding source or checksums", () => {
   for (const missing of ["EVB-IDE-0.1.0-source.tar.gz", "SHA256SUMS"]) {
     const value = fixture();

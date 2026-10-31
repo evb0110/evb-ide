@@ -9,30 +9,42 @@
         </p>
 
         <div id="download" class="installer-card" aria-live="polite">
-          <p class="installer-platform">macOS</p>
           <template v-if="release">
+            <div v-if="platforms.length > 1" class="installer-tabs" role="tablist" aria-label="Operating system">
+              <button
+                v-for="platform in platforms"
+                :key="platform"
+                type="button"
+                role="tab"
+                class="installer-tab"
+                :aria-selected="platform === selectedPlatform"
+                @click="chosenPlatform = platform"
+              >
+                {{ platformLabels[platform] }}
+              </button>
+            </div>
+            <p v-else class="installer-platform">{{ platformLabels[selectedPlatform] }}</p>
             <a
-              v-for="installer in sortedInstallers"
+              v-for="installer in platformInstallers"
               :key="installer.name"
               :href="installer.url"
               class="installer-row"
-              :class="{ 'installer-row-recommended': installer.architecture === 'arm64' }"
+              :class="{ 'installer-row-recommended': installer === platformInstallers[0] }"
             >
               <span class="installer-text">
                 <span class="installer-name">
-                  {{ installer.architecture === "arm64" ? "Apple Silicon" : "Intel" }}
-                  <span v-if="installer.architecture === 'arm64'" class="installer-badge">Recommended</span>
+                  {{ installerTitle(installer) }}
+                  <span
+                    v-if="installer === platformInstallers[0] && platformInstallers.length > 1"
+                    class="installer-badge"
+                    >Recommended</span
+                  >
                 </span>
-                <span class="installer-meta">
-                  {{ installer.architecture === "arm64" ? "M-series Macs" : "Intel Macs" }} · DMG ·
-                  {{ formatSize(installer.size) }}
-                </span>
+                <span class="installer-meta">{{ installerMeta(installer) }} · {{ formatSize(installer.size) }}</span>
               </span>
               <span class="installer-icon"><UIcon name="i-lucide-download" /></span>
             </a>
-            <p class="installer-note">
-              {{ release.tag }} · macOS 12 or later. Open the disk image and drag EVB IDE into Applications.
-            </p>
+            <p class="installer-note">{{ release.tag }} · {{ platformNotes[selectedPlatform] }}</p>
             <p class="installer-links">
               <a :href="release.url">Release notes</a>
               <a :href="release.sourceUrl">Source</a>
@@ -87,7 +99,7 @@
 </template>
 
 <script setup lang="ts">
-import { repositoryUrl } from "~~/shared/releases";
+import { type IInstaller, type TPlatform, repositoryUrl } from "~~/shared/releases";
 
 interface IFeature {
   icon: string;
@@ -102,11 +114,65 @@ interface IQuestion {
 
 const { data, error, status } = await useFetch("/api/releases/latest");
 const release = computed(() => data.value?.release);
-const sortedInstallers = computed(() =>
-  [...(release.value?.installers ?? [])].sort((left, right) =>
-    left.architecture === right.architecture ? 0 : left.architecture === "arm64" ? -1 : 1,
+const platformLabels: Record<TPlatform, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
+const platformNotes: Record<TPlatform, string> = {
+  macos: "macOS 12 or later. Open the disk image and drag EVB IDE into Applications.",
+  linux: "Extract the archive and run install.sh in it to add EVB IDE for your user.",
+  windows: "Windows 10 or later. Extract the archive and run evb-ide.exe.",
+};
+const platforms = computed(() =>
+  (["macos", "linux", "windows"] as TPlatform[]).filter((platform) =>
+    release.value?.installers.some((installer) => installer.platform === platform),
   ),
 );
+/** The visitor's system, known only in the browser. */
+const detectedPlatform = ref<TPlatform | null>(null);
+const chosenPlatform = ref<TPlatform | null>(null);
+const selectedPlatform = computed<TPlatform>(() => {
+  for (const platform of [chosenPlatform.value, detectedPlatform.value]) {
+    if (platform && platforms.value.includes(platform)) {
+      return platform;
+    }
+  }
+  return platforms.value[0] ?? "macos";
+});
+
+// Apple Silicon on macOS and x64 elsewhere come first: the builds most visitors need.
+function installerRank(installer: IInstaller) {
+  const preferred = installer.platform === "macos" ? "arm64" : "x64";
+  return installer.architecture === preferred ? 0 : 1;
+}
+
+const platformInstallers = computed(() =>
+  (release.value?.installers ?? [])
+    .filter((installer) => installer.platform === selectedPlatform.value)
+    .sort((left, right) => installerRank(left) - installerRank(right)),
+);
+
+function installerTitle(installer: IInstaller) {
+  if (installer.platform === "macos") {
+    return installer.architecture === "arm64" ? "Apple Silicon" : "Intel";
+  }
+  return installer.architecture === "x64" ? "x64" : "ARM64";
+}
+
+function installerMeta(installer: IInstaller) {
+  if (installer.platform === "macos") {
+    return `${installer.architecture === "arm64" ? "M-series Macs" : "Intel Macs"} · DMG`;
+  }
+  return `${installer.architecture === "x64" ? "Intel and AMD" : "ARM"} · ${installer.format}`;
+}
+
+onMounted(() => {
+  const agent = navigator.userAgent.toLowerCase();
+  if (agent.includes("windows")) {
+    detectedPlatform.value = "windows";
+  } else if (agent.includes("linux") && !agent.includes("android")) {
+    detectedPlatform.value = "linux";
+  } else if (agent.includes("mac")) {
+    detectedPlatform.value = "macos";
+  }
+});
 const colorMode = useColorMode();
 const filmTheme = computed(() => (colorMode.value === "dark" ? "dark" : "light"));
 
@@ -213,6 +279,29 @@ function formatSize(size: number) {
   font-size: 11px;
   letter-spacing: 1.5px;
   text-transform: uppercase;
+}
+
+.installer-tabs {
+  display: grid;
+  grid-auto-columns: 1fr;
+  grid-auto-flow: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 3px;
+  border: 1px solid var(--site-border);
+  border-radius: 9px;
+}
+
+.installer-tab {
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: var(--site-soft);
+  font-size: 13px;
+}
+
+.installer-tab[aria-selected="true"] {
+  background: var(--site-ink);
+  color: var(--site-background);
 }
 
 .installer-row {
