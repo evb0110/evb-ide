@@ -225,7 +225,7 @@ const questions: IQuestion[] = [
   },
   {
     title: "Which systems does it run on?",
-    text: "Published builds are for macOS 12 or later. Linux and Windows builds are not published yet.",
+    text: "Published builds are for macOS 12 or later on Apple Silicon, Linux x64 with glibc 2.35 or later, and Windows 10 or later on x64.",
   },
   {
     title: "Does it use AI or send telemetry?",

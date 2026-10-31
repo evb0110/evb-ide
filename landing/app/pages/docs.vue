@@ -29,6 +29,17 @@
       <code>~/.local/bin</code> and adds a menu entry, all for your user. The build needs glibc 2.35 or later (Ubuntu
       22.04, Debian 12, Fedora 36 or newer) and a GPU with Vulkan support.
     </p>
+    <h2>Install on Windows</h2>
+    <ol>
+      <li><NuxtLink to="/#download">Download the Windows archive</NuxtLink> (x64).</li>
+      <li>Extract it to a folder you keep, such as <code>%LOCALAPPDATA%\Programs</code>.</li>
+      <li>Run <code>evb-ide.exe</code> in the extracted <strong>EVB IDE</strong> folder.</li>
+    </ol>
+    <p>
+      The archive is portable: it needs no installer and runs on Windows 10 or later. The command line tool is
+      <code>bin\evb-ide.exe</code>; add the <code>bin</code> folder to your <code>PATH</code> to use it from a terminal.
+      The Windows build is not code-signed, so SmartScreen may ask before it first runs.
+    </p>
     <h2>Your first project</h2>
     <p>
       Open a folder containing your project. The run picker discovers package.json scripts, Composer scripts, and
@@ -40,7 +51,7 @@
         <tr>
           <th>Action</th>
           <th>macOS</th>
-          <th>Linux</th>
+          <th>Linux and Windows</th>
         </tr>
       </thead>
       <tbody>
@@ -98,19 +109,22 @@
     <h2>Updates</h2>
     <p>
       Download the next version from <a :href="`${repositoryUrl}/releases`">GitHub Releases</a>, quit EVB IDE, and
-      replace it in Applications, or run the new archive's <code>install.sh</code> on Linux. Your settings and application data remain in their own folders. Automatic upstream Zed
+      replace it in Applications, run the new archive's <code>install.sh</code> on Linux, or replace the extracted folder on
+      Windows. Your settings and application data remain in their own folders. Automatic upstream Zed
       updates are disabled.
     </p>
     <h2>Build from source</h2>
     <p>
       On macOS you need Xcode and its Metal toolchain, Rust through rustup, CMake, and the prerequisites in the
       <a :href="`${repositoryUrl}/blob/main/EVB.md`">development guide</a>. On Linux, <code>script/linux</code> installs
-      the libraries and clang; the build needs clang 17 or newer.
+      the libraries and clang; the build needs clang 17 or newer. On Windows you need Visual Studio's C++ build tools,
+      Rust through rustup and CMake.
     </p>
     <pre><code>git clone https://github.com/evb0110/evb-ide.git
 cd evb-ide
 script/evb-install -n       # macOS: target/evb-bundle/EVB IDE.app
-script/evb-bundle-linux     # Linux: target/evb-bundle/EVB-IDE-VERSION-linux-x64.tar.gz</code></pre>
+script/evb-bundle-linux     # Linux: target/evb-bundle/EVB-IDE-VERSION-linux-x64.tar.gz
+script/evb-bundle-windows.ps1   # Windows: target/evb-bundle/EVB-IDE-VERSION-windows-x64.zip</code></pre>
     <p>
       The macOS app gets an ad-hoc signature for local development; public releases use Developer ID signing and Apple
       notarization. Each release provides an archive with dependency sources and instructions for rebuilding that

@@ -62,7 +62,7 @@ After a sync, run the checks below and reinstall.
 The fork's version is in `EVB_VERSION`; the upstream crate versions remain
 available for dependency and extension compatibility. Public downloads are at
 https://github.com/evb0110/evb-ide/releases and the landing page is at
-https://evb-ide.vercel.app. Releases ship macOS (Apple Silicon) and Linux x64.
+https://evb-ide.vercel.app. Releases ship macOS (Apple Silicon), Linux x64 and Windows x64.
 
 Releases build on GitHub Actions (`.github/workflows/evb-release.yml`), so they
 need no local release build. Bump `EVB_VERSION`, write the user-facing notes
@@ -70,8 +70,9 @@ in `release-notes/vVERSION.md`, push to `origin/main` with a green EVB CI run,
 then push the tag `vVERSION`. The workflow signs and notarizes the macOS app
 with the repository secrets (`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY`,
 `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`; see `script/evb-ci-macos-signing`),
-builds the Linux archive with `script/evb-bundle-linux` on Ubuntu 22.04, and
-publishes both with the source archive and checksums. A manual run of the
+builds the Linux archive with `script/evb-bundle-linux` on Ubuntu 22.04 and the
+portable Windows archive with `script/evb-bundle-windows.ps1`, and publishes
+all three with the source archive and checksums. A manual run of the
 workflow builds and uploads the artifacts without publishing.
 
 To release from a Mac instead, set `EVB_SIGNING_IDENTITY` to your Developer ID

@@ -33,11 +33,13 @@ notarize() {
 
 # Stapling downloads the ticket Apple just issued; right after notarization that lookup can drop
 # its connection (NSURLErrorDomain -1005) before the ticket propagates.
-staple() {
+# Stapling and validating both look the ticket up at Apple, whose connection
+# sometimes drops on CI runners.
+retry_stapler() {
     local attempt
     for attempt in 1 2 3 4 5; do
-        xcrun stapler staple "$1" && return 0
-        echo "Stapling $1 failed (attempt $attempt); retrying in $((attempt * 15)) s." >&2
+        xcrun stapler "$1" "$2" && return 0
+        echo "stapler $1 $2 failed (attempt $attempt); retrying in $((attempt * 15)) s." >&2
         sleep $((attempt * 15))
     done
     return 1
@@ -46,7 +48,7 @@ staple() {
 if [[ "$publish" == true ]]; then
     [[ -f "$output/verified-commit" && "$(cat "$output/verified-commit")" == "$commit" ]] || { echo 'Prepare and verify this exact commit first.' >&2; exit 1; }
     (cd "$output" && shasum -a 256 -c SHA256SUMS)
-    xcrun stapler validate "$output/$image_name"
+    retry_stapler validate "$output/$image_name"
     git fetch --quiet origin main
     remote_commit="$(git rev-parse FETCH_HEAD)"
     git merge-base --is-ancestor "$commit" "$remote_commit" || { echo 'Push this commit to origin/main before publishing.' >&2; exit 1; }
@@ -83,8 +85,8 @@ signature_details="$(codesign -dv --verbose=4 "$app_path" 2>&1)"
 grep -q '^Authority=Developer ID Application:' <<< "$signature_details"
 ditto -c -k --keepParent "$app_path" "$output/notarize.zip"
 notarize "$output/notarize.zip"
-staple "$app_path"
-xcrun stapler validate "$app_path"
+retry_stapler staple "$app_path"
+retry_stapler validate "$app_path"
 spctl --assess --type execute --verbose=2 "$app_path"
 "$app_path/Contents/MacOS/evb-ide" --system-specs > "$output/system-specs.txt"
 grep -q "EVB IDE: v$version" "$output/system-specs.txt"
@@ -97,8 +99,8 @@ ln -s /Applications "$image_root/Applications"
 hdiutil create -volname "EVB IDE $version" -srcfolder "$image_root" -format UDZO "$output/$image_name"
 codesign --force --sign "$EVB_SIGNING_IDENTITY" --timestamp "$output/$image_name"
 notarize "$output/$image_name"
-staple "$output/$image_name"
-xcrun stapler validate "$output/$image_name"
+retry_stapler staple "$output/$image_name"
+retry_stapler validate "$output/$image_name"
 rm -rf "$image_root"
 
 source_root="$output/EVB-IDE-$version-source"
