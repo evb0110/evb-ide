@@ -25,9 +25,7 @@ const MISSING_TOKEN_TTL: Duration = Duration::from_secs(10);
 const GH_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long requests to a host pause after a rate limit that names no reset time.
 const DEFAULT_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(60);
-const SAME_REPOSITORY_HEAD_LIMIT: usize = 20;
-/// A head owned by a fork can share its branch name with many other forks' pull requests.
-const CROSS_REPOSITORY_HEAD_LIMIT: usize = 100;
+const DEFAULT_BRANCH_TTL: Duration = Duration::from_secs(60 * 60);
 const API_VERSION: &str = "2022-11-28";
 const USER_AGENT: &str = "evb-ide";
 
@@ -194,6 +192,12 @@ impl SystemCredentials {
             // Never let gh print the token into a debug log, or wait for input.
             .env("GH_DEBUG", "")
             .env("GH_PROMPT_DISABLED", "1")
+            // gh hands out GH_ENTERPRISE_TOKEN for any host; environment_token() already
+            // decided which host may have an environment token, so gh reads only its logins.
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_ENTERPRISE_TOKEN")
+            .env_remove("GITHUB_ENTERPRISE_TOKEN")
             .kill_on_drop(true);
         let output = futures::select_biased! {
             output = command.output().fuse() => output,
@@ -320,6 +324,7 @@ pub struct GitHubClient {
     executor: BackgroundExecutor,
     slots: async_lock::Semaphore,
     paused_until: Mutex<HashMap<String, SystemTime>>,
+    default_branches: Mutex<HashMap<(String, String, String), (Instant, String)>>,
 }
 
 impl GitHubClient {
@@ -334,6 +339,7 @@ impl GitHubClient {
             executor,
             slots: async_lock::Semaphore::new(CONCURRENCY),
             paused_until: Mutex::new(HashMap::default()),
+            default_branches: Mutex::new(HashMap::default()),
         })
     }
 
@@ -425,11 +431,41 @@ impl GitHubClient {
         }
     }
 
+    /// Runs a mutation: any GraphQL error, or no payload under `field`, is a failure, since a
+    /// mutation that did not happen must not look done.
+    async fn mutate(
+        &self,
+        host: &str,
+        query: &str,
+        variables: Value,
+        field: &str,
+    ) -> Result<(), GitHubError> {
+        let data: Value = self.graphql_with(host, query, variables, true).await?;
+        if data.get(field).is_none_or(Value::is_null) {
+            return Err(GitHubError::Response {
+                host: normalize_host(host),
+                status: 200,
+                messages: vec![format!("GitHub did not apply {field}.")],
+            });
+        }
+        Ok(())
+    }
+
     pub async fn graphql<T: DeserializeOwned>(
         &self,
         host: &str,
         query: &str,
         variables: Value,
+    ) -> Result<T, GitHubError> {
+        self.graphql_with(host, query, variables, false).await
+    }
+
+    async fn graphql_with<T: DeserializeOwned>(
+        &self,
+        host: &str,
+        query: &str,
+        variables: Value,
+        errors_fail: bool,
     ) -> Result<T, GitHubError> {
         #[derive(Deserialize)]
         struct Envelope<T> {
@@ -453,7 +489,16 @@ impl GitHubClient {
             status: answer.status,
             messages: vec![format!("unexpected response: {error}")],
         })?;
+        let errors_present = envelope
+            .errors
+            .as_ref()
+            .is_some_and(|errors| !errors.is_empty());
         match (envelope.data, envelope.errors) {
+            (Some(_), Some(errors)) if errors_fail && errors_present => Err(GitHubError::Response {
+                host: normalize_host(host),
+                status: answer.status,
+                messages: errors.into_iter().filter_map(|error| error.message).collect(),
+            }),
             (Some(data), errors) => {
                 if let Some(errors) = errors.filter(|errors| !errors.is_empty()) {
                     log::warn!(
@@ -504,49 +549,45 @@ impl GitHubClient {
     }
 
     /// The pull request of a branch: an open one first, else the most recently updated one.
+    /// GitHub filters by the exact head (`owner:branch`), so other forks' pull requests from a
+    /// branch of the same name never crowd it out.
     pub async fn branch_pull_request(
         &self,
         branch: &BranchHead,
     ) -> Result<BranchPullRequests, GitHubError> {
         let target = &branch.target;
-        let first = if branch.is_cross_repository() {
-            CROSS_REPOSITORY_HEAD_LIMIT
-        } else {
-            SAME_REPOSITORY_HEAD_LIMIT
-        };
-        let data: BranchQueryData = self
-            .graphql(
+        let default_branch = self.default_branch(target).await?;
+        let pulls: Vec<RestPull> = self
+            .rest(
                 &target.host,
-                BRANCH_PULL_REQUESTS_QUERY,
-                json!({
-                    "owner": target.owner,
-                    "name": target.name,
-                    "head": branch.branch,
-                    "first": first,
-                }),
+                Method::GET,
+                &format!(
+                    "repos/{}/{}/pulls?state=all&sort=updated&direction=desc&per_page=100&head={}",
+                    target.owner,
+                    target.name,
+                    query_value(&format!("{}:{}", branch.head.owner, branch.branch)),
+                ),
+                None,
             )
             .await?;
-        let repository = data.repository.ok_or_else(|| GitHubError::NotFound {
-            host: normalize_host(&target.host),
-        })?;
-        let default_branch = repository.default_branch_ref.map(|branch| branch.name);
-        let Some(node) = choose_pull_request(&repository.pull_requests.nodes, branch) else {
+        let Some(pull) = choose_pull_request(&pulls, branch) else {
             return Ok(BranchPullRequests {
-                default_branch,
+                default_branch: Some(default_branch),
                 pull_request: None,
             });
         };
         let mut pull_request = PullRequest {
-            number: node.number,
-            title: node.title.clone(),
-            url: node.url.clone(),
-            state: node.state(),
-            base_branch: node.base_ref_name.clone(),
-            head_sha: node.head_ref_oid.clone(),
+            number: pull.number,
+            title: pull.title.clone(),
+            url: pull.html_url.clone(),
+            state: pull.state(),
+            base_branch: pull.base.name.clone(),
+            head_sha: Some(pull.head.sha.clone()),
             checks: Vec::new(),
             mergeable: Mergeable::Unknown,
             review: None,
         };
+        let node = pull;
         if pull_request.state.is_open() {
             let status: StatusQueryData = self
                 .graphql(
@@ -589,9 +630,39 @@ impl GitHubClient {
             }
         }
         Ok(BranchPullRequests {
-            default_branch,
+            default_branch: Some(default_branch),
             pull_request: Some(pull_request),
         })
+    }
+
+    /// The repository's default branch, which seldom changes, so it is read once an hour.
+    async fn default_branch(&self, repository: &RepositoryLocator) -> Result<String, GitHubError> {
+        let key = (
+            normalize_host(&repository.host),
+            repository.owner.to_lowercase(),
+            repository.name.to_lowercase(),
+        );
+        if let Some((read_at, name)) = self.default_branches.lock().get(&key)
+            && read_at.elapsed() < DEFAULT_BRANCH_TTL
+        {
+            return Ok(name.clone());
+        }
+        #[derive(Deserialize)]
+        struct RestRepository {
+            default_branch: String,
+        }
+        let read: RestRepository = self
+            .rest(
+                &repository.host,
+                Method::GET,
+                &format!("repos/{}/{}", repository.owner, repository.name),
+                None,
+            )
+            .await?;
+        self.default_branches
+            .lock()
+            .insert(key, (Instant::now(), read.default_branch.clone()));
+        Ok(read.default_branch)
     }
 
     pub async fn create_pull_request(
@@ -603,15 +674,23 @@ impl GitHubClient {
             &target.host,
             Method::POST,
             &format!("repos/{}/{}/pulls", target.owner, target.name),
-            Some(json!({
-                "base": request.base,
-                "head": request.head.selector(),
-                "title": request.title,
-                "body": request.body,
-                "draft": request.draft,
-                // Match gh; the API default is undocumented.
-                "maintainer_can_modify": true,
-            })),
+            Some({
+                let mut body = json!({
+                    "base": request.base,
+                    "head": request.head.selector(),
+                    "title": request.title,
+                    "body": request.body,
+                    "draft": request.draft,
+                    // Match gh; the API default is undocumented.
+                    "maintainer_can_modify": true,
+                });
+                // `owner:branch` cannot tell a fork from its parent when one organization owns
+                // both, so GitHub requires the head repository then.
+                if request.head.is_cross_repository() {
+                    body["head_repo"] = Value::String(request.head.head.name.clone());
+                }
+                body
+            }),
         )
         .await
     }
@@ -672,15 +751,15 @@ impl GitHubClient {
         thread_id: &str,
         body: &str,
     ) -> Result<(), GitHubError> {
-        self.graphql::<Value>(
+        self.mutate(
             host,
             r#"mutation ReplyToReviewThread($threadId: ID!, $body: String!) {
   addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } }
 }"#,
             json!({ "threadId": thread_id, "body": body }),
+            "addPullRequestReviewThreadReply",
         )
         .await
-        .map(drop)
     }
 
     pub async fn set_review_thread_resolved(
@@ -689,14 +768,19 @@ impl GitHubClient {
         thread_id: &str,
         resolved: bool,
     ) -> Result<(), GitHubError> {
-        let query = if resolved {
-            "mutation ResolveReviewThread($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } } }"
+        let (query, field) = if resolved {
+            (
+                "mutation ResolveReviewThread($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } } }",
+                "resolveReviewThread",
+            )
         } else {
-            "mutation UnresolveReviewThread($threadId: ID!) { unresolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } } }"
+            (
+                "mutation UnresolveReviewThread($threadId: ID!) { unresolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } } }",
+                "unresolveReviewThread",
+            )
         };
-        self.graphql::<Value>(host, query, json!({ "threadId": thread_id }))
+        self.mutate(host, query, json!({ "threadId": thread_id }), field)
             .await
-            .map(drop)
     }
 
     /// Comments on a line of the pull request's head commit. GitHub accepts lines inside the
@@ -947,28 +1031,6 @@ pub struct CreatedPullRequest {
     pub html_url: String,
 }
 
-const BRANCH_PULL_REQUESTS_QUERY: &str = r#"
-query BranchPullRequests($owner: String!, $name: String!, $head: String!, $first: Int!) {
-  repository(owner: $owner, name: $name) {
-    defaultBranchRef { name }
-    pullRequests(headRefName: $head, first: $first, orderBy: { field: CREATED_AT, direction: DESC }) {
-      nodes {
-        number
-        title
-        url
-        state
-        isDraft
-        baseRefName
-        headRefOid
-        updatedAt
-        isCrossRepository
-        headRepositoryOwner { login }
-      }
-    }
-  }
-}
-"#;
-
 const PULL_REQUEST_STATUS_QUERY: &str = r#"
 query PullRequestStatus($owner: String!, $name: String!, $number: Int!, $required: Boolean!) {
   repository(owner: $owner, name: $name) {
@@ -1009,46 +1071,9 @@ query PullRequestStatus($owner: String!, $name: String!, $number: Int!, $require
 "#;
 
 #[derive(Deserialize)]
-struct BranchQueryData {
-    repository: Option<BranchQueryRepository>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BranchQueryRepository {
-    default_branch_ref: Option<NamedRef>,
-    pull_requests: Nodes<PullRequestNode>,
-}
-
-#[derive(Deserialize)]
-struct NamedRef {
-    name: String,
-}
-
-#[derive(Deserialize)]
 struct Nodes<T> {
     #[serde(default = "Vec::new")]
     nodes: Vec<T>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PullRequestNode {
-    number: u64,
-    title: String,
-    url: String,
-    state: String,
-    #[serde(default)]
-    is_draft: bool,
-    base_ref_name: String,
-    #[serde(default)]
-    head_ref_oid: Option<String>,
-    #[serde(default)]
-    updated_at: String,
-    #[serde(default)]
-    is_cross_repository: bool,
-    #[serde(default)]
-    head_repository_owner: Option<Login>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1056,45 +1081,80 @@ struct Login {
     login: String,
 }
 
-impl PullRequestNode {
+/// A pull request as GitHub's REST list returns it.
+#[derive(Clone, Debug, Deserialize)]
+struct RestPull {
+    number: u64,
+    title: String,
+    html_url: String,
+    state: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    merged_at: Option<String>,
+    base: RestBase,
+    head: RestHead,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RestBase {
+    #[serde(rename = "ref")]
+    name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RestHead {
+    sha: String,
+    /// `None` once the head repository is deleted.
+    repo: Option<RestHeadRepository>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RestHeadRepository {
+    full_name: String,
+}
+
+impl RestPull {
     fn state(&self) -> PullRequestState {
-        match self.state.as_str() {
-            "MERGED" => PullRequestState::Merged,
-            "CLOSED" => PullRequestState::Closed,
-            _ if self.is_draft => PullRequestState::Draft,
-            _ => PullRequestState::Open,
+        if self.merged_at.is_some() {
+            PullRequestState::Merged
+        } else if self.state == "closed" {
+            PullRequestState::Closed
+        } else if self.draft {
+            PullRequestState::Draft
+        } else {
+            PullRequestState::Open
         }
     }
 
-    fn matches(&self, branch: &BranchHead) -> bool {
-        let owner = self
-            .head_repository_owner
+    fn is_from(&self, branch: &BranchHead) -> bool {
+        let head = format!("{}/{}", branch.head.owner, branch.head.name);
+        self.head
+            .repo
             .as_ref()
-            .map(|owner| owner.login.as_str());
-        if branch.is_cross_repository() {
-            self.is_cross_repository
-                && owner.is_some_and(|owner| owner.eq_ignore_ascii_case(&branch.head.owner))
-        } else {
-            !self.is_cross_repository
-        }
+            .is_some_and(|repository| repository.full_name.eq_ignore_ascii_case(&head))
     }
 }
 
-fn choose_pull_request<'a>(
-    nodes: &'a [PullRequestNode],
-    branch: &BranchHead,
-) -> Option<&'a PullRequestNode> {
-    let mut matching = nodes
-        .iter()
-        .filter(|node| node.matches(branch))
-        .collect::<Vec<_>>();
-    // ISO 8601 timestamps sort chronologically as text.
-    matching.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    matching
-        .iter()
-        .find(|node| node.state().is_open())
-        .or_else(|| matching.first())
-        .copied()
+/// GitHub lists the newest first; an open pull request wins over closed and merged ones. One
+/// organization can own both a fork and its parent, so the head repository must match too.
+fn choose_pull_request<'a>(pulls: &'a [RestPull], branch: &BranchHead) -> Option<&'a RestPull> {
+    let mut matching = pulls.iter().filter(|pull| pull.is_from(branch));
+    let first = matching.clone().next();
+    matching.find(|pull| pull.state().is_open()).or(first)
+}
+
+/// Percent-encodes a query parameter value.
+fn query_value(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b':' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -1244,6 +1304,7 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
           isOutdated
           path
           line
+          diffSide
           viewerCanReply
           viewerCanResolve
           viewerCanUnresolve
@@ -1273,6 +1334,9 @@ pub struct ReviewThread {
     pub path: String,
     /// The line on the head commit; `None` once the line left the diff.
     pub line: Option<u32>,
+    /// Whether `line` counts lines of the head commit. Comments on deleted lines count the
+    /// base commit's lines instead, which the head's file does not have.
+    pub on_head: bool,
     pub is_resolved: bool,
     pub is_outdated: bool,
     pub can_reply: bool,
@@ -1357,6 +1421,8 @@ struct ReviewThreadNode {
     path: String,
     line: Option<u32>,
     #[serde(default)]
+    diff_side: Option<String>,
+    #[serde(default)]
     viewer_can_reply: bool,
     #[serde(default)]
     viewer_can_resolve: bool,
@@ -1391,6 +1457,7 @@ impl ReviewThreadNode {
             id: self.id,
             path: self.path,
             line: self.line,
+            on_head: self.diff_side.as_deref() != Some("LEFT"),
             is_resolved: self.is_resolved,
             is_outdated: self.is_outdated,
             can_reply: self.viewer_can_reply,
@@ -1488,22 +1555,21 @@ mod tests {
         }
     }
 
-    fn node(number: u64, state: &str, updated_at: &str, owner: &str, cross: bool) -> Value {
+    /// A pull request as GitHub's REST list returns it, newest first.
+    fn pull(number: u64, state: &str, merged: bool, head_repository: &str) -> Value {
         json!({
             "number": number,
             "title": format!("PR {number}"),
-            "url": format!("https://github.com/evb0110/evb-ide/pull/{number}"),
+            "html_url": format!("https://github.com/evb0110/evb-ide/pull/{number}"),
             "state": state,
-            "isDraft": false,
-            "baseRefName": "main",
-            "headRefOid": "abc",
-            "updatedAt": updated_at,
-            "isCrossRepository": cross,
-            "headRepositoryOwner": { "login": owner },
+            "draft": false,
+            "merged_at": if merged { json!("2026-10-30T10:00:00Z") } else { Value::Null },
+            "base": { "ref": "main" },
+            "head": { "sha": "abc", "repo": { "full_name": head_repository } },
         })
     }
 
-    fn nodes(values: Vec<Value>) -> Vec<PullRequestNode> {
+    fn pulls(values: Vec<Value>) -> Vec<RestPull> {
         values
             .into_iter()
             .map(|value| serde_json::from_value(value).unwrap())
@@ -1591,35 +1657,35 @@ mod tests {
     #[test]
     fn chooses_open_then_latest_pull_request() {
         let branch = same_repository_branch("feature");
-        let list = nodes(vec![
-            node(3, "CLOSED", "2026-10-30T10:00:00Z", "evb0110", false),
-            node(2, "OPEN", "2026-10-01T10:00:00Z", "evb0110", false),
-            node(4, "OPEN", "2026-10-31T10:00:00Z", "someone", true),
+        let list = pulls(vec![
+            pull(3, "closed", false, "evb0110/evb-ide"),
+            pull(2, "open", false, "evb0110/evb-ide"),
         ]);
-        assert_eq!(choose_pull_request(&list, &branch).map(|node| node.number), Some(2));
+        assert_eq!(choose_pull_request(&list, &branch).map(|pull| pull.number), Some(2));
 
-        let closed = nodes(vec![
-            node(5, "MERGED", "2026-10-01T10:00:00Z", "evb0110", false),
-            node(6, "CLOSED", "2026-10-02T10:00:00Z", "evb0110", false),
+        let finished = pulls(vec![
+            pull(6, "closed", true, "evb0110/evb-ide"),
+            pull(5, "closed", false, "evb0110/evb-ide"),
         ]);
-        assert_eq!(choose_pull_request(&closed, &branch).map(|node| node.number), Some(6));
+        let chosen = choose_pull_request(&finished, &branch).unwrap();
+        assert_eq!((chosen.number, chosen.state()), (6, PullRequestState::Merged));
 
-        // From a fork, only pull requests whose head the fork owns are the branch's.
+        // One organization can own a fork and its parent: `owner:branch` matches both, so the
+        // head repository decides.
         let fork_branch = BranchHead {
-            head: locator("contributor", "evb-ide"),
+            head: locator("evb0110", "evb-ide-fork"),
             ..branch
         };
         assert!(fork_branch.is_cross_repository());
-        assert_eq!(fork_branch.selector(), "contributor:feature");
-        let fork_list = nodes(vec![
-            node(7, "OPEN", "2026-10-31T10:00:00Z", "evb0110", false),
-            node(8, "OPEN", "2026-10-30T10:00:00Z", "someone", true),
-            node(9, "OPEN", "2026-10-29T10:00:00Z", "Contributor", true),
+        let same_owner = pulls(vec![
+            pull(8, "open", false, "evb0110/evb-ide"),
+            pull(9, "open", false, "evb0110/evb-ide-fork"),
         ]);
         assert_eq!(
-            choose_pull_request(&fork_list, &fork_branch).map(|node| node.number),
+            choose_pull_request(&same_owner, &fork_branch).map(|pull| pull.number),
             Some(9)
         );
+        assert_eq!(query_value("contributor:feature/a b"), "contributor:feature%2Fa%20b");
     }
 
     fn check(value: Value) -> CheckNode {
@@ -1740,26 +1806,23 @@ mod tests {
 
     #[gpui::test]
     async fn reads_the_branch_pull_request_with_checks(cx: &mut gpui::TestAppContext) {
-        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
         let http = FakeHttpClient::create({
             let requests = requests.clone();
             move |mut request| {
                 let requests = requests.clone();
                 async move {
-                    assert_eq!(request.uri().to_string(), "https://api.github.com/graphql");
                     assert_eq!(
                         request.headers().get("Authorization").unwrap(),
                         "Bearer secret"
                     );
+                    let uri = request.uri().to_string();
                     let mut body = String::new();
                     request.body_mut().read_to_string(&mut body).await?;
-                    let body: Value = serde_json::from_str(&body)?;
-                    let is_status = body["query"]
-                        .as_str()
-                        .is_some_and(|query| query.contains("PullRequestStatus"));
-                    requests.lock().push(body["variables"].clone());
-                    Ok(if is_status {
-                        json_response(
+                    if uri.ends_with("/graphql") {
+                        let body: Value = serde_json::from_str(&body)?;
+                        requests.lock().push(body["variables"].to_string());
+                        return Ok(json_response(
                             200,
                             json!({ "data": { "repository": { "pullRequest": {
                                 "mergeable": "CONFLICTING",
@@ -1771,26 +1834,26 @@ mod tests {
                                     ] }
                                 } } }] }
                             } } } }),
-                        )
-                    } else {
+                        ));
+                    }
+                    requests.lock().push(uri.clone());
+                    Ok(if uri.contains("/pulls?") {
                         json_response(
                             200,
-                            json!({ "data": { "repository": {
-                                "defaultBranchRef": { "name": "main" },
-                                "pullRequests": { "nodes": [
-                                    node(12, "OPEN", "2026-10-31T10:00:00Z", "evb0110", false)
-                                ] }
-                            } } }),
+                            json!([
+                                pull(14, "open", false, "someone/evb-ide"),
+                                pull(12, "open", false, "evb0110/evb-ide")
+                            ]),
                         )
+                    } else {
+                        json_response(200, json!({ "default_branch": "main" }))
                     })
                 }
             }
         });
         let client = GitHubClient::new(http, Arc::new(FixedToken), cx.executor());
-        let result = client
-            .branch_pull_request(&same_repository_branch("feature"))
-            .await
-            .unwrap();
+        let branch = same_repository_branch("feature/one");
+        let result = client.branch_pull_request(&branch).await.unwrap();
         assert_eq!(result.default_branch.as_deref(), Some("main"));
         let pull_request = result.pull_request.unwrap();
         assert_eq!(pull_request.number, 12);
@@ -1798,11 +1861,16 @@ mod tests {
         assert_eq!(pull_request.mergeable, Mergeable::Conflicting);
         assert_eq!(pull_request.review, Some(ReviewDecision::Approved));
         assert_eq!(pull_request.checks_summary(), ChecksSummary::Passed);
+        // The default branch is read once and kept.
+        client.branch_pull_request(&branch).await.unwrap();
         assert_eq!(
             *requests.lock(),
             vec![
-                json!({ "owner": "evb0110", "name": "evb-ide", "head": "feature", "first": 20 }),
-                json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "required": true }),
+                "https://api.github.com/repos/evb0110/evb-ide".to_string(),
+                "https://api.github.com/repos/evb0110/evb-ide/pulls?state=all&sort=updated&direction=desc&per_page=100&head=evb0110:feature%2Fone".to_string(),
+                json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "required": true }).to_string(),
+                "https://api.github.com/repos/evb0110/evb-ide/pulls?state=all&sort=updated&direction=desc&per_page=100&head=evb0110:feature%2Fone".to_string(),
+                json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "required": true }).to_string(),
             ]
         );
     }
@@ -1884,6 +1952,7 @@ mod tests {
                             "isOutdated": line.is_null(),
                             "path": "src/main.rs",
                             "line": line,
+                            "diffSide": if resolved { "LEFT" } else { "RIGHT" },
                             "viewerCanReply": true,
                             "viewerCanResolve": !resolved,
                             "viewerCanUnresolve": resolved,
@@ -1927,9 +1996,15 @@ mod tests {
             review
                 .threads
                 .iter()
-                .map(|thread| (thread.id.as_str(), thread.line, thread.is_resolved, thread.comment_count))
+                .map(|thread| (
+                    thread.id.as_str(),
+                    thread.line,
+                    thread.on_head,
+                    thread.is_resolved,
+                    thread.comment_count
+                ))
                 .collect::<Vec<_>>(),
-            vec![("a", Some(3), false, 12), ("b", None, true, 12)]
+            vec![("a", Some(3), true, false, 12), ("b", None, false, true, 12)]
         );
         assert_eq!(review.threads[0].comments[0].author, "ghost");
         assert_eq!(
@@ -1948,9 +2023,22 @@ mod tests {
                 async move {
                     let mut body = String::new();
                     request.body_mut().read_to_string(&mut body).await?;
-                    sent.lock()
-                        .push((request.uri().to_string(), serde_json::from_str(&body)?));
-                    Ok(json_response(200, json!({ "data": {} })))
+                    let body: Value = serde_json::from_str(&body)?;
+                    let query = body["query"].as_str().unwrap_or_default().to_string();
+                    sent.lock().push((request.uri().to_string(), body));
+                    Ok(json_response(
+                        200,
+                        if query.contains("UnresolveReviewThread") {
+                            // GitHub refuses with HTTP 200, a null payload and an error.
+                            json!({ "data": { "unresolveReviewThread": null }, "errors": [{ "type": "FORBIDDEN", "message": "Resource not accessible by integration" }] })
+                        } else if query.contains("ResolveReviewThread") {
+                            json!({ "data": { "resolveReviewThread": { "thread": { "isResolved": true } } } })
+                        } else if query.contains("ReplyToReviewThread") {
+                            json!({ "data": { "addPullRequestReviewThreadReply": { "comment": { "id": "C" } } } })
+                        } else {
+                            json!({ "id": 1 })
+                        },
+                    ))
                 }
             }
         });
@@ -1964,6 +2052,14 @@ mod tests {
             .set_review_thread_resolved("github.com", "T1", true)
             .await
             .unwrap();
+        assert_eq!(
+            client
+                .set_review_thread_resolved("github.com", "T1", false)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "GitHub returned an error: Resource not accessible by integration"
+        );
         client
             .add_review_comment(
                 &repository,
@@ -1978,24 +2074,24 @@ mod tests {
             .await
             .unwrap();
         client
-            .submit_review(&repository, 7, ReviewVerdict::RequestChanges, "")
+            .submit_review(&repository, 7, ReviewVerdict::Approve, "")
             .await
             .unwrap();
         let sent = sent.lock().clone();
         assert_eq!(sent[0].1["variables"], json!({ "threadId": "T1", "body": "Done" }));
         assert!(sent[1].1["query"].as_str().unwrap().contains("resolveReviewThread"));
         assert_eq!(
-            sent[2],
+            sent[3],
             (
                 "https://api.github.com/repos/o/r/pulls/7/comments".to_string(),
                 json!({ "body": "Nit", "commit_id": "head", "path": "src/main.rs", "line": 4, "side": "RIGHT" })
             )
         );
         assert_eq!(
-            sent[3],
+            sent[4],
             (
                 "https://api.github.com/repos/o/r/pulls/7/reviews".to_string(),
-                json!({ "event": "REQUEST_CHANGES" })
+                json!({ "event": "APPROVE" })
             )
         );
     }
@@ -2041,6 +2137,7 @@ mod tests {
                 json!({
                     "base": "main",
                     "head": "contributor:feature",
+                    "head_repo": "evb-ide",
                     "title": "Title",
                     "body": "Body",
                     "draft": true,

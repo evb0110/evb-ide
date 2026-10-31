@@ -7122,6 +7122,7 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "similar",
  "smallvec",
  "strum 0.28.0",
  "sysinfo 0.39.6",

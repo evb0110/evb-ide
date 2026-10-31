@@ -217,6 +217,14 @@ mod capture {
     use workspace::{AppState, MultiWorkspace, Workspace};
 
     pub fn run(project_path: PathBuf) -> Result<()> {
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&project_path)
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        FIXTURE_HEAD
+            .set(String::from_utf8_lossy(&head.stdout).trim().to_string())
+            .ok();
         let mut cx = VisualTestAppContext::with_asset_source(
             gpui_platform::current_platform(false),
             Arc::new(Assets),
@@ -474,6 +482,7 @@ mod capture {
     }
 
     const PULL_REQUEST_X: f32 = 80.;
+    static FIXTURE_HEAD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     static PULL_REQUEST_OPEN: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(true);
 
@@ -496,6 +505,34 @@ mod capture {
         use futures::AsyncReadExt as _;
         use serde_json::json;
         http_client::FakeHttpClient::create(|mut request| async move {
+            let respond = |body: serde_json::Value| {
+                http_client::Response::builder()
+                    .status(200)
+                    .body(http_client::AsyncBody::from(body.to_string()))
+            };
+            // The review's head is the fixture's HEAD, whose files the editor maps threads onto.
+            let head = FIXTURE_HEAD.get().cloned().unwrap_or_default();
+            let uri = request.uri().to_string();
+            if uri.ends_with("/repos/trailmap-app/trailmap") {
+                return Ok(respond(json!({ "default_branch": "main" }))?);
+            }
+            if uri.contains("/pulls?") {
+                let pulls = if PULL_REQUEST_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
+                    json!([{
+                        "number": 128,
+                        "title": "Return 404 for trips the viewer cannot see",
+                        "html_url": "https://github.com/trailmap-app/trailmap/pull/128",
+                        "state": "open",
+                        "draft": false,
+                        "merged_at": null,
+                        "base": { "ref": "main" },
+                        "head": { "sha": head, "repo": { "full_name": "trailmap-app/trailmap" } }
+                    }])
+                } else {
+                    json!([])
+                };
+                return Ok(respond(pulls)?);
+            }
             let mut body = String::new();
             request.body_mut().read_to_string(&mut body).await?;
             let body: serde_json::Value = serde_json::from_str(&body)?;
@@ -507,7 +544,7 @@ mod capture {
                     "url": "https://github.com/trailmap-app/trailmap/pull/128#discussion_r1"
                 });
                 json!({ "repository": { "pullRequest": {
-                    "id": "PR_128", "headRefOid": "abc",
+                    "id": "PR_128", "headRefOid": head,
                     "reviewThreads": { "pageInfo": null, "nodes": [
                         {
                             "id": "T1", "isResolved": false, "isOutdated": false,
@@ -540,30 +577,9 @@ mod capture {
                     ] } } } }] }
                 } } })
             } else {
-                let nodes = if PULL_REQUEST_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
-                    json!([{
-                        "number": 128,
-                        "title": "Return 404 for trips the viewer cannot see",
-                        "url": "https://github.com/trailmap-app/trailmap/pull/128",
-                        "state": "OPEN",
-                        "isDraft": false,
-                        "baseRefName": "main",
-                        "headRefOid": "abc",
-                        "updatedAt": "2026-10-31T10:00:00Z",
-                        "isCrossRepository": false,
-                        "headRepositoryOwner": { "login": "evb0110" }
-                    }])
-                } else {
-                    json!([])
-                };
-                json!({ "repository": {
-                    "defaultBranchRef": { "name": "main" },
-                    "pullRequests": { "nodes": nodes }
-                } })
+                anyhow::bail!("unexpected GitHub request: {query}")
             };
-            Ok(http_client::Response::builder()
-                .status(200)
-                .body(http_client::AsyncBody::from(json!({ "data": data }).to_string()))?)
+            Ok(respond(json!({ "data": data }))?)
         })
     }
 

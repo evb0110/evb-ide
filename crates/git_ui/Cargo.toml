@@ -54,6 +54,7 @@ remote_connection.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+similar.workspace = true
 settings.workspace = true
 smallvec.workspace = true
 strum.workspace = true

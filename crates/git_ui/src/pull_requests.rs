@@ -117,14 +117,17 @@ pub fn register(workspace: &mut Workspace) {
 pub(crate) struct ResolvedBranch {
     pub head: BranchHead,
     pub local_branch: String,
-    pub target_remote: String,
+    /// The remote of the target repository, when one points at it.
+    pub target_remote: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RemoteConfig {
     name: String,
     url: Option<String>,
-    resolved_base: bool,
+    /// `gh repo set-default`: `base` on the remote of the chosen repository, or the chosen
+    /// repository's `owner/name` when no remote points at it.
+    gh_resolved: Option<String>,
 }
 
 fn parse_remote_config(output: &str) -> Vec<RemoteConfig> {
@@ -153,29 +156,11 @@ fn parse_remote_config(output: &str) -> Vec<RemoteConfig> {
         let remote = &mut remotes[index];
         match field {
             "url" if remote.url.is_none() => remote.url = Some(value.trim().to_string()),
-            "gh-resolved" => remote.resolved_base = value.trim() == "base",
+            "gh-resolved" => remote.gh_resolved = Some(value.trim().to_string()),
             _ => {}
         }
     }
     remotes
-}
-
-/// `gh repo set-default` marks the base remote; otherwise gh prefers `upstream`, `github`, then
-/// `origin`.
-fn target_remote<'a>(
-    remotes: &'a [RemoteConfig],
-    head_remote: Option<&str>,
-) -> Option<&'a RemoteConfig> {
-    remotes
-        .iter()
-        .find(|remote| remote.resolved_base)
-        .or_else(|| {
-            ["upstream", "github", "origin"]
-                .iter()
-                .find_map(|name| remotes.iter().find(|remote| remote.name == *name))
-        })
-        .or_else(|| head_remote.and_then(|name| remotes.iter().find(|remote| remote.name == name)))
-        .or_else(|| remotes.first())
 }
 
 fn locate(registry: &Arc<GitHostingProviderRegistry>, url: &str) -> Option<RepositoryLocator> {
@@ -190,32 +175,101 @@ fn locate(registry: &Arc<GitHostingProviderRegistry>, url: &str) -> Option<Repos
     })
 }
 
+/// The repository pull requests target and the remote pointing at it. `gh repo set-default`
+/// decides when set; otherwise gh prefers `upstream`, `github`, then `origin`.
+fn target_repository(
+    remotes: &[RemoteConfig],
+    registry: &Arc<GitHostingProviderRegistry>,
+    head_remote: Option<&str>,
+) -> Option<(RepositoryLocator, Option<String>)> {
+    for remote in remotes {
+        let (Some(resolved), Some(url)) = (remote.gh_resolved.as_deref(), remote.url.as_deref())
+        else {
+            continue;
+        };
+        let located = locate(registry, url)?;
+        if resolved == "base" {
+            return Some((located, Some(remote.name.clone())));
+        }
+        // `owner/name`, or `host/owner/name` for another host.
+        let parts = resolved.split('/').collect::<Vec<_>>();
+        let (host, owner, name) = match parts.as_slice() {
+            [owner, name] => (located.host, *owner, *name),
+            [host, owner, name] => (host.to_string(), *owner, *name),
+            _ => continue,
+        };
+        let target = RepositoryLocator {
+            host,
+            owner: owner.to_string(),
+            name: name.to_string(),
+        };
+        let pointing = remotes
+            .iter()
+            .find(|remote| {
+                remote
+                    .url
+                    .as_deref()
+                    .and_then(|url| locate(registry, url))
+                    .is_some_and(|located| located == target)
+            })
+            .map(|remote| remote.name.clone());
+        return Some((target, pointing));
+    }
+    let remote = ["upstream", "github", "origin"]
+        .iter()
+        .find_map(|name| remotes.iter().find(|remote| remote.name == *name))
+        .or_else(|| head_remote.and_then(|name| remotes.iter().find(|remote| remote.name == name)))
+        .or_else(|| remotes.first())?;
+    Some((
+        locate(registry, remote.url.as_deref()?)?,
+        Some(remote.name.clone()),
+    ))
+}
+
+/// Where `git push` sends the branch, as `git for-each-ref` reports it: `pushRemote`,
+/// `remote.pushDefault`, then the upstream, with the remote branch it updates.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PushTarget {
+    remote: Option<String>,
+    branch: Option<String>,
+}
+
+fn parse_push_target(output: &str) -> PushTarget {
+    let line = output.lines().next().unwrap_or_default();
+    let (remote, reference) = line.split_once('\0').unwrap_or((line, ""));
+    let nonempty = |value: &str| (!value.trim().is_empty()).then(|| value.trim().to_string());
+    PushTarget {
+        remote: nonempty(remote),
+        branch: nonempty(reference.trim().strip_prefix("refs/heads/").unwrap_or(reference)),
+    }
+}
+
 fn resolve_from_remotes(
     remotes: &[RemoteConfig],
     registry: &Arc<GitHostingProviderRegistry>,
     local_branch: String,
-    head_remote: Option<&str>,
-    head_branch: Option<&str>,
+    push: &PushTarget,
 ) -> Option<ResolvedBranch> {
-    let target = target_remote(remotes, head_remote)?;
-    // An unpublished branch will be pushed to origin, or else to the target.
-    let head = head_remote
-        .or_else(|| {
-            remotes
-                .iter()
-                .any(|remote| remote.name == "origin")
-                .then_some("origin")
-        })
+    let (target, target_remote) = target_repository(remotes, registry, push.remote.as_deref())?;
+    // A branch without a push destination yet will go to origin, else to the target.
+    let head = match push
+        .remote
+        .as_deref()
+        .or_else(|| remotes.iter().any(|remote| remote.name == "origin").then_some("origin"))
         .and_then(|name| remotes.iter().find(|remote| remote.name == name))
-        .unwrap_or(target);
+        .and_then(|remote| remote.url.as_deref())
+    {
+        Some(url) => locate(registry, url)?,
+        None => target.clone(),
+    };
     Some(ResolvedBranch {
         head: BranchHead {
-            target: locate(registry, target.url.as_deref()?)?,
-            head: locate(registry, head.url.as_deref()?)?,
-            branch: head_branch.unwrap_or(&local_branch).to_string(),
+            target,
+            head,
+            branch: push.branch.clone().unwrap_or_else(|| local_branch.clone()),
         },
         local_branch,
-        target_remote: target.name.clone(),
+        target_remote,
     })
 }
 
@@ -239,20 +293,29 @@ pub(crate) fn resolve_branch(
     let upstream = branch
         .upstream
         .filter(|upstream| matches!(upstream.tracking, UpstreamTracking::Tracked(_)));
-    let head_remote = upstream
-        .as_ref()
-        .and_then(|upstream| upstream.remote_name())
-        .map(ToString::to_string);
-    let head_branch = upstream
-        .as_ref()
-        .and_then(|upstream| upstream.branch_name())
-        .map(ToString::to_string);
-    let config = repository.update(cx, |repository, _| {
-        repository.read_git_command(args([
-            "config",
-            "--get-regexp",
-            r"^remote\..*\.(url|gh-resolved)$",
-        ]))
+    let upstream_push = PushTarget {
+        remote: upstream
+            .as_ref()
+            .and_then(|upstream| upstream.remote_name())
+            .map(ToString::to_string),
+        branch: upstream
+            .as_ref()
+            .and_then(|upstream| upstream.branch_name())
+            .map(ToString::to_string),
+    };
+    let (config, push) = repository.update(cx, |repository, _| {
+        (
+            repository.read_git_command(args([
+                "config",
+                "--get-regexp",
+                r"^remote\..*\.(url|gh-resolved)$",
+            ])),
+            repository.read_git_command(args([
+                "for-each-ref",
+                "--format=%(push:remotename)%00%(push:remoteref)",
+                &format!("refs/heads/{local_branch}"),
+            ])),
+        )
     });
     let registry = GitHostingProviderRegistry::default_global(cx);
     cx.background_spawn(async move {
@@ -267,18 +330,16 @@ pub(crate) fn resolve_branch(
                     remotes.push(RemoteConfig {
                         name: name.into(),
                         url: Some(url),
-                        resolved_base: false,
+                        gh_resolved: None,
                     });
                 }
             }
         }
-        resolve_from_remotes(
-            &remotes,
-            &registry,
-            local_branch,
-            head_remote.as_deref(),
-            head_branch.as_deref(),
-        )
+        let push = match push.await {
+            Ok(Ok(output)) => parse_push_target(&output),
+            _ => upstream_push,
+        };
+        resolve_from_remotes(&remotes, &registry, local_branch, &push)
     })
 }
 
@@ -411,15 +472,21 @@ impl PullRequestIndicator {
         let key = repository
             .as_ref()
             .map(|repository| StatusKey::of(repository.read(cx)));
-        if key.as_ref().map(|key| (&key.repository, &key.branch))
-            != self
-                .key
-                .as_ref()
-                .map(|key| (&key.repository, &key.branch))
-        {
+        // Another branch or repository: what was shown belongs to the old one, and its review
+        // must not take writes meant for the new one.
+        let identity = |key: &StatusKey| {
+            (
+                key.repository,
+                key.branch.as_ref().map(|branch| branch.name().to_string()),
+            )
+        };
+        if key.as_ref().map(identity) != self.key.as_ref().map(identity) {
             self.pull_request = None;
             self.error = None;
             self.failures = 0;
+            if let Some(old) = &self.key {
+                set_branch_review(old.work_directory.clone(), None, cx);
+            }
         }
         self.key = key.clone();
         cx.notify();
@@ -498,6 +565,8 @@ impl PullRequestIndicator {
                     (Some(Ok(review)), Some(pull_request)) => set_branch_review(
                         key.work_directory.clone(),
                         Some(BranchReview {
+                            work_directory: key.work_directory.clone(),
+                            branch: branch.local_branch.clone(),
                             repository: branch.head.target.clone(),
                             url: pull_request.url.clone(),
                             review,
@@ -591,7 +660,8 @@ impl PullRequestIndicator {
                         })
                         .unwrap_or_default();
                     let location = match thread.line {
-                        Some(line) => format!("{}:{line}", thread.path),
+                        Some(line) if thread.on_head => format!("{}:{line}", thread.path),
+                        Some(line) => format!("{} (deleted line {line})", thread.path),
                         None => format!("{} (outdated)", thread.path),
                     };
                     let (icon, color) = if thread.is_resolved {
@@ -606,7 +676,8 @@ impl PullRequestIndicator {
                             .icon(icon)
                             .icon_color(color)
                             .handler(move |window, cx| {
-                                if thread.line.is_some() {
+                                // Deleted and outdated lines are not in the file; GitHub shows them.
+                                if thread.line.is_some() && thread.on_head {
                                     crate::pull_request_review::open_thread(
                                         workspace.clone(),
                                         &work_directory,
@@ -816,21 +887,41 @@ impl StatusItemView for PullRequestIndicator {
 }
 
 /// Opens the form for a pull request of the current branch, or the hosting provider's page when
-/// the repository is not on GitHub.
+/// the repository is not on GitHub. `pushed` names the repository and branch a push just sent,
+/// so the form is for them even if the active repository changed meanwhile.
 pub(crate) fn create_pull_request(
     workspace: &mut Workspace,
+    pushed: Option<(Entity<Repository>, String)>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let Some(repository) = workspace
-        .project()
-        .read(cx)
-        .git_store()
-        .read(cx)
-        .active_repository()
-    else {
+    let repository = match &pushed {
+        Some((repository, _)) => Some(repository.clone()),
+        None => workspace
+            .project()
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .active_repository(),
+    };
+    let Some(repository) = repository else {
         return;
     };
+    if let Some((_, branch)) = &pushed {
+        let current = repository
+            .read(cx)
+            .branch
+            .as_ref()
+            .map(|branch| branch.name().to_string());
+        if current.as_deref() != Some(branch.as_str()) {
+            let message = format!(
+                "Pushed {branch}, but another branch is checked out now; create its pull request from that branch."
+            );
+            let toast = StatusToast::new(message, cx, |toast, _| toast.dismiss_button(true));
+            workspace.toggle_status_toast(toast, cx);
+            return;
+        }
+    }
     let resolve = resolve_branch(&repository, cx);
     let client = github_client(cx);
     cx.spawn_in(window, async move |workspace, cx| {
@@ -863,11 +954,15 @@ pub(crate) fn create_pull_request(
             return Ok(());
         }
         let base = status.default_branch.unwrap_or_else(|| "main".into());
-        let base_ref = format!("refs/remotes/{}/{base}", branch.target_remote);
-        let range = format!("{base_ref}..HEAD");
         let format = "--format=%s%x00%b%x1e";
         // Without the base fetched, the branch's own commits are unknown; the last one is used.
-        let mut commits = read_commits(&repository, args(["log", "--reverse", format, &range]), cx).await;
+        let mut commits = match &branch.target_remote {
+            Some(remote) => {
+                let range = format!("refs/remotes/{remote}/{base}..HEAD");
+                read_commits(&repository, args(["log", "--reverse", format, &range]), cx).await
+            }
+            None => None,
+        };
         if commits.is_none() {
             commits = read_commits(&repository, args(["log", "-1", format, "HEAD"]), cx).await;
         }
@@ -1208,7 +1303,35 @@ pub(crate) mod tests {
                     let uri = request.uri().to_string();
                     let mut body = String::new();
                     request.body_mut().read_to_string(&mut body).await?;
-                    let body: Value = serde_json::from_str(&body)?;
+                    let body: Value = if body.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_str(&body)?
+                    };
+                    if uri.ends_with("/repos/evb0110/evb-ide") {
+                        return Ok(json_response(200, json!({ "default_branch": "main" })));
+                    }
+                    if uri.contains("/pulls?") {
+                        // The exact head: the branch on its push remote's owner.
+                        assert!(uri.ends_with("&head=evb0110:evb%2Fpull-request-status"), "{uri}");
+                        return Ok(json_response(
+                            200,
+                            if has_pull_request {
+                                json!([{
+                                    "number": 12,
+                                    "title": "Status",
+                                    "html_url": "https://github.com/evb0110/evb-ide/pull/12",
+                                    "state": "open",
+                                    "draft": false,
+                                    "merged_at": null,
+                                    "base": { "ref": "main" },
+                                    "head": { "sha": "abc", "repo": { "full_name": "evb0110/evb-ide" } }
+                                }])
+                            } else {
+                                json!([])
+                            },
+                        ));
+                    }
                     if uri.ends_with("/pulls") {
                         created.lock().expect("recording a request").push((uri, body));
                         return Ok(json_response(
@@ -1240,30 +1363,7 @@ pub(crate) mod tests {
                             } } } }),
                         ));
                     }
-                    assert_eq!(body["variables"]["head"], json!("evb/pull-request-status"));
-                    let nodes = if has_pull_request {
-                        json!([{
-                            "number": 12,
-                            "title": "Status",
-                            "url": "https://github.com/evb0110/evb-ide/pull/12",
-                            "state": "OPEN",
-                            "isDraft": false,
-                            "baseRefName": "main",
-                            "headRefOid": "abc",
-                            "updatedAt": "2026-10-31T10:00:00Z",
-                            "isCrossRepository": false,
-                            "headRepositoryOwner": { "login": "evb0110" }
-                        }])
-                    } else {
-                        json!([])
-                    };
-                    Ok(json_response(
-                        200,
-                        json!({ "data": { "repository": {
-                            "defaultBranchRef": { "name": "main" },
-                            "pullRequests": { "nodes": nodes }
-                        } } }),
-                    ))
+                    panic!("unexpected request {uri}")
                 }
             }
         });
@@ -1296,7 +1396,7 @@ pub(crate) mod tests {
 
         has_pull_request.store(false, Ordering::SeqCst);
         cx.update(|window, cx| {
-            workspace.update(cx, |workspace, cx| create_pull_request(workspace, window, cx))
+            workspace.update(cx, |workspace, cx| create_pull_request(workspace, None, window, cx))
         });
         let modal = wait_for(&mut cx, |cx| {
             workspace
@@ -1355,12 +1455,19 @@ pub(crate) mod tests {
         RemoteConfig {
             name: name.into(),
             url: Some(url.into()),
-            resolved_base: false,
+            gh_resolved: None,
+        }
+    }
+
+    fn push(remote: Option<&str>, branch: Option<&str>) -> PushTarget {
+        PushTarget {
+            remote: remote.map(Into::into),
+            branch: branch.map(Into::into),
         }
     }
 
     #[test]
-    fn parses_remote_config() {
+    fn parses_remote_config_and_push_targets() {
         assert_eq!(
             parse_remote_config(
                 "remote.origin.url git@github.com:me/evb-ide.git\n\
@@ -1373,11 +1480,17 @@ pub(crate) mod tests {
                 remote("origin", "git@github.com:me/evb-ide.git"),
                 remote("my.fork", "https://github.com/me/fork.git"),
                 RemoteConfig {
-                    resolved_base: true,
+                    gh_resolved: Some("base".into()),
                     ..remote("upstream", "https://github.com/evb0110/evb-ide.git")
                 },
             ]
         );
+        assert_eq!(
+            parse_push_target("fork\0refs/heads/feature/x\n"),
+            push(Some("fork"), Some("feature/x"))
+        );
+        assert_eq!(parse_push_target("origin\0\n"), push(Some("origin"), None));
+        assert_eq!(parse_push_target("\n"), push(None, None));
     }
 
     #[test]
@@ -1398,38 +1511,67 @@ pub(crate) mod tests {
             &fork,
             &registry,
             "local-name".into(),
-            Some("origin"),
-            Some("feature"),
+            &push(Some("origin"), Some("feature")),
         )
         .unwrap();
         assert_eq!(resolved.head.target, locator("evb0110"));
         assert_eq!(resolved.head.head, locator("me"));
         assert_eq!(resolved.head.selector(), "me:feature");
-        assert_eq!(resolved.target_remote, "upstream");
+        assert_eq!(resolved.target_remote.as_deref(), Some("upstream"));
 
-        // `gh repo set-default` picks the base.
+        // A branch tracking upstream but pushed to a fork (`pushRemote`) has its head there.
+        let tracking_upstream = resolve_from_remotes(
+            &fork,
+            &registry,
+            "feature".into(),
+            &push(Some("origin"), None),
+        )
+        .unwrap();
+        assert_eq!(tracking_upstream.head.selector(), "me:feature");
+
+        // `gh repo set-default` picks the base: on a remote ...
         let set_default = [
             RemoteConfig {
-                resolved_base: true,
+                gh_resolved: Some("base".into()),
                 ..remote("origin", "git@github.com:me/evb-ide.git")
             },
             remote("upstream", "https://github.com/evb0110/evb-ide.git"),
         ];
         let resolved =
-            resolve_from_remotes(&set_default, &registry, "feature".into(), None, None).unwrap();
+            resolve_from_remotes(&set_default, &registry, "feature".into(), &push(None, None))
+                .unwrap();
         assert_eq!(resolved.head.target, locator("me"));
         assert_eq!(resolved.head.selector(), "feature");
+
+        // ... or by name, when no remote points at the chosen repository.
+        let by_name = [RemoteConfig {
+            gh_resolved: Some("org/project".into()),
+            ..remote("origin", "git@github.com:me/project.git")
+        }];
+        let resolved =
+            resolve_from_remotes(&by_name, &registry, "feature".into(), &push(None, None))
+                .unwrap();
+        assert_eq!(
+            resolved.head.target,
+            RepositoryLocator {
+                host: "github.com".into(),
+                owner: "org".into(),
+                name: "project".into(),
+            }
+        );
+        assert_eq!(resolved.target_remote, None);
+        assert_eq!(resolved.head.selector(), "me:feature");
 
         // An unpublished branch is assumed to go to origin under its own name.
         let single = [remote("origin", "https://github.com/evb0110/evb-ide")];
         let resolved =
-            resolve_from_remotes(&single, &registry, "feature".into(), None, None).unwrap();
+            resolve_from_remotes(&single, &registry, "feature".into(), &push(None, None)).unwrap();
         assert!(!resolved.head.is_cross_repository());
         assert_eq!(resolved.head.branch, "feature");
 
         let gitlab = [remote("origin", "https://gitlab.com/evb0110/evb-ide.git")];
         assert_eq!(
-            resolve_from_remotes(&gitlab, &registry, "feature".into(), None, None),
+            resolve_from_remotes(&gitlab, &registry, "feature".into(), &push(None, None)),
             None
         );
     }

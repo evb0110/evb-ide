@@ -196,7 +196,7 @@ pub fn init(cx: &mut App) {
         if !project.is_via_collab() {
             workspace.register_action(
                 |workspace, _: &zed_actions::git::CreatePullRequest, window, cx| {
-                    pull_requests::create_pull_request(workspace, window, cx);
+                    pull_requests::create_pull_request(workspace, None, window, cx);
                 },
             );
             pull_requests::register(workspace);

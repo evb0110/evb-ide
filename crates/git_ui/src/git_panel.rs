@@ -5107,10 +5107,17 @@ impl GitPanel {
             this.update_in(cx, |this, window, cx| {
                 match remote_output {
                     Ok(_) if create_pull_request => {
-                        window.dispatch_action(
-                            Box::new(zed_actions::git::CreatePullRequest),
-                            cx,
-                        );
+                        let pushed = (repo.clone(), branch.name().to_string());
+                        this.workspace
+                            .update(cx, |workspace, cx| {
+                                crate::pull_requests::create_pull_request(
+                                    workspace,
+                                    Some(pushed),
+                                    window,
+                                    cx,
+                                )
+                            })
+                            .log_err();
                     }
                     Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
                     Err(e) => {

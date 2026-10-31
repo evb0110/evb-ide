@@ -37,9 +37,28 @@ const CARD_LINE_CHARACTERS: usize = 90;
 /// The review of a repository's current branch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BranchReview {
+    pub work_directory: Arc<Path>,
+    /// The local branch the review was read for.
+    pub branch: String,
     pub repository: RepositoryLocator,
     pub url: String,
     pub review: PullRequestReview,
+}
+
+/// Whether `review` is still the one shown for its repository: a branch switch or a newer read
+/// replaces it, and a write must not reach a pull request the user no longer looks at.
+fn is_current(review: &Arc<BranchReview>, cx: &App) -> bool {
+    branch_review(&review.work_directory, cx).is_some_and(|current| Arc::ptr_eq(&current, review))
+}
+
+fn stale_review_error(review: &BranchReview) -> GitHubError {
+    GitHubError::Response {
+        host: review.repository.host.clone(),
+        status: 0,
+        messages: vec![
+            "The pull request view is out of date; wait for it to refresh, then try again.".into(),
+        ],
+    }
 }
 
 #[derive(Default)]
@@ -78,18 +97,77 @@ pub(crate) fn branch_review(work_directory: &Path, cx: &App) -> Option<Arc<Branc
         .cloned()
 }
 
-/// The review covering a file, and the file's path in the repository.
+/// The review covering a file, and the file's path in the repository. A file inside a nested
+/// repository (a submodule) belongs to the innermost one.
 fn review_for_file(path: &Path, cx: &App) -> Option<(Arc<Path>, String, Arc<BranchReview>)> {
     let cache = cx.try_global::<ReviewCache>()?;
-    cache.0.iter().find_map(|(work_directory, review)| {
-        let relative = path.strip_prefix(work_directory).ok()?;
-        let relative = relative
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        Some((work_directory.clone(), relative, review.clone()))
-    })
+    let (work_directory, review) = cache
+        .0
+        .iter()
+        .filter(|(work_directory, _)| path.starts_with(work_directory))
+        .max_by_key(|(work_directory, _)| work_directory.components().count())?;
+    let relative = path
+        .strip_prefix(work_directory)
+        .ok()?
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Some((work_directory.clone(), relative, review.clone()))
+}
+
+/// Lines that are the same in the pull request's head commit and in the buffer, so threads and
+/// new comments land on the code they are about even when the buffer has local changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LineMap {
+    /// Runs of equal lines: (first head line, first buffer line, length), zero-based.
+    runs: Vec<(u32, u32, u32)>,
+}
+
+impl LineMap {
+    pub(crate) fn new(head: &str, buffer: &str) -> Self {
+        let head_lines = head.lines().collect::<Vec<_>>();
+        let buffer_lines = buffer.lines().collect::<Vec<_>>();
+        let diff = similar::TextDiff::configure().diff_slices(&head_lines, &buffer_lines);
+        let runs = diff
+            .ops()
+            .iter()
+            .filter_map(|operation| match *operation {
+                similar::DiffOp::Equal {
+                    old_index,
+                    new_index,
+                    len,
+                } => Some((old_index as u32, new_index as u32, len as u32)),
+                _ => None,
+            })
+            .collect();
+        Self { runs }
+    }
+
+    pub(crate) fn head_to_buffer(&self, head_line: u32) -> Option<u32> {
+        self.runs.iter().find_map(|&(head, buffer, len)| {
+            (head..head + len)
+                .contains(&head_line)
+                .then(|| buffer + head_line - head)
+        })
+    }
+
+    pub(crate) fn buffer_to_head(&self, buffer_line: u32) -> Option<u32> {
+        self.runs.iter().find_map(|&(head, buffer, len)| {
+            (buffer..buffer + len)
+                .contains(&buffer_line)
+                .then(|| head + buffer_line - buffer)
+        })
+    }
+}
+
+/// The file as the pull request's head commit has it; `text` is `None` when the commit is not
+/// in the local repository.
+#[derive(Clone, Debug)]
+struct HeadText {
+    sha: String,
+    path: String,
+    text: Option<Arc<str>>,
 }
 
 fn editor_path(editor: &Editor, cx: &App) -> Option<PathBuf> {
@@ -101,7 +179,9 @@ fn editor_path(editor: &Editor, cx: &App) -> Option<PathBuf> {
 struct ReviewAddon {
     blocks: Vec<CustomBlockId>,
     /// What the blocks show, so unrelated cache updates leave them alone.
-    shown: Vec<ReviewThread>,
+    shown: Vec<(ReviewThread, u32)>,
+    head_text: Option<HeadText>,
+    head_text_task: Option<gpui::Task<()>>,
     expanded: HashSet<String>,
     comment_action: Option<Subscription>,
     _cache_observer: Subscription,
@@ -125,6 +205,8 @@ pub(crate) fn register_editor(editor: &mut Editor, cx: &mut Context<Editor>) {
     editor.register_addon(ReviewAddon {
         blocks: Vec::new(),
         shown: Vec::new(),
+        head_text: None,
+        head_text_task: None,
         expanded: HashSet::default(),
         comment_action: None,
         _cache_observer: observer,
@@ -132,20 +214,88 @@ pub(crate) fn register_editor(editor: &mut Editor, cx: &mut Context<Editor>) {
     refresh_blocks(editor, false, cx);
 }
 
+/// Loads the file at the pull request's head commit once per commit and path.
+fn ensure_head_text(
+    editor: &mut Editor,
+    work_directory: &Path,
+    relative: &str,
+    sha: &str,
+    cx: &mut Context<Editor>,
+) -> Option<Arc<str>> {
+    let addon = editor.addon::<ReviewAddon>()?;
+    if let Some(head) = &addon.head_text
+        && head.sha == sha
+        && head.path == relative
+    {
+        return head.text.clone();
+    }
+    if addon.head_text_task.is_some() {
+        return None;
+    }
+    let repository = editor
+        .project()?
+        .read(cx)
+        .git_store()
+        .read(cx)
+        .repositories()
+        .values()
+        .find(|repository| repository.read(cx).work_directory_abs_path.as_ref() == work_directory)?
+        .clone();
+    let show = repository.update(cx, |repository, _| {
+        repository.read_git_command(vec!["show".into(), format!("{sha}:{relative}")])
+    });
+    let (sha, relative) = (sha.to_string(), relative.to_string());
+    let task = cx.spawn(async move |editor, cx| {
+        let text = match show.await {
+            Ok(Ok(text)) => Some(Arc::<str>::from(text)),
+            _ => None,
+        };
+        editor
+            .update(cx, |editor, cx| {
+                if let Some(addon) = editor.addon_mut::<ReviewAddon>() {
+                    addon.head_text = Some(HeadText {
+                        sha,
+                        path: relative,
+                        text,
+                    });
+                    addon.head_text_task = None;
+                }
+                refresh_blocks(editor, true, cx);
+            })
+            .log_err();
+    });
+    if let Some(addon) = editor.addon_mut::<ReviewAddon>() {
+        addon.head_text_task = Some(task);
+    }
+    None
+}
+
+fn buffer_text(editor: &Editor, cx: &App) -> Option<String> {
+    Some(editor.buffer().read(cx).as_singleton()?.read(cx).text())
+}
+
 fn refresh_blocks(editor: &mut Editor, force: bool, cx: &mut Context<Editor>) {
     let found = editor_path(editor, cx).and_then(|path| review_for_file(&path, cx));
-    let threads: Vec<ReviewThread> = found
-        .as_ref()
-        .map(|(_, relative, review)| {
-            review
-                .review
-                .threads
-                .iter()
-                .filter(|thread| &thread.path == relative && thread.line.is_some())
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
+    // Threads on deleted lines count the base commit's lines, and outdated ones have none; both
+    // stay in the status bar list, which opens them on GitHub.
+    let mut threads: Vec<(ReviewThread, u32)> = Vec::new();
+    if let Some((work_directory, relative, review)) = &found
+        && let Some(sha) = review.review.head_sha.clone()
+        && let Some(head) = ensure_head_text(editor, work_directory, relative, &sha, cx)
+        && let Some(text) = buffer_text(editor, cx)
+    {
+        let map = LineMap::new(&head, &text);
+        threads = review
+            .review
+            .threads
+            .iter()
+            .filter(|thread| &thread.path == relative && thread.on_head)
+            .filter_map(|thread| {
+                let row = map.head_to_buffer(thread.line?.checked_sub(1)?)?;
+                Some((thread.clone(), row))
+            })
+            .collect();
+    }
 
     let wants_action = found.is_some();
     let has_action = editor
@@ -178,8 +328,8 @@ fn refresh_blocks(editor: &mut Editor, force: bool, cx: &mut Context<Editor>) {
     let editor_handle = cx.weak_entity();
     let mut blocks = Vec::new();
     if let Some((_, _, review)) = &found {
-        for thread in &threads {
-            let row = thread.line.unwrap_or(1).saturating_sub(1).min(max_row);
+        for (thread, row) in &threads {
+            let row = (*row).min(max_row);
             // Below the line: the anchor's row is the one the thread is about.
             let anchor = snapshot.anchor_after(Point::new(row, 0));
             let is_expanded = !thread.is_resolved || expanded.contains(&thread.id);
@@ -406,16 +556,17 @@ fn thread_buttons(
                         let editor = editor.clone();
                         let thread_id = thread.id.clone();
                         let resolve = !thread.is_resolved;
-                        let host = review.repository.host.clone();
+                        let review = review.clone();
                         move |_, window, cx| {
                             let Some(workspace) = editor_workspace(&editor, cx) else {
                                 return;
                             };
                             let client = github_client(cx);
-                            let host = host.clone();
+                            let host = review.repository.host.clone();
                             let thread_id = thread_id.clone();
                             run_write(
                                 workspace,
+                                &review,
                                 async move {
                                     client
                                         .set_review_thread_resolved(&host, &thread_id, resolve)
@@ -456,13 +607,22 @@ fn editor_workspace(editor: &WeakEntity<Editor>, cx: &App) -> Option<WeakEntity<
         .map(|workspace| workspace.downgrade())
 }
 
-/// Runs a write to GitHub, then reads the pull request again so every view shows the result.
+/// Runs a write to GitHub for `review`, then reads the pull request again so every view shows
+/// the result. A review that is no longer the current one is not written to.
 fn run_write(
     workspace: WeakEntity<Workspace>,
+    review: &Arc<BranchReview>,
     write: impl Future<Output = Result<(), GitHubError>> + 'static,
     window: &mut Window,
     cx: &mut App,
 ) {
+    if !is_current(review, cx) {
+        let error = stale_review_error(review);
+        window
+            .spawn(cx, async move |cx| show_error(&workspace, error.to_string(), cx))
+            .detach();
+        return;
+    }
     window
         .spawn(cx, async move |cx| match write.await {
             Ok(()) => {
@@ -503,6 +663,7 @@ fn reply(
     let host = review.repository.host.clone();
     let thread_id = thread.id.clone();
     let location = format!("{}:{}", thread.path, thread.line.unwrap_or_default());
+    let review = review.clone();
     open_text_modal(
         &workspace,
         format!("Reply to {author}"),
@@ -515,6 +676,7 @@ fn reply(
                 let thread_id = thread_id.clone();
                 run_write(
                     workspace.clone(),
+                    &review,
                     async move { client.reply_to_review_thread(&host, &thread_id, &body).await },
                     window,
                     cx,
@@ -530,7 +692,7 @@ fn add_comment(editor: WeakEntity<Editor>, row: Option<u32>, window: &mut Window
     let Some(editor_entity) = editor.upgrade() else {
         return;
     };
-    let (path, cursor_row, workspace) = editor_entity.update(cx, |editor, cx| {
+    let (path, cursor_row, workspace, head_text, text) = editor_entity.update(cx, |editor, cx| {
         let cursor_row = editor
             .selections
             .newest::<Point>(&editor.display_snapshot(cx))
@@ -540,6 +702,10 @@ fn add_comment(editor: WeakEntity<Editor>, row: Option<u32>, window: &mut Window
             editor_path(editor, cx),
             cursor_row,
             editor.workspace().map(|workspace| workspace.downgrade()),
+            editor
+                .addon::<ReviewAddon>()
+                .and_then(|addon| addon.head_text.clone()),
+            buffer_text(editor, cx),
         )
     });
     let (Some(path), Some(workspace)) = (path, workspace) else {
@@ -551,7 +717,26 @@ fn add_comment(editor: WeakEntity<Editor>, row: Option<u32>, window: &mut Window
     let Some(commit_sha) = review.review.head_sha.clone() else {
         return;
     };
-    let line = row.unwrap_or(cursor_row) + 1;
+    // GitHub counts lines of the head commit's file; the buffer may differ from it.
+    let buffer_row = row.unwrap_or(cursor_row);
+    let head = head_text
+        .filter(|head| head.sha == commit_sha && head.path == relative)
+        .and_then(|head| head.text);
+    let head_row = head
+        .zip(text)
+        .and_then(|(head, text)| LineMap::new(&head, &text).buffer_to_head(buffer_row));
+    let Some(head_row) = head_row else {
+        let message = format!(
+            "Line {} is not in pull request #{} as pushed: it changed locally, or the pull request's commit is not fetched. Comment on an unchanged line, or push first.",
+            buffer_row + 1,
+            review.review.number
+        );
+        window
+            .spawn(cx, async move |cx| show_error(&workspace, message, cx))
+            .detach();
+        return;
+    };
+    let line = head_row + 1;
     let number = review.review.number;
     let repository = review.repository.clone();
     open_text_modal(
@@ -573,6 +758,7 @@ fn add_comment(editor: WeakEntity<Editor>, row: Option<u32>, window: &mut Window
                 };
                 run_write(
                     workspace.clone(),
+                    &review,
                     async move {
                         client
                             .add_review_comment(&repository, number, &comment)
@@ -602,11 +788,13 @@ pub(crate) fn submit_review(
     let verdict = |label: &'static str, verdict: ReviewVerdict, primary: bool| {
         let repository = review.repository.clone();
         let workspace = workspace.clone();
+        let review = review.clone();
         let run = move |body: String, window: &mut Window, cx: &mut App| {
             let client = github_client(cx);
             let repository = repository.clone();
             run_write(
                 workspace.clone(),
+                &review,
                 async move {
                     client
                         .submit_review(&repository, number, verdict, &body)
@@ -619,8 +807,8 @@ pub(crate) fn submit_review(
         ModalAction {
             label,
             primary,
-            // A comment-only review needs words; approving or requesting changes does not.
-            allow_empty: verdict != ReviewVerdict::Comment,
+            // GitHub requires words for a comment or a request for changes.
+            allow_empty: verdict == ReviewVerdict::Approve,
             run: Rc::new(run),
         }
     };
@@ -648,6 +836,7 @@ pub(crate) fn open_thread(
 ) {
     let path = work_directory.join(&thread.path);
     let row = thread.line.unwrap_or(1).saturating_sub(1);
+    let thread_id = thread.id.clone();
     let Some(workspace) = workspace.upgrade() else {
         return;
     };
@@ -660,6 +849,17 @@ pub(crate) fn open_thread(
             cx.update(|window, cx| {
                 if let Some(editor) = item.downcast::<Editor>() {
                     editor.update(cx, |editor, cx| {
+                        // The editor knows where the line is now if the buffer has changed.
+                        let row = editor
+                            .addon::<ReviewAddon>()
+                            .and_then(|addon| {
+                                addon
+                                    .shown
+                                    .iter()
+                                    .find(|(shown, _)| shown.id == thread_id)
+                                    .map(|(_, row)| *row)
+                            })
+                            .unwrap_or(row);
                         editor.go_to_singleton_buffer_point(Point::new(row, 0), window, cx)
                     });
                 }
@@ -854,56 +1054,80 @@ mod tests {
         run_git(root, &["config", "branch.main.remote", "origin"]);
         run_git(root, &["config", "branch.main.merge", "refs/heads/main"]);
 
+        let head = run_git(root, &["rev-parse", "HEAD"]);
+
         let writes = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
         let http = FakeHttpClient::create({
             let writes = writes.clone();
+            let head = head.clone();
             move |mut request| {
                 let writes = writes.clone();
+                let head = head.clone();
                 async move {
                     let uri = request.uri().to_string();
                     let mut body = String::new();
                     request.body_mut().read_to_string(&mut body).await?;
-                    let body: Value = serde_json::from_str(&body)?;
+                    let body: Value = if body.is_empty() {
+                        Value::Null
+                    } else {
+                        serde_json::from_str(&body)?
+                    };
+                    if uri.ends_with("/repos/evb0110/evb-ide") {
+                        return Ok(json_response(200, json!({ "default_branch": "main" })));
+                    }
+                    if uri.contains("/pulls?") {
+                        return Ok(json_response(
+                            200,
+                            json!([{
+                                "number": 12, "title": "E", "html_url": "https://github.com/evb0110/evb-ide/pull/12",
+                                "state": "open", "draft": false, "merged_at": null,
+                                "base": { "ref": "main" },
+                                "head": { "sha": head, "repo": { "full_name": "evb0110/evb-ide" } }
+                            }]),
+                        ));
+                    }
+                    if uri.ends_with("/comments") {
+                        writes.lock().expect("recording a write").push((uri, body));
+                        return Ok(json_response(201, json!({ "id": 1 })));
+                    }
                     let query = body["query"].as_str().unwrap_or_default().to_string();
-                    let data = if query.contains("BranchPullRequests") {
-                        json!({ "repository": {
-                            "defaultBranchRef": { "name": "main" },
-                            "pullRequests": { "nodes": [{
-                                "number": 12, "title": "E", "url": "https://github.com/evb0110/evb-ide/pull/12",
-                                "state": "OPEN", "isDraft": false, "baseRefName": "main", "headRefOid": "head",
-                                "updatedAt": "2026-10-31T10:00:00Z", "isCrossRepository": false,
-                                "headRepositoryOwner": { "login": "evb0110" }
-                            }] }
-                        } })
-                    } else if query.contains("PullRequestStatus") {
+                    let comment = |id: &str, body: &str| json!({
+                        "id": id, "author": { "login": "reviewer" }, "body": body,
+                        "createdAt": "2026-10-31T10:00:00Z",
+                        "url": format!("https://github.com/evb0110/evb-ide/pull/12#discussion_{id}")
+                    });
+                    let data = if query.contains("PullRequestStatus") {
                         json!({ "repository": { "pullRequest": {
                             "mergeable": "MERGEABLE", "reviewDecision": null, "commits": { "nodes": [] }
                         } } })
                     } else if query.contains("ReviewThreads") {
                         json!({ "repository": { "pullRequest": {
-                            "id": "PR_12", "headRefOid": "head",
+                            "id": "PR_12", "headRefOid": head,
                             "reviewThreads": {
                                 "pageInfo": { "hasNextPage": false, "endCursor": null },
-                                "nodes": [{
-                                    "id": "T1", "isResolved": false, "isOutdated": false,
-                                    "path": "e.txt", "line": 2,
-                                    "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
-                                    "comments": { "totalCount": 1, "nodes": [{
-                                        "id": "C1", "author": { "login": "reviewer" }, "body": "Why two?",
-                                        "createdAt": "2026-10-31T10:00:00Z",
-                                        "url": "https://github.com/evb0110/evb-ide/pull/12#discussion_r1"
-                                    }] }
-                                }]
+                                "nodes": [
+                                    {
+                                        "id": "T1", "isResolved": false, "isOutdated": false,
+                                        "path": "e.txt", "line": 2, "diffSide": "RIGHT",
+                                        "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+                                        "comments": { "totalCount": 1, "nodes": [comment("C1", "Why two?")] }
+                                    },
+                                    {
+                                        // On a deleted line: base line numbers, not this file's.
+                                        "id": "T2", "isResolved": false, "isOutdated": false,
+                                        "path": "e.txt", "line": 3, "diffSide": "LEFT",
+                                        "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+                                        "comments": { "totalCount": 1, "nodes": [comment("C2", "Why remove it?")] }
+                                    }
+                                ]
                             }
                         } } })
-                    } else {
-                        writes.lock().expect("recording a write").push((uri.clone(), body.clone()));
-                        json!({})
-                    };
-                    if uri.ends_with("/comments") {
+                    } else if query.contains("ReplyToReviewThread") {
                         writes.lock().expect("recording a write").push((uri, body));
-                        return Ok(json_response(201, json!({ "id": 1 })));
-                    }
+                        json!({ "addPullRequestReviewThreadReply": { "comment": { "id": "C3" } } })
+                    } else {
+                        panic!("unexpected request {query}")
+                    };
                     Ok(json_response(200, json!({ "data": data })))
                 }
             }
@@ -938,18 +1162,47 @@ mod tests {
             let addon = editor.read(cx).addon::<ReviewAddon>()?;
             (addon.blocks.len() == 1).then(|| addon.shown.clone())
         });
-        assert_eq!(shown[0].id, "T1");
-        assert_eq!(shown[0].line, Some(2));
+        assert_eq!(
+            shown.iter().map(|(thread, row)| (thread.id.as_str(), *row)).collect::<Vec<_>>(),
+            vec![("T1", 1)]
+        );
 
-        cx.update(|window, cx| {
-            let focus_handle = editor.focus_handle(cx);
-            window.focus(&focus_handle, cx);
-            focus_handle.dispatch_action(
-                &git::AddPullRequestComment { row: Some(0) },
-                window,
-                cx,
-            );
+        // A line added locally above the thread: the thread follows its line, and comments count
+        // the pushed file's lines.
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections.select_ranges([Point::new(0, 0)..Point::new(0, 0)])
+            });
+            editor.insert("zero\n", window, cx);
+            refresh_blocks(editor, true, cx);
         });
+        let shown_rows = cx.update(|_, cx| {
+            editor
+                .read(cx)
+                .addon::<ReviewAddon>()
+                .map(|addon| addon.shown.iter().map(|(_, row)| *row).collect::<Vec<_>>())
+        });
+        assert_eq!(shown_rows, Some(vec![2]));
+
+        let comment_on = |row: u32, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let focus_handle = editor.focus_handle(cx);
+                window.focus(&focus_handle, cx);
+                focus_handle.dispatch_action(
+                    &git::AddPullRequestComment { row: Some(row) },
+                    window,
+                    cx,
+                );
+            });
+        };
+        comment_on(0, &mut cx);
+        cx.run_until_parked();
+        assert!(
+            cx.update(|_, cx| workspace.read(cx).active_modal::<ReviewTextModal>(cx)).is_none(),
+            "the local line is not in the pull request"
+        );
+
+        comment_on(2, &mut cx);
         let modal = wait_for(&mut cx, |cx| workspace.read(cx).active_modal::<ReviewTextModal>(cx));
         modal.update_in(&mut cx, |modal, window, cx| {
             modal.editor.update(cx, |editor, cx| editor.set_text("Nit", window, cx));
@@ -962,12 +1215,12 @@ mod tests {
             comment,
             (
                 "https://api.github.com/repos/evb0110/evb-ide/pulls/12/comments".to_string(),
-                json!({ "body": "Nit", "commit_id": "head", "path": "e.txt", "line": 1, "side": "RIGHT" })
+                json!({ "body": "Nit", "commit_id": head, "path": "e.txt", "line": 2, "side": "RIGHT" })
             )
         );
 
         let review = cx.update(|_, cx| branch_review(root, cx)).expect("a review");
-        cx.update(|window, cx| reply(&editor.downgrade(), &shown[0], &review, window, cx));
+        cx.update(|window, cx| reply(&editor.downgrade(), &shown[0].0, &review, window, cx));
         let modal = wait_for(&mut cx, |cx| workspace.read(cx).active_modal::<ReviewTextModal>(cx));
         modal.update_in(&mut cx, |modal, window, cx| {
             modal.editor.update(cx, |editor, cx| editor.set_text("Because three", window, cx));
@@ -989,6 +1242,7 @@ mod tests {
             id: "T".into(),
             path: "src/main.rs".into(),
             line: Some(3),
+            on_head: true,
             is_resolved: false,
             is_outdated: false,
             can_reply: true,
@@ -1006,6 +1260,19 @@ mod tests {
                 .collect(),
             comment_count: count,
         }
+    }
+
+    #[test]
+    fn line_map_follows_local_changes() {
+        let map = LineMap::new("a\nb\nc\nd\n", "new\na\nb\nchanged\nd");
+        assert_eq!(
+            (0..4).map(|line| map.head_to_buffer(line)).collect::<Vec<_>>(),
+            vec![Some(1), Some(2), None, Some(4)]
+        );
+        assert_eq!(
+            (0..5).map(|line| map.buffer_to_head(line)).collect::<Vec<_>>(),
+            vec![None, Some(0), Some(1), None, Some(3)]
+        );
     }
 
     #[test]
