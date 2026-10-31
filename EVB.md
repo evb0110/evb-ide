@@ -62,12 +62,22 @@ After a sync, run the checks below and reinstall.
 The fork's version is in `EVB_VERSION`; the upstream crate versions remain
 available for dependency and extension compatibility. Public downloads are at
 https://github.com/evb0110/evb-ide/releases and the landing page is at
-https://evb-ide.vercel.app. The supported packaged target is currently macOS.
+https://evb-ide.vercel.app. Releases ship macOS (Apple Silicon) and Linux x64.
 
-Commit the intended source, push it to `origin/main`, and require a green EVB
-CI run. Set `EVB_SIGNING_IDENTITY` to your Developer ID Application identity.
-For notarization, set `EVB_NOTARY_PROFILE`, or set `APPLE_API_KEY` (a local .p8
-path), `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`. Never commit credentials.
+Releases build on GitHub Actions (`.github/workflows/evb-release.yml`), so they
+need no local release build. Bump `EVB_VERSION`, write the user-facing notes
+in `release-notes/vVERSION.md`, push to `origin/main` with a green EVB CI run,
+then push the tag `vVERSION`. The workflow signs and notarizes the macOS app
+with the repository secrets (`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY`,
+`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`; see `script/evb-ci-macos-signing`),
+builds the Linux archive with `script/evb-bundle-linux` on Ubuntu 22.04, and
+publishes both with the source archive and checksums. A manual run of the
+workflow builds and uploads the artifacts without publishing.
+
+To release from a Mac instead, set `EVB_SIGNING_IDENTITY` to your Developer ID
+Application identity and, for notarization, `EVB_NOTARY_PROFILE` or
+`APPLE_API_KEY` (a local .p8 path), `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`.
+Never commit credentials.
 
 ```sh
 script/evb-release             # build, sign, notarize, package, vendor sources, checksum

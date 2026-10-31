@@ -72,6 +72,8 @@ if [[ -z "${EVB_NOTARY_PROFILE:-}" ]]; then
     : "${APPLE_API_ISSUER:?Set APPLE_API_ISSUER}"
 fi
 [[ ! -e "$output/verified-commit" ]] || { echo "A prepared release already exists at $output; do not overwrite its artifacts." >&2; exit 1; }
+notes_file="release-notes/$tag.md"
+[[ -s "$notes_file" ]] || { echo "Write the release notes in $notes_file first." >&2; exit 1; }
 mkdir -p "$output"
 
 script/evb-install -n
@@ -151,11 +153,11 @@ IntelliJ themes and file icons, run configurations, and Git tools for web develo
 
 [Exact source tag](https://github.com/evb0110/evb-ide/tree/$tag), commit $commit.
 Download $source_name below for application sources, build instructions,
-license notices, and vendored Rust dependency sources. SHA256SUMS covers both downloads.
+license notices, and vendored Rust dependency sources. SHA256SUMS covers every download.
 
 Release Notes:
 
-- Added the first public EVB IDE release for macOS.
+$(cat "$notes_file")
 EOF
 [[ "$(git rev-parse HEAD)" == "$commit" && -z "$(git status --porcelain)" ]] || { echo 'Source changed during preparation; do not publish these artifacts.' >&2; exit 1; }
 printf '%s\n' "$commit" > "$output/verified-commit"
