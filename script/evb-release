@@ -38,9 +38,16 @@ if [[ "$publish" == true ]]; then
     git fetch --quiet origin main
     remote_commit="$(git rev-parse FETCH_HEAD)"
     git merge-base --is-ancestor "$commit" "$remote_commit" || { echo 'Push this commit to origin/main before publishing.' >&2; exit 1; }
+    # Archives for other systems, built elsewhere, join when SHA256SUMS lists them.
+    shopt -s nullglob
+    other_systems=("$output"/EVB-IDE-"$version"-linux-*.tar.gz "$output"/EVB-IDE-"$version"-windows-*.zip)
+    shopt -u nullglob
+    for archive in "${other_systems[@]}"; do
+        grep -q "  $(basename "$archive")\$" "$output/SHA256SUMS" || { echo "SHA256SUMS does not list $(basename "$archive")." >&2; exit 1; }
+    done
     gh release create "$tag" --repo evb0110/evb-ide --target "$commit" --draft \
         --title "EVB IDE $version" --notes-file "$output/RELEASE-NOTES.md" \
-        "$output/$image_name" "$output/$source_name" "$output/SHA256SUMS"
+        "$output/$image_name" "${other_systems[@]}" "$output/$source_name" "$output/SHA256SUMS"
     gh release edit "$tag" --repo evb0110/evb-ide --draft=false --latest
     gh release view "$tag" --repo evb0110/evb-ide --json url,tagName,targetCommitish,assets
     exit 0
