@@ -1,12 +1,11 @@
 <template>
   <article class="reading-page">
-    <p class="eyebrow">OPEN SOURCE</p>
-    <h1>Built on shared work.</h1>
+    <h1>License and credits</h1>
     <p>
       EVB IDE is an independent fork of <a href="https://github.com/zed-industries/zed">Zed</a>, originally developed by
       Zed Industries and its contributors. The fork is maintained by Eugene Barsky and contributors.
     </p>
-    <h2>Use it. Change it. Share it.</h2>
+    <h2>License</h2>
     <p>
       The editor is licensed primarily under
       <a :href="`${repositoryUrl}/blob/main/LICENSE-GPL`">GNU GPL version 3 or later</a>. Components marked

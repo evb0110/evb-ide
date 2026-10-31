@@ -37,7 +37,7 @@
           <a href="https://evb-viewer.com">EVB Viewer ↗</a>
         </nav>
         <p class="copyright">
-          © {{ year }} Eugene Barsky &amp; contributors<br />GPL-3.0-or-later · Made for everyday work.
+          © {{ year }} Eugene Barsky &amp; contributors<br />GPL-3.0-or-later
         </p>
       </footer>
     </div>
@@ -53,10 +53,10 @@ const route = useRoute();
 useHead(() => ({ link: [{ rel: "canonical", href: new URL(route.path, config.public.siteUrl).href }] }));
 useSeoMeta({
   description:
-    "A Zed-based editor with JetBrains shortcuts, IntelliJ themes, run configurations, and a familiar Git workflow. Free and open source.",
+    "EVB IDE is the Zed editor with the JetBrains keymap, IntelliJ themes, run configurations, a Git Log tool window and GitHub pull request review. Free and open source.",
   ogSiteName: "EVB IDE",
   ogType: "website",
-  ogImage: `${config.public.siteUrl}/screenshots/workspace.png`,
+  ogImage: `${config.public.siteUrl}/films/ide/light-poster.jpg`,
   twitterCard: "summary_large_image",
 });
 </script>

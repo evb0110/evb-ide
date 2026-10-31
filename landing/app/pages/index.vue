@@ -1,171 +1,87 @@
 <template>
-  <div>
-    <section class="hero">
-      <div class="hero-copy">
-        <p class="eyebrow"><span class="status-dot" /> OPEN SOURCE · BUILT ON ZED</p>
-        <h1>A familiar workflow.<br /><span>A fast editor.</span></h1>
-        <p class="lede">
-          JetBrains shortcuts. IntelliJ themes. Run configurations and Git tools where you expect them. The Zed editor,
-          set up for your everyday web development.
+  <div class="home">
+    <section class="hero" aria-labelledby="home-title">
+      <div class="hero-intro">
+        <h1 id="home-title" class="hero-title">A JetBrains-style IDE built on Zed</h1>
+        <p class="hero-lede">
+          EVB IDE is the Zed editor with the JetBrains keymap, IntelliJ themes, run configurations for your project's
+          scripts, a Git Log tool window and GitHub pull request review. It is free and open source under the GPL.
         </p>
-        <div class="hero-buttons">
-          <UButton to="#download" size="xl" icon="i-lucide-download" class="primary-button">Get EVB IDE</UButton>
-          <UButton
-            :to="repositoryUrl"
-            color="neutral"
-            variant="outline"
-            size="xl"
-            trailing-icon="i-lucide-arrow-up-right"
-            >Explore the source</UButton
-          >
+
+        <div id="download" class="installer-card" aria-live="polite">
+          <p class="installer-platform">macOS</p>
+          <template v-if="release">
+            <a
+              v-for="installer in sortedInstallers"
+              :key="installer.name"
+              :href="installer.url"
+              class="installer-row"
+              :class="{ 'installer-row-recommended': installer.architecture === 'arm64' }"
+            >
+              <span class="installer-text">
+                <span class="installer-name">
+                  {{ installer.architecture === "arm64" ? "Apple Silicon" : "Intel" }}
+                  <span v-if="installer.architecture === 'arm64'" class="installer-badge">Recommended</span>
+                </span>
+                <span class="installer-meta">
+                  {{ installer.architecture === "arm64" ? "M-series Macs" : "Intel Macs" }} · DMG ·
+                  {{ formatSize(installer.size) }}
+                </span>
+              </span>
+              <span class="installer-icon"><UIcon name="i-lucide-download" /></span>
+            </a>
+            <p class="installer-note">
+              {{ release.tag }} · macOS 12 or later. Open the disk image and drag EVB IDE into Applications.
+            </p>
+            <p class="installer-links">
+              <a :href="release.url">Release notes</a>
+              <a :href="release.sourceUrl">Source</a>
+              <a :href="release.checksumsUrl">SHA-256 checksums</a>
+            </p>
+          </template>
+          <template v-else-if="error">
+            <p class="installer-note">The latest release could not be loaded.</p>
+            <UButton :to="`${repositoryUrl}/releases`" icon="i-lucide-github" color="neutral" variant="outline">
+              Releases on GitHub
+            </UButton>
+          </template>
+          <p v-else-if="status === 'pending'" class="installer-note">Loading the latest release…</p>
+          <template v-else>
+            <p class="installer-note">No release is published yet.</p>
+            <UButton :to="`${repositoryUrl}/releases`" color="neutral" variant="outline">Release status</UButton>
+          </template>
         </div>
-        <p class="hero-note">Free to use, modify, and share. No account required.</p>
       </div>
-      <div class="hero-side-note">
-        <span>01 / THE EDITOR</span>
-        <p>Your projects.<br />Your shortcuts.<br />A little more focus.</p>
+
+      <div class="hero-film">
+        <FilmPlayer
+          :theme="filmTheme"
+          title="EVB IDE"
+          label="EVB IDE running a project script, showing the Git Log, a pull request review thread and blame"
+        />
+        <p class="film-caption">Recorded in the real app, with a sample Nuxt project.</p>
       </div>
     </section>
 
-    <section class="workspace-showcase" aria-label="EVB IDE screenshots">
-      <div class="showcase-toolbar">
-        <span class="showcase-label"><span class="status-dot" /> EVB IDE IN ACTION</span>
-        <div class="screenshot-tabs" role="group" aria-label="Choose an app screenshot">
-          <button
-            v-for="(shot, index) in screenshots"
-            :key="shot.file"
-            :aria-pressed="activeScreenshot === index"
-            @click="activeScreenshot = index"
-          >
-            {{ shot.label }}
-          </button>
-        </div>
-      </div>
-      <img
-        v-if="currentScreenshot"
-        :src="`/screenshots/${currentScreenshot.file}`"
-        :alt="currentScreenshot.alt"
-        width="1600"
-        height="1000"
-        fetchpriority="high"
-        class="workspace-image"
-      />
-      <p class="showcase-caption">{{ currentScreenshot?.caption }} <span>Real app captures · macOS</span></p>
-    </section>
-
-    <section id="features" class="features-section">
-      <div class="section-heading">
-        <p class="eyebrow">02 / WHAT FEELS FAMILIAR</p>
-        <h2>Less setup.<br />More of your workflow.</h2>
-        <p>A focused set of changes on top of Zed. Keep its editing experience and add the habits you already know.</p>
-      </div>
+    <section id="features" class="section" aria-labelledby="features-title">
+      <h2 id="features-title" class="section-label">What it does</h2>
       <div class="feature-grid">
         <article v-for="feature in features" :key="feature.title" class="feature-card">
           <UIcon :name="feature.icon" class="feature-icon" />
-          <h3>{{ feature.title }}</h3>
-          <p>{{ feature.description }}</p>
-          <span class="feature-detail">{{ feature.detail }}</span>
+          <h3 class="feature-title">{{ feature.title }}</h3>
+          <p class="feature-text">{{ feature.text }}</p>
         </article>
       </div>
     </section>
 
-    <section class="workflow-strip">
-      <div>
-        <span class="eyebrow">A FEW SHORTCUTS TO FEEL AT HOME</span>
-        <h2>Already in your fingers.</h2>
-      </div>
-      <dl>
-        <div>
-          <dt>Run</dt>
-          <dd><kbd>⌃ R</kbd></dd>
-        </div>
-        <div>
-          <dt>Debug Node.js</dt>
-          <dd><kbd>⌃ D</kbd></dd>
-        </div>
-        <div>
-          <dt>Git Log</dt>
-          <dd><kbd>⌘ 9</kbd></dd>
-        </div>
-        <div>
-          <dt>Commit and Push</dt>
-          <dd><kbd>⌥ ⌘ K</kbd></dd>
+    <section class="section" aria-labelledby="questions-title">
+      <h2 id="questions-title" class="section-label">Questions</h2>
+      <dl class="questions">
+        <div v-for="question in questions" :key="question.title" class="question">
+          <dt class="question-title">{{ question.title }}</dt>
+          <dd class="question-text">{{ question.text }}</dd>
         </div>
       </dl>
-    </section>
-
-    <section id="download" class="download-section">
-      <div class="section-heading">
-        <p class="eyebrow">03 / MAKE YOURSELF AT HOME</p>
-        <h2>Your next editor.<br />Ready when you are.</h2>
-        <p>Independent from your Zed installation, with its own settings and application data.</p>
-        <NuxtLink to="/docs" class="text-link"
-          >Read the installation guide <UIcon name="i-lucide-arrow-right"
-        /></NuxtLink>
-      </div>
-      <div class="download-card" aria-live="polite">
-        <div class="download-heading">
-          <img src="/icon.png" width="56" height="56" alt="" />
-          <div>
-            <h3>EVB IDE for macOS</h3>
-            <p>{{ release?.tag || "Desktop downloads" }}</p>
-          </div>
-          <span class="license-badge">GPL v3+</span>
-        </div>
-        <template v-if="release">
-          <a v-for="installer in release.installers" :key="installer.name" :href="installer.url" class="download-link"
-            ><div>
-              <strong>{{ installer.architecture === "arm64" ? "Apple Silicon" : "Intel Mac" }}</strong
-              ><span>macOS 12 or later · DMG · {{ formatSize(installer.size) }}</span>
-            </div>
-            <UIcon name="i-lucide-download"
-          /></a>
-          <p class="download-help">
-            Open the disk image, then drag EVB IDE into Applications. Updates are installed manually.
-          </p>
-          <div class="release-links">
-            <a :href="release.url">Release notes</a><a :href="release.sourceUrl">Corresponding source</a
-            ><a :href="release.checksumsUrl">SHA-256 checksums</a>
-          </div>
-        </template>
-        <template v-else-if="error"
-          ><p class="download-help">
-            We couldn't load the latest download details. All published builds and their sources are available on
-            GitHub.
-          </p>
-          <UButton :to="`${repositoryUrl}/releases`" icon="i-lucide-github" block size="lg"
-            >View releases on GitHub</UButton
-          ></template
-        >
-        <template v-else-if="status === 'pending'"><p class="download-help">Loading the latest release…</p></template>
-        <template v-else
-          ><p class="download-help">
-            The first signed release is being prepared. You can explore the source and build EVB IDE today.
-          </p>
-          <UButton :to="`${repositoryUrl}/releases`" color="neutral" variant="outline" block size="lg"
-            >View release status</UButton
-          ></template
-        >
-        <p class="platform-note">
-          Only published builds are listed here. For other platforms, see the
-          <a :href="`${repositoryUrl}/blob/main/EVB.md`">source build guide</a>.
-        </p>
-      </div>
-    </section>
-
-    <section class="open-source-note">
-      <UIcon name="i-lucide-code-xml" />
-      <div>
-        <h2>A fork, in the open.</h2>
-        <p>
-          EVB IDE builds on the work of Zed and its contributors. The full source, changes, and release build
-          instructions are public. You can use it, change it, and make it your own under the GPL.
-        </p>
-        <NuxtLink to="/license" class="text-link"
-          >Licensing and acknowledgements <UIcon name="i-lucide-arrow-right"
-        /></NuxtLink>
-      </div>
-      <span class="source-mark">&lt;/&gt;</span>
     </section>
   </div>
 </template>
@@ -173,80 +89,309 @@
 <script setup lang="ts">
 import { repositoryUrl } from "~~/shared/releases";
 
+interface IFeature {
+  icon: string;
+  title: string;
+  text: string;
+}
+
+interface IQuestion {
+  title: string;
+  text: string;
+}
+
 const { data, error, status } = await useFetch("/api/releases/latest");
 const release = computed(() => data.value?.release);
-const activeScreenshot = ref(0);
-const screenshots = [
-  {
-    label: "Workspace",
-    file: "workspace.png",
-    alt: "EVB IDE with an IntelliJ light theme, TypeScript editor, project tree, and run configuration picker",
-    caption: "The editor, with IntelliJ Light and the JetBrains keymap.",
-  },
-  {
-    label: "Run configurations",
-    file: "run.png",
-    alt: "EVB IDE title-bar menu listing run configurations from package.json",
-    caption: "Run project scripts directly from the title bar.",
-  },
-  {
-    label: "Git Log",
-    file: "git.png",
-    alt: "EVB IDE Git Log tool window with a branches tree below the editor",
-    caption: "Your branch history, alongside the code you are working on.",
-  },
-  {
-    label: "Dark theme",
-    file: "dark.png",
-    alt: "EVB IDE using IntelliJ Dark with Vue source code open",
-    caption: "IntelliJ Dark, JetBrains Mono, and a quieter workspace.",
-  },
-];
-const currentScreenshot = computed(() => screenshots[activeScreenshot.value]);
-const features = [
+const sortedInstallers = computed(() =>
+  [...(release.value?.installers ?? [])].sort((left, right) =>
+    left.architecture === right.architecture ? 0 : left.architecture === "arm64" ? -1 : 1,
+  ),
+);
+const colorMode = useColorMode();
+const filmTheme = computed(() => (colorMode.value === "dark" ? "dark" : "light"));
+
+const features: IFeature[] = [
   {
     icon: "i-lucide-keyboard",
-    title: "Familiar from the first file.",
-    description:
-      "JetBrains shortcuts, IntelliJ Light and Dark, file icons, JetBrains Mono, and Inter. Ready out of the box.",
-    detail: "YOUR EDITOR, ALREADY SET UP",
+    title: "JetBrains keymap and themes",
+    text: "The JetBrains keymap, IntelliJ Light and Dark, JetBrains file icons, JetBrains Mono and Inter, set up from the first launch.",
   },
   {
     icon: "i-lucide-play",
-    title: "Pick a task. Get it running.",
-    description:
-      "Package scripts, Composer scripts, and Zed tasks in a title-bar picker. Run, rerun, stop, or start a Node.js debug session.",
-    detail: "NPM · PNPM · YARN · BUN · COMPOSER",
+    title: "Run configurations",
+    text: "package.json and Composer scripts and Zed tasks in a title-bar picker. Run, rerun and stop them, or debug a Node.js script.",
   },
   {
     icon: "i-lucide-git-branch",
-    title: "Keep your history in view.",
-    description:
-      "A Git Log tool window with a branches tree, history filters, commit actions, compact blame, and Commit and Push.",
-    detail: "CODE ABOVE. CONTEXT BELOW.",
+    title: "Git Log tool window",
+    text: "The log below the editor, with a branches tree, filters by branch, user, date and path, and cherry-pick, revert, reset, fixup, drop and reword.",
+  },
+  {
+    icon: "i-lucide-git-pull-request",
+    title: "GitHub pull requests",
+    text: "The branch's pull request and its checks in the status bar. Create one after a push, and reply to and resolve review threads in the editor.",
+  },
+  {
+    icon: "i-lucide-history",
+    title: "Blame and history",
+    text: "A compact blame column with the date and author, file history, and Commit and Push from the commit button.",
   },
   {
     icon: "i-lucide-code-xml",
-    title: "At home in a web project.",
-    description:
-      "Defaults for Vue, TypeScript, PHP, and Blade, with fixes to completion and rename handling across language servers.",
-    detail: "BUILT FOR EVERYDAY WEB DEVELOPMENT",
-  },
-  {
-    icon: "i-lucide-shield-check",
-    title: "A quieter starting point.",
-    description:
-      "AI features, telemetry, and sign-in UI are off by default. No account is needed to edit local projects.",
-    detail: "YOUR SETTINGS STAY IN YOUR HANDS",
-  },
-  {
-    icon: "i-lucide-github",
-    title: "A good neighbour to Zed.",
-    description: "A separate app, CLI name, and settings directory. Keep Zed installed and try EVB IDE alongside it.",
-    detail: "INDEPENDENT APP. SHARED ROOTS.",
+    title: "Set up for web projects",
+    text: "Defaults for Vue, TypeScript, PHP and Blade, with completion and rename working across several language servers.",
   },
 ];
+
+const questions: IQuestion[] = [
+  {
+    title: "Is it free?",
+    text: "Yes. EVB IDE is open source under the GPL, version 3 or later, with no account, ads or subscription.",
+  },
+  {
+    title: "How is it related to Zed and JetBrains?",
+    text: "It is an independent fork of Zed with a JetBrains-style setup. It is not affiliated with Zed Industries or JetBrains.",
+  },
+  {
+    title: "Can I keep Zed installed?",
+    text: "Yes. EVB IDE is a separate app with its own command-line tool, settings and data folders.",
+  },
+  {
+    title: "Which systems does it run on?",
+    text: "Published builds are for macOS 12 or later. Linux and Windows builds are not published yet.",
+  },
+  {
+    title: "Does it use AI or send telemetry?",
+    text: "AI features, edit predictions and telemetry are off by default. AI features can be turned on in the settings.",
+  },
+  {
+    title: "How does it update?",
+    text: "Download each new release from this page or GitHub and replace the app. It does not update itself.",
+  },
+];
+
 function formatSize(size: number) {
   return `${Math.round(size / 1024 / 1024)} MB`;
 }
 </script>
+
+<style scoped>
+.hero {
+  display: grid;
+  grid-template-columns: minmax(300px, 400px) minmax(0, 1fr);
+  gap: 48px;
+  align-items: start;
+  padding: 56px 0 72px;
+}
+
+.hero-title {
+  font-size: clamp(36px, 4.2vw, 52px);
+  font-weight: 500;
+  line-height: 1.08;
+  letter-spacing: -1.6px;
+}
+
+.hero-lede {
+  margin-top: 20px;
+  color: var(--site-soft);
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+.installer-card {
+  margin-top: 28px;
+  padding: 14px;
+  border: 1px solid var(--site-border);
+  border-radius: 12px;
+  background: var(--site-surface);
+}
+
+.installer-platform {
+  margin-bottom: 10px;
+  color: var(--site-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.installer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--site-border);
+  border-radius: 9px;
+  text-decoration: none;
+}
+
+.installer-row + .installer-row {
+  margin-top: 8px;
+}
+
+.installer-row:hover {
+  border-color: var(--site-accent);
+}
+
+.installer-row-recommended {
+  background: var(--site-tint);
+}
+
+.installer-text {
+  display: grid;
+  gap: 3px;
+}
+
+.installer-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.installer-badge {
+  padding: 2px 7px;
+  border: 1px solid var(--site-accent);
+  border-radius: 999px;
+  color: var(--site-accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.installer-meta {
+  color: var(--site-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.installer-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--site-accent);
+  color: var(--site-on-accent);
+}
+
+.installer-note {
+  margin: 12px 0 10px;
+  color: var(--site-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.installer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 13px;
+}
+
+.installer-links a {
+  color: var(--site-accent);
+}
+
+.film-caption {
+  margin-top: 10px;
+  color: var(--site-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.section {
+  padding: 40px 0 72px;
+}
+
+.section-label {
+  margin-bottom: 28px;
+  color: var(--site-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 3px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--site-border);
+  border-radius: 12px;
+  background: var(--site-border);
+  gap: 1px;
+}
+
+.feature-card {
+  padding: 28px;
+  background: var(--site-surface);
+}
+
+.feature-icon {
+  width: 20px;
+  height: 20px;
+  margin-bottom: 18px;
+  color: var(--site-accent);
+}
+
+.feature-title {
+  margin-bottom: 10px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.feature-text {
+  color: var(--site-soft);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.questions {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.question {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--site-border);
+}
+
+.question-title {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.question-text {
+  margin: 0;
+  color: var(--site-soft);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+@media (max-width: 1000px) {
+  .hero {
+    grid-template-columns: 1fr;
+    gap: 36px;
+    padding-top: 40px;
+  }
+
+  .feature-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .feature-card {
+    padding: 22px;
+  }
+}
+</style>

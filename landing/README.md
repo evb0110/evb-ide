@@ -1,7 +1,8 @@
 # EVB IDE landing page
 
-Nuxt 4 and Nuxt UI, deployed to Vercel. Visual conventions follow the sibling
-EVB Viewer landing page. The site uses the fork's own icon and real app captures.
+Nuxt 4 and Nuxt UI, deployed to Vercel. The layout follows the sibling EVB
+Viewer landing page: a short introduction and the installers beside a film of
+the real app, then what it does and common questions.
 
 Use Node 24.21.0 and pnpm 10:
 
@@ -12,6 +13,31 @@ pnpm --dir landing test
 pnpm --dir landing run build
 pnpm --dir landing run dev
 ```
+
+## Film
+
+The home page plays a video of the real app, not drawn by hand:
+
+1. `evb-visual-capture` records its states in hidden windows, in IntelliJ Light
+   and Dark, at 2880×1800, and writes a manifest of the steps (pointer, clicks,
+   camera framing, keys):
+
+   ```sh
+   EVB_FILM_DIR=$PWD/.devkit/films/capture cargo run -p zed --bin evb-visual-capture --features visual-tests
+   ```
+
+2. `recorder/render.mjs` renders `recorder/film.tsx`, a Remotion composition, to
+   `public/films/ide/<theme>.mp4` at 1920×1200 with a poster and a still for
+   visitors who prefer reduced motion, and lists them in `app/films/ide.json`:
+
+   ```sh
+   node landing/recorder/render.mjs
+   ```
+
+The captures are render inputs under `.devkit` and are not committed. The first
+render downloads Remotion's headless Chrome.
+
+## Releases
 
 `GET /api/releases/latest` fetches GitHub's latest stable release and caches a
 successful result for five minutes. Installers are offered only when the

@@ -1,7 +1,6 @@
 <template>
   <article class="reading-page">
-    <p class="eyebrow">PRIVACY</p>
-    <h1>A quieter starting point.</h1>
+    <h1>Privacy</h1>
     <p>
       EVB IDE starts with telemetry, AI features, edit predictions, and sign-in UI disabled. You do not need an account
       to edit local projects. Your settings can change these defaults.
@@ -14,7 +13,7 @@
     </p>
     <p>
       This website adds no analytics or advertising scripts. The appearance selector stores your light, dark, or system
-      preference in your browser's local storage. Fonts and screenshots are served by this site.
+      preference in your browser's local storage. Fonts and the app video are served by this site.
     </p>
     <p>
       The server requests public release information from GitHub. Following source or download links takes you to

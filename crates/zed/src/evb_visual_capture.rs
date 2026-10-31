@@ -333,6 +333,9 @@ mod capture {
             &mut cx,
         )?;
         settle(&mut cx, 20);
+        if let Ok(film_dir) = std::env::var("EVB_FILM_DIR") {
+            return film(&workspace, any_window, &mut cx, Path::new(&film_dir));
+        }
         save(&mut cx, any_window, &output_dir, "01-workspace")?;
 
         cx.dispatch_action(any_window, evb_run::ChooseConfiguration);
@@ -562,6 +565,147 @@ mod capture {
                 .status(200)
                 .body(http_client::AsyncBody::from(json!({ "data": data }).to_string()))?)
         })
+    }
+
+    /// A step of the landing page film: an app state, how long it shows, and the pointer.
+    #[derive(serde::Serialize)]
+    struct FilmStep {
+        image: &'static str,
+        frames: u32,
+        cursor: Option<[f32; 2]>,
+        /// The pointer clicks at the end of the step; the next step shows the result.
+        click: bool,
+        /// The part of the window the camera frames, 16:10 like the window.
+        focus: Option<[f32; 4]>,
+        /// Keys shown as pressed during the step.
+        keys: Option<&'static str>,
+    }
+
+    /// Points in the fixed 1440x900 window.
+    const RUN_BUTTON: [f32; 2] = [1370., 16.];
+    const CONFIGURATION_PICKER: [f32; 2] = [1335., 16.];
+    const COMMIT_ROW: [f32; 2] = [975., 643.];
+    const PULL_REQUEST_BUTTON: [f32; 2] = [PULL_REQUEST_X, 889.];
+
+    /// Records the states of the landing page film in both IntelliJ themes, with a manifest the
+    /// landing's Remotion composition turns into video (landing/recorder/render.mjs).
+    fn film(
+        workspace: &Entity<Workspace>,
+        window: AnyWindowHandle,
+        cx: &mut VisualTestAppContext,
+        directory: &Path,
+    ) -> Result<()> {
+        let first_file = "app/components/AppBar.vue";
+        let reviewed_file = "server/api/trip.get.ts";
+        // The empty middle of the title bar: clicking it closes menus and selects nothing.
+        let away = point(px(700.), px(16.));
+        let dismiss = |cx: &mut VisualTestAppContext| {
+            cx.simulate_keystrokes(window, "escape");
+            cx.simulate_click(window, away, Default::default());
+            settle(cx, 3);
+        };
+        for (theme, name) in [("IntelliJ Light", "light"), ("IntelliJ Dark", "dark")] {
+            let output = directory.join(name);
+            std::fs::create_dir_all(&output)?;
+            set_theme(cx, theme);
+            open_file(workspace, window, first_file, cx)?;
+            settle(cx, 10);
+            save(cx, window, &output, "workspace")?;
+
+            cx.dispatch_action(window, evb_run::ChooseConfiguration);
+            settle(cx, 5);
+            save(cx, window, &output, "configurations")?;
+            cx.dispatch_action(window, evb_run::ChooseConfiguration);
+            settle(cx, 3);
+
+            cx.dispatch_action(window, evb_run::Run);
+            wait_real_time(cx, Duration::from_secs(4));
+            save(cx, window, &output, "running")?;
+            cx.dispatch_action(window, evb_run::Stop);
+            wait_real_time(cx, Duration::from_secs(2));
+            workspace
+                .update_in_window(window, cx, |workspace, window, cx| {
+                    workspace
+                        .close_panel::<terminal_view::terminal_panel::TerminalPanel>(window, cx);
+                })
+                .log_err();
+
+            cx.dispatch_action(window, git_ui::git_graph::Open);
+            wait_real_time(cx, Duration::from_secs(3));
+            // Both themes show the commit selected, as the right click selects it anyway.
+            cx.simulate_click(
+                window,
+                point(px(COMMIT_ROW[0]), px(COMMIT_ROW[1])),
+                Default::default(),
+            );
+            wait_real_time(cx, Duration::from_secs(1));
+            save(cx, window, &output, "git-log")?;
+            right_click(
+                cx,
+                window,
+                point(px(COMMIT_ROW[0]), px(COMMIT_ROW[1])),
+            );
+            save(cx, window, &output, "commit-menu")?;
+            dismiss(cx);
+            workspace
+                .update_in_window(window, cx, |workspace, window, cx| {
+                    workspace.close_panel::<git_ui::git_log_panel::GitLogPanel>(window, cx);
+                })
+                .log_err();
+
+            open_file(workspace, window, reviewed_file, cx)?;
+            settle(cx, 5);
+            save(cx, window, &output, "review")?;
+            cx.simulate_click(
+                window,
+                point(px(PULL_REQUEST_BUTTON[0]), px(PULL_REQUEST_BUTTON[1])),
+                Default::default(),
+            );
+            settle(cx, 5);
+            save(cx, window, &output, "pull-request")?;
+            dismiss(cx);
+
+            // Blame acts on the focused editor, which the dismissing click left.
+            open_file(workspace, window, reviewed_file, cx)?;
+            cx.dispatch_action(window, git::Blame);
+            wait_real_time(cx, Duration::from_secs(3));
+            save(cx, window, &output, "blame")?;
+            cx.dispatch_action(window, git::Blame);
+            settle(cx, 3);
+        }
+
+        let step = |image, frames, cursor, click, focus, keys| FilmStep {
+            image,
+            frames,
+            cursor,
+            click,
+            focus,
+            keys,
+        };
+        let steps = vec![
+            step("workspace", 70, Some([760., 430.]), false, None, None),
+            step("workspace", 36, Some(CONFIGURATION_PICKER), true, None, None),
+            step("configurations", 60, Some(RUN_BUTTON), true, Some([940., 0., 480., 300.]), None),
+            step("running", 85, Some(RUN_BUTTON), false, None, None),
+            step("git-log", 70, Some(COMMIT_ROW), true, None, Some("⌘9")),
+            step("commit-menu", 85, Some(COMMIT_ROW), false, Some([450., 110., 880., 550.]), None),
+            step("review", 100, Some([900., 330.]), false, Some([240., 140., 880., 550.]), None),
+            step("review", 30, Some(PULL_REQUEST_BUTTON), true, None, None),
+            step("pull-request", 90, Some(PULL_REQUEST_BUTTON), false, Some([0., 400., 800., 500.]), None),
+            step("blame", 80, Some([560., 330.]), false, None, Some("⌥⌘G B")),
+        ];
+        let manifest = serde_json::json!({
+            "width": 1440,
+            "height": 900,
+            "fps": 30,
+            "steps": steps,
+        });
+        std::fs::write(
+            directory.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest)?,
+        )?;
+        println!("Film states written to {}", directory.display());
+        Ok(())
     }
 
     trait UpdateInWindow {

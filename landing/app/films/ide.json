@@ -1,0 +1,16 @@
+{
+  "fps": 30,
+  "intro": 10,
+  "width": 1920,
+  "height": 1200,
+  "variants": {
+    "light": {
+      "frames": 706,
+      "still": 438
+    },
+    "dark": {
+      "frames": 706,
+      "still": 438
+    }
+  }
+}

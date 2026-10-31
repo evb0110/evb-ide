@@ -17,11 +17,19 @@
   "dependencies": {
     "@iconify-json/lucide": "^1.2.0",
     "@nuxt/ui": "4.11.2",
+    "@vueuse/core": "^14.4.0",
     "nuxt": "4.6.2",
     "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
+    "@remotion/bundler": "4.0.527",
+    "@remotion/renderer": "4.0.527",
     "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "remotion": "4.0.527",
     "typescript": "^6.0.3",
     "vue-tsc": "3.3.11"
   }

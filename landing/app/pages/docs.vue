@@ -1,7 +1,6 @@
 <template>
   <article class="reading-page">
-    <p class="eyebrow">GETTING STARTED</p>
-    <h1>A familiar place to work.</h1>
+    <h1>Install and get started</h1>
     <p>
       EVB IDE is a Zed-based editor with a JetBrains-style setup. It has its own app identity and settings, so you can
       try it alongside Zed.
