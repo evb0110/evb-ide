@@ -3,6 +3,7 @@
   "intro": 10,
   "width": 1920,
   "height": 1200,
+  "version": "90787f07cbdc",
   "variants": {
     "light": {
       "frames": 706,

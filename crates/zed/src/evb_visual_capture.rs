@@ -57,6 +57,7 @@ fn create_fixture_project(path: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::Context as _;
     use std::process::Command;
 
+    // Everything in the fixture is invented: the frames are published on the landing page.
     let files: &[(&str, &str)] = &[
         (
             "package.json",
@@ -66,13 +67,17 @@ fn create_fixture_project(path: &std::path::Path) -> anyhow::Result<()> {
   "scripts": {
     "dev": "node -e \"console.log('Nuxt dev server ready on http://localhost:3000'); setInterval(() => {}, 1000)\"",
     "build": "node -e \"console.log('built')\"",
-    "package:mac": "node -e \"console.log('packaging')\"",
+    "preview": "node -e \"console.log('preview')\"",
     "lint": "node -e \"console.log('lint ok')\""
   }
 }
 "#,
         ),
-        ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n"),
+        // npm, unlike pnpm, does not print the project's absolute path when it runs a script.
+        (
+            "package-lock.json",
+            "{\n  \"name\": \"trailmap\",\n  \"lockfileVersion\": 3,\n  \"requires\": true,\n  \"packages\": {}\n}\n",
+        ),
         (
             "server/api/trip.get.ts",
             r#"import { getTripStore } from '../utils/trip-store'
@@ -106,14 +111,11 @@ export default defineEventHandler(async (event) => {
 </template>
 
 <script setup lang="ts">
-const { pending, refresh } = await useFetch('/api/trip')
+const { pending, refresh } = await useFetch('/api/trip', { query: { id: 'alps' } })
 </script>
 "#,
         ),
-        (
-            "README.md",
-            "# Trailmap\n\nFixture for EVB IDE captures.\n",
-        ),
+        ("README.md", "# Trailmap\n\nPlan trips on shared maps.\n"),
     ];
     for (relative, contents) in files {
         let file = path.join(relative);
@@ -137,6 +139,9 @@ const { pending, refresh } = await useFetch('/api/trip')
         Ok(())
     };
     git(&["init", "-q", "-b", "master"])?;
+    // The git log's "me" comes from the repository's identity, not the global one.
+    git(&["config", "user.name", "Alex Chen"])?;
+    git(&["config", "user.email", "alex@example.com"])?;
     git(&["add", "."])?;
     git(&[
         "commit",
@@ -145,7 +150,7 @@ const { pending, refresh } = await useFetch('/api/trip')
         "feat: add shareable trip links",
     ])?;
     git(&["checkout", "-q", "-b", "fix/map-tiles"])?;
-    std::fs::write(path.join("README.md"), "# Trailmap\n\nCI caches the tile fixtures.\n")?;
+    std::fs::write(path.join("README.md"), "# Trailmap\n\nPlan trips on shared maps.\n\nCI caches the tile fixtures.\n")?;
     git(&[
         "commit",
         "-q",
@@ -170,8 +175,8 @@ const { pending, refresh } = await useFetch('/api/trip')
         "theirs",
     ])?;
     // More refs for the branches tree: folders and a remote.
-    git(&["branch", "codex/pdf-fixes", "HEAD~1"])?;
-    git(&["branch", "codex/editor-perf", "HEAD~2"])?;
+    git(&["branch", "feature/trip-export", "HEAD~1"])?;
+    git(&["branch", "feature/offline-maps", "HEAD~2"])?;
     git(&["update-ref", "refs/remotes/origin/master", "HEAD~1"])?;
     git(&["update-ref", "refs/remotes/origin/chore/deps-vitest", "HEAD~2"])?;
     // A GitHub remote that master tracks, for the pull request indicator.
@@ -391,7 +396,7 @@ mod capture {
         wait_real_time(&mut cx, Duration::from_secs(3));
         save(&mut cx, any_window, &output_dir, "06-git-log")?;
         // Points in the Git Log panel of the fixed 1440x900 window: the third
-        // commit, the `codex/pdf-fixes` and `fix/map-tiles` branch rows, and the
+        // commit, the `feature/trip-export` and `fix/map-tiles` branch rows, and the
         // User filter.
         right_click(&mut cx, any_window, point(px(975.), px(643.)));
         save(&mut cx, any_window, &output_dir, "06b-git-log-menu")?;
@@ -499,7 +504,7 @@ mod capture {
         fn invalidate(&self, _host: &str) {}
     }
 
-    /// GitHub for the fixture: master has pull request #128 with a check still running, until
+    /// GitHub for the fixture: master has pull request #42 with a check still running, until
     /// `PULL_REQUEST_OPEN` is cleared.
     fn fake_github() -> Arc<dyn http_client::HttpClient> {
         use futures::AsyncReadExt as _;
@@ -519,9 +524,9 @@ mod capture {
             if uri.contains("/pulls?") {
                 let pulls = if PULL_REQUEST_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
                     json!([{
-                        "number": 128,
+                        "number": 42,
                         "title": "Return 404 for trips the viewer cannot see",
-                        "html_url": "https://github.com/trailmap-app/trailmap/pull/128",
+                        "html_url": "https://github.com/trailmap-app/trailmap/pull/42",
                         "state": "open",
                         "draft": false,
                         "merged_at": null,
@@ -541,10 +546,10 @@ mod capture {
                 let comment = |id: &str, author: &str, body: &str| json!({
                     "id": id, "author": { "login": author }, "body": body,
                     "createdAt": "2026-10-31T07:15:00Z",
-                    "url": "https://github.com/trailmap-app/trailmap/pull/128#discussion_r1"
+                    "url": "https://github.com/trailmap-app/trailmap/pull/42#discussion_r1"
                 });
                 json!({ "repository": { "pullRequest": {
-                    "id": "PR_128", "headRefOid": head,
+                    "id": "PR_42", "headRefOid": head,
                     "reviewThreads": { "pageInfo": null, "nodes": [
                         {
                             "id": "T1", "isResolved": false, "isOutdated": false,
@@ -557,7 +562,7 @@ mod capture {
                         },
                         {
                             "id": "T2", "isResolved": true, "isOutdated": false,
-                            "path": "server/api/trip.get.ts", "line": 17,
+                            "path": "server/api/trip.get.ts", "line": 16,
                             "viewerCanReply": true, "viewerCanResolve": false, "viewerCanUnresolve": true,
                             "comments": { "totalCount": 1, "nodes": [
                                 comment("C3", "rivera", "nosniff belongs with the other security headers.")

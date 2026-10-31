@@ -46,6 +46,7 @@
 
 <script setup lang="ts">
 import interFont from "~/assets/fonts/inter-latin-wght-normal.woff2?url";
+import ideFilm from "~/films/ide.json";
 import { repositoryUrl } from "~~/shared/releases";
 
 useHead({
@@ -61,7 +62,7 @@ useSeoMeta({
     "EVB IDE is the Zed editor with the JetBrains keymap, IntelliJ themes, run configurations, a Git Log tool window and GitHub pull request review. Free and open source.",
   ogSiteName: "EVB IDE",
   ogType: "website",
-  ogImage: `${config.public.siteUrl}/films/ide/light-poster.jpg`,
+  ogImage: `${config.public.siteUrl}/films/ide/light-poster.jpg?v=${ideFilm.version}`,
   twitterCard: "summary_large_image",
 });
 </script>

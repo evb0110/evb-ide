@@ -8,6 +8,7 @@
 // interface text stays sharp.
 import { bundle } from "@remotion/bundler";
 import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,7 +28,7 @@ const manifest = JSON.parse(readFileSync(path.join(CAPTURE, "manifest.json"), "u
 const serveUrl = await bundle({ entryPoint: path.join(HERE, "film.tsx"), publicDir: CAPTURE });
 const outDir = path.join(LANDING, "public/films/ide");
 mkdirSync(outDir, { recursive: true });
-const index = { fps: manifest.fps, intro: 10, width: 0, height: 0, variants: {} };
+const index = { fps: manifest.fps, intro: 10, width: 0, height: 0, version: "", variants: {} };
 
 for (const theme of ["light", "dark"]) {
   const inputProps = { manifest, theme };
@@ -65,6 +66,15 @@ for (const theme of ["light", "dark"]) {
   index.width = Math.round(composition.width * SCALE);
   index.height = Math.round(composition.height * SCALE);
 }
+
+// Part of every film URL, so a re-rendered film replaces cached copies at once.
+const hash = createHash("sha256");
+for (const theme of Object.keys(index.variants)) {
+  for (const file of [`${theme}.mp4`, `${theme}-poster.jpg`, `${theme}-still.jpg`]) {
+    hash.update(readFileSync(path.join(outDir, file)));
+  }
+}
+index.version = hash.digest("hex").slice(0, 12);
 
 mkdirSync(path.join(LANDING, "app/films"), { recursive: true });
 writeFileSync(path.join(LANDING, "app/films/ide.json"), `${JSON.stringify(index, null, 2)}\n`);

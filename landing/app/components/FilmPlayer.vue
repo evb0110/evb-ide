@@ -13,7 +13,7 @@
           :key="theme"
           ref="video"
           class="film-video"
-          :src="`${FILM_BASE}/${theme}.mp4`"
+          :src="filmUrl(`${theme}.mp4`)"
           :aria-label="label"
           muted
           playsinline
@@ -67,6 +67,8 @@ interface IFilmIndex {
   intro: number;
   width: number;
   height: number;
+  /** Content hash of the rendered files, appended to their URLs. */
+  version: string;
   variants: Record<string, { frames: number; still: number }>;
 }
 
@@ -79,6 +81,7 @@ const { theme, label, title } = defineProps<{
 // Rendered by recorder/render.mjs: one video per theme, with a poster and a still.
 const FILM_BASE = "/films/ide";
 const film: IFilmIndex = ideFilm;
+const filmUrl = (file: string) => `${FILM_BASE}/${file}?v=${film.version}`;
 const video = useTemplateRef<HTMLVideoElement>("video");
 const reducedMotion = usePreferredReducedMotion();
 const mounted = ref(false);
@@ -95,15 +98,15 @@ useHead({
   link: (["light", "dark"] as const).map((scheme) => ({
     rel: "preload",
     as: "image",
-    href: `${FILM_BASE}/${scheme}-poster.jpg`,
+    href: filmUrl(`${scheme}-poster.jpg`),
     media: `(prefers-color-scheme: ${scheme})`,
   })),
 });
 const posterStyle = computed(() => {
   const kind = still.value ? "still" : "poster";
   return {
-    "--poster-light": `url(${FILM_BASE}/light-${kind}.jpg)`,
-    "--poster-dark": `url(${FILM_BASE}/dark-${kind}.jpg)`,
+    "--poster-light": `url(${filmUrl(`light-${kind}.jpg`)})`,
+    "--poster-dark": `url(${filmUrl(`dark-${kind}.jpg`)})`,
   };
 });
 

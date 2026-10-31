@@ -839,7 +839,7 @@ mod tests {
             "dependabot[bot]"
         );
         assert_eq!(blame_author_short_name(""), "");
-        assert_eq!(GitBlameRenderer.author_display_length("Анна Иванова"), 7);
+        assert_eq!(GitBlameRenderer.author_display_length("Анна Каренина"), 8);
     }
 
     #[test]
