@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# Builds EVB IDE in release mode, assembles "EVB IDE.app", signs it ad hoc and
-# installs it into /Applications (or the directory given with -d).
-#
-# Unlike script/bundle-mac this needs no cargo-bundle, Apple identity or
-# notarization, and uses the system git instead of a bundled one. It registers
-# no URL scheme: the app only understands zed:// links, and that scheme belongs
-# to an installed Zed.
+# Uses system git and registers no URL scheme, so an installed Zed retains zed://.
+# Set EVB_SIGNING_IDENTITY for Developer ID signing; local builds use ad hoc signing.
 #
 # Usage: script/evb-install [-n] [-d DIR]
 #   -n      build and assemble only; do not install
@@ -33,15 +28,22 @@ cd "$repo_root"
 app_name="EVB IDE"
 bundle_id="dev.evb.EVB-IDE"
 executable="evb-ide"
-version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)"
-commit="$(git rev-parse --short HEAD)"
+version="$(tr -d '\n' < EVB_VERSION)"
+if [[ -f SOURCE_COMMIT ]]; then
+    commit_sha="$(tr -d '\n' < SOURCE_COMMIT)"
+else
+    commit_sha="$(git rev-parse HEAD)"
+fi
+commit="${commit_sha:0:10}"
+signing_identity="${EVB_SIGNING_IDENTITY:--}"
 
 export ZED_RELEASE_CHANNEL=stable
-export ZED_COMMIT_SHA="$(git rev-parse HEAD)"
+export ZED_COMMIT_SHA="$commit_sha"
 export MACOSX_DEPLOYMENT_TARGET=12.0
 export CXXFLAGS="-stdlib=libc++"
 
 echo "Building $app_name $version ($commit)"
+script/generate-licenses
 # Release builds embed assets/ at compile time. Cargo notices edits to embedded
 # files but not files added since the last build (a new font or theme), so the
 # embedding crates are always rebuilt.
@@ -57,7 +59,16 @@ mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 
 cp "target/release/$executable" "$app_path/Contents/MacOS/$executable"
 cp "target/release/cli" "$app_path/Contents/MacOS/cli"
-cp crates/zed/resources/Document.icns "$app_path/Contents/Resources/Document.icns"
+licenses_dir="$app_path/Contents/Resources/licenses"
+mkdir -p "$licenses_dir"
+cp LICENSE-GPL LICENSE-APACHE NOTICE.md assets/licenses.md "$licenses_dir/"
+cat > "$licenses_dir/SOURCE.txt" <<EOF
+EVB IDE $version, built from commit $commit_sha.
+Corresponding source, dependency sources, and build instructions:
+https://github.com/evb0110/evb-ide/releases/tag/v$version
+Source repository: https://github.com/evb0110/evb-ide
+License: GPL-3.0-or-later, with Apache-2.0 components where marked.
+EOF
 
 icon_source="crates/zed/resources/evb/app-icon.png"
 iconset="$out_dir/AppIcon.iconset"
@@ -69,6 +80,7 @@ for size in 16 32 128 256 512; do
     sips -z "$double" "$double" "$icon_source" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$app_path/Contents/Resources/AppIcon.icns"
+cp "$app_path/Contents/Resources/AppIcon.icns" "$app_path/Contents/Resources/Document.icns"
 rm -rf "$iconset"
 
 python3 - "$app_path/Contents/Info.plist" "$app_name" "$bundle_id" "$executable" "$version" "$commit" <<'PY'
@@ -87,7 +99,9 @@ info = {
     "CFBundleName": name,
     "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": version,
-    "CFBundleVersion": f"{version}+{commit}",
+    "CFBundleVersion": version,
+    "EVBSourceCommit": commit,
+    "NSHumanReadableCopyright": "Copyright 2026 Eugene Barsky and Zed contributors. GPL-3.0-or-later.",
     "LSApplicationCategoryType": "public.app-category.developer-tools",
     "LSMinimumSystemVersion": "12.0",
     "NSHighResolutionCapable": True,
@@ -110,10 +124,14 @@ with open(path, "wb") as handle:
     plistlib.dump(info, handle)
 PY
 
-codesign --force --sign - "$app_path/Contents/MacOS/cli"
-codesign --force --sign - --entitlements crates/zed/resources/zed.entitlements \
+signing_options=()
+if [[ "$signing_identity" != - ]]; then
+    signing_options=(--options runtime --timestamp)
+fi
+codesign --force --sign "$signing_identity" "${signing_options[@]}" "$app_path/Contents/MacOS/cli"
+codesign --force --sign "$signing_identity" "${signing_options[@]}" --entitlements crates/zed/resources/zed.entitlements \
     "$app_path/Contents/MacOS/$executable"
-codesign --force --sign - --entitlements crates/zed/resources/zed.entitlements "$app_path"
+codesign --force --sign "$signing_identity" "${signing_options[@]}" --entitlements crates/zed/resources/zed.entitlements "$app_path"
 codesign --verify --strict "$app_path"
 echo "Assembled $app_path"
 
@@ -129,14 +147,3 @@ fi
 rm -rf "$target"
 ditto "$app_path" "$target"
 echo "Installed $target"
-
-# Extensions that ship with EVB IDE are installed into its extensions folder,
-# where the app picks them up like any extension from the registry.
-extensions_dir="$HOME/Library/Application Support/EVB-IDE/extensions/installed"
-mkdir -p "$extensions_dir"
-for extension in extensions/evb-*; do
-    name="$(basename "$extension")"
-    rm -rf "$extensions_dir/$name"
-    ditto "$extension" "$extensions_dir/$name"
-    echo "Installed extension $name"
-done

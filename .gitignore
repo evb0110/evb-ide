@@ -62,3 +62,10 @@ crates/docs_preprocessor/actions.json
 
 .local*
 .cache
+
+/.devkit/
+/landing/node_modules/
+/landing/.nuxt/
+/landing/.output/
+/landing/.vercel/
+/landing/pnpm-debug.log

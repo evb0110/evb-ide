@@ -1,0 +1,52 @@
+export default defineNuxtConfig({
+  compatibilityDate: "2026-10-01",
+  devtools: { enabled: false },
+  modules: ["@nuxt/ui"],
+  css: ["~/assets/css/main.css"],
+  ui: { fonts: false },
+  runtimeConfig: {
+    githubToken: "",
+    public: { siteUrl: "https://evb-ide.vercel.app" },
+  },
+  typescript: { strict: true },
+  icon: {
+    clientBundle: {
+      icons: [
+        "lucide:github",
+        "lucide:download",
+        "lucide:arrow-up-right",
+        "lucide:sun",
+        "lucide:moon",
+        "lucide:play",
+        "lucide:git-branch",
+        "lucide:code-xml",
+        "lucide:keyboard",
+        "lucide:shield-check",
+        "lucide:arrow-right",
+      ],
+    },
+  },
+  app: {
+    head: {
+      htmlAttrs: { lang: "en" },
+      title: "EVB IDE · A familiar workflow. A fast editor.",
+      meta: [{ name: "viewport", content: "width=device-width, initial-scale=1" }],
+      link: [{ rel: "icon", type: "image/png", href: "/icon.png" }],
+    },
+  },
+  routeRules: {
+    "/**": {
+      headers: {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        "Content-Security-Policy":
+          "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      },
+    },
+    "/docs": { prerender: true },
+    "/license": { prerender: true },
+    "/privacy": { prerender: true },
+  },
+});

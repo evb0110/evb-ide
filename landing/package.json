@@ -1,0 +1,28 @@
+{
+  "name": "evb-ide-landing",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev": "nuxt dev --host 127.0.0.1 --port 3788",
+    "build": "nuxt build",
+    "postinstall": "nuxt prepare",
+    "typecheck": "nuxt typecheck",
+    "test": "node --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@iconify-json/lucide": "^1.2.0",
+    "@nuxt/ui": "4.11.2",
+    "nuxt": "4.6.2",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.3",
+    "vue-tsc": "3.3.11"
+  }
+}

@@ -22,5 +22,5 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [env]
 MACOSX_DEPLOYMENT_TARGET = "12.0"
-# EVB IDE is updated by rebuilding from this checkout, never from zed.dev.
-ZED_UPDATE_EXPLANATION = "EVB IDE updates by rebuilding from its checkout: script/evb-install"
+# Upstream's updater must never replace the fork with Zed.
+ZED_UPDATE_EXPLANATION = "Get EVB IDE updates at https://github.com/evb0110/evb-ide/releases"

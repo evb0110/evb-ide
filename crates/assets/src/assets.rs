@@ -25,6 +25,11 @@ util::fs_embed! {
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(path) = path.strip_prefix("evb-jetbrains-icons/") {
+            return EvbIcons::get(path.trim_start_matches("./"))
+                .map(|file| Some(file.data))
+                .with_context(|| format!("loading bundled EVB icon at {path:?}"));
+        }
         Self::get(path)
             .map(|f| Some(f.data))
             .with_context(|| format!("loading asset at path {path:?}"))
@@ -41,6 +46,13 @@ impl AssetSource for Assets {
             })
             .collect())
     }
+}
+
+util::fs_embed! {
+    struct EvbIcons,
+    crate_relative = "../../extensions/evb-jetbrains-icons",
+    root_relative = "extensions/evb-jetbrains-icons",
+    include = ["icons/**/*.svg", "icon_themes/*.json"],
 }
 
 impl Assets {

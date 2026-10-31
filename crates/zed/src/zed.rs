@@ -1533,18 +1533,8 @@ fn initialize_pane(
 }
 
 fn open_about_window(cx: &mut App) {
-    fn about_window_icon(release_channel: ReleaseChannel) -> Arc<Image> {
-        let bytes = match release_channel {
-            ReleaseChannel::Dev => include_bytes!("../resources/app-icon-dev.png").as_slice(),
-            ReleaseChannel::Nightly => {
-                include_bytes!("../resources/app-icon-nightly.png").as_slice()
-            }
-            ReleaseChannel::Preview => {
-                include_bytes!("../resources/app-icon-preview.png").as_slice()
-            }
-            ReleaseChannel::Stable => include_bytes!("../resources/app-icon.png").as_slice(),
-        };
-
+    fn about_window_icon() -> Arc<Image> {
+        let bytes = include_bytes!("../resources/evb/app-icon.png");
         Arc::new(Image::from_bytes(ImageFormat::Png, bytes.to_vec()))
     }
 
@@ -1563,7 +1553,7 @@ fn open_about_window(cx: &mut App) {
             let release_channel = ReleaseChannel::global(cx);
             let release_channel_name = release_channel.display_name();
             let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            let version = include_str!("../../../EVB_VERSION").trim();
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"
@@ -1580,7 +1570,7 @@ fn open_about_window(cx: &mut App) {
                 focus_handle: cx.focus_handle(),
                 ok_entry: NavigableEntry::focusable(cx),
                 copy_entry: NavigableEntry::focusable(cx),
-                app_icon: about_window_icon(release_channel),
+                app_icon: about_window_icon(),
                 message,
                 commit,
                 full_version,
@@ -1639,7 +1629,7 @@ fn open_about_window(cx: &mut App) {
                                 .child(Label::new(commit).size(LabelSize::Small))
                             })
                             .child(
-                                Label::new("Version")
+                                Label::new("Upstream Zed version")
                                     .color(Color::Muted)
                                     .size(LabelSize::XSmall),
                             )
@@ -1724,7 +1714,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                title: Some("About EVB IDE".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
@@ -2790,6 +2780,19 @@ fn open_settings_file(
 pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut App) {
     let extension_store = ExtensionStore::global(cx);
     let theme_registry = ThemeRegistry::global(cx);
+    let bundled_icon_theme = "evb-jetbrains-icons/icon_themes/jetbrains-icons.json";
+    theme_registry
+        .assets()
+        .load(bundled_icon_theme)
+        .and_then(|contents| contents.context("bundled EVB icon theme is missing"))
+        .and_then(|contents| {
+            theme_registry.load_icon_theme(
+                Path::new(bundled_icon_theme),
+                Path::new("evb-jetbrains-icons"),
+                contents.into_owned(),
+            )
+        })
+        .log_err();
     let theme_settings = ThemeSettings::get_global(cx);
     let appearance = SystemAppearance::global(cx).0;
 

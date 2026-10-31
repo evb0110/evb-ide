@@ -1,4 +1,17 @@
-# Contributing to Zed
+# Contributing to EVB IDE
+
+Report bugs and propose changes at https://github.com/evb0110/evb-ide/issues.
+Include your EVB IDE version, operating system, and steps to reproduce.
+Build instructions and focused checks are in [EVB.md](EVB.md).
+
+Contributions to this fork are distributed under the applicable existing
+component licenses. Zed's Contributor License Agreement is relevant when
+contributing directly to upstream Zed; this fork does not require it.
+
+## Upstream Zed contribution guide
+
+The original upstream guide follows for reference. Its Zed-specific project
+processes and links apply to contributions sent to Zed Industries.
 
 Thank you for helping us make Zed better!
 

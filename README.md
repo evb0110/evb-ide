@@ -1,50 +1,72 @@
 > [!IMPORTANT]
 > Remove this line to confirm you've reviewed this PR before submitting.
-# Zed
+# EVB IDE
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+A Zed-based editor with familiar JetBrains shortcuts, IntelliJ themes, and a
+WebStorm-style workflow for web development.
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+[Website](https://evb-ide.vercel.app) ·
+[Downloads](https://github.com/evb0110/evb-ide/releases) ·
+[Build and development guide](EVB.md) ·
+[Report an issue](https://github.com/evb0110/evb-ide/issues)
 
----
+EVB IDE is an independent, community-maintained fork of
+[Zed](https://github.com/zed-industries/zed). It is not affiliated with or
+endorsed by Zed Industries or JetBrains.
 
-### Installation
+## What changes
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+- IntelliJ Light and Dark themes, JetBrains file icons, JetBrains Mono, and
+  the JetBrains keymap, configured out of the box.
+- A title-bar run configuration picker for package.json scripts, Composer
+  scripts, and Zed tasks, with Run, Debug for Node.js, Rerun, and Stop.
+- A Git Log tool window with a branches tree, filters, commit operations,
+  compact blame annotations, and Commit and Push.
+- Vue, TypeScript, PHP, and Blade defaults, including fixes to language-server
+  completion and rename behavior.
+- Separate application identity and settings, so EVB IDE can run alongside Zed.
+- AI features, telemetry, sign-in UI, and automatic updates disabled by default.
 
-Other platforms are not yet available:
+See [EVB.md](EVB.md) for the detailed differences and development checks.
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+## Install
 
-### Developing Zed
+Download a build for your Mac from [Releases](https://github.com/evb0110/evb-ide/releases).
+Open the disk image and drag **EVB IDE** into **Applications**. Each release
+lists its supported architecture and macOS requirements. Only published,
+verified platforms are offered on the website.
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+Updates are manual: download the next release and replace the application.
+Your EVB IDE settings and projects are preserved. The fork never replaces an
+installed Zed with an upstream update.
 
-### Contributing
+To build from source, follow [EVB.md](EVB.md). The source tag and source archive
+for each downloadable release are linked on its release page, together with
+SHA-256 checksums and build instructions.
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+## Settings and services
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+On macOS, settings live in `~/.config/evb-ide/settings.json` and application
+data lives in `~/Library/Application Support/EVB-IDE`. Your settings override
+the bundled defaults. Language extensions and language servers can download
+their own components and may have additional terms. PHP defaults use
+Intelephense; its premium features require a separate license.
 
-### Licensing
+Using Zed-operated services, if you enable them, is subject to
+[Zed's service terms](https://zed.dev/terms). EVB IDE does not include a Zed
+subscription or a JetBrains product license.
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+## License and attribution
 
-License information for third party dependencies must be correctly provided for CI to pass.
+The editor is **GPL-3.0-or-later**, with **Apache-2.0** components where marked,
+including GPUI. Existing component licenses remain in effect. You may use,
+modify, and redistribute this fork under those terms, including commercially.
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+Read [LICENSE-GPL](LICENSE-GPL), [LICENSE-APACHE](LICENSE-APACHE), and
+[NOTICE.md](NOTICE.md). The application's **Help → View Dependency Licenses**
+includes bundled dependency and asset notices. The IntelliJ-derived themes
+and icons are Apache-2.0; bundled fonts have their own licenses.
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
-
-## Sponsorship
-
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
-
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+Zed is developed by Zed Industries and its contributors. EVB IDE modifications
+are maintained by Eugene Barsky and contributors. Contributions to this fork
+are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).

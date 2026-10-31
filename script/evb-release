@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+publish=false
+case "${1:-}" in
+    --publish) publish=true ;;
+    '') ;;
+    *) echo 'Usage: script/evb-release [--publish]' >&2; exit 2 ;;
+esac
+
+[[ "$(uname -s)" == Darwin ]] || { echo 'Public packaging currently requires macOS.' >&2; exit 1; }
+[[ -z "$(git status --porcelain)" ]] || { echo 'Commit changes before building a release.' >&2; exit 1; }
+version="$(tr -d '\n' < EVB_VERSION)"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid EVB_VERSION.' >&2; exit 1; }
+commit="$(git rev-parse HEAD)"
+tag="v$version"
+architecture="$(uname -m)"
+case "$architecture" in arm64) ;; x86_64) architecture=x64 ;; *) echo 'Unsupported Mac architecture.' >&2; exit 1 ;; esac
+output="$repo_root/.devkit/releases/$tag"
+app_path="$repo_root/target/evb-bundle/EVB IDE.app"
+image_name="EVB-IDE-$version-macos-$architecture.dmg"
+source_name="EVB-IDE-$version-source.tar.gz"
+
+notarize() {
+    if [[ -n "${EVB_NOTARY_PROFILE:-}" ]]; then
+        xcrun notarytool submit "$1" --keychain-profile "$EVB_NOTARY_PROFILE" --wait
+    else
+        xcrun notarytool submit "$1" --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait
+    fi
+}
+
+if [[ "$publish" == true ]]; then
+    [[ -f "$output/verified-commit" && "$(cat "$output/verified-commit")" == "$commit" ]] || { echo 'Prepare and verify this exact commit first.' >&2; exit 1; }
+    (cd "$output" && shasum -a 256 -c SHA256SUMS)
+    xcrun stapler validate "$output/$image_name"
+    remote_commit="$(git ls-remote origin refs/heads/main | cut -f1)"
+    [[ "$remote_commit" == "$commit" ]] || { echo 'Push this commit to origin/main before publishing.' >&2; exit 1; }
+    gh release create "$tag" --repo evb0110/evb-ide --target "$commit" --draft \
+        --title "EVB IDE $version" --notes-file "$output/RELEASE-NOTES.md" \
+        "$output/$image_name" "$output/$source_name" "$output/SHA256SUMS"
+    gh release edit "$tag" --repo evb0110/evb-ide --draft=false --latest
+    gh release view "$tag" --repo evb0110/evb-ide --json url,tagName,targetCommitish,assets
+    exit 0
+fi
+
+[[ -n "${EVB_SIGNING_IDENTITY:-}" && "$EVB_SIGNING_IDENTITY" != - ]] || { echo 'Set EVB_SIGNING_IDENTITY to a Developer ID Application identity.' >&2; exit 1; }
+if [[ -z "${EVB_NOTARY_PROFILE:-}" ]]; then
+    : "${APPLE_API_KEY:?Set notarization credentials or EVB_NOTARY_PROFILE}"
+    : "${APPLE_API_KEY_ID:?Set APPLE_API_KEY_ID}"
+    : "${APPLE_API_ISSUER:?Set APPLE_API_ISSUER}"
+fi
+[[ ! -e "$output/verified-commit" ]] || { echo "A prepared release already exists at $output; do not overwrite its artifacts." >&2; exit 1; }
+mkdir -p "$output"
+
+script/evb-install -n
+codesign --verify --deep --strict "$app_path"
+codesign -dv "$app_path" 2>&1 | grep -q '^Authority=Developer ID Application:'
+ditto -c -k --keepParent "$app_path" "$output/notarize.zip"
+notarize "$output/notarize.zip"
+xcrun stapler staple "$app_path"
+xcrun stapler validate "$app_path"
+spctl --assess --type execute --verbose=2 "$app_path"
+"$app_path/Contents/MacOS/evb-ide" --system-specs > "$output/system-specs.txt"
+grep -q "EVB IDE: v$version" "$output/system-specs.txt"
+rm "$output/notarize.zip"
+
+image_root="$output/image-root"
+mkdir -p "$image_root"
+ditto "$app_path" "$image_root/EVB IDE.app"
+ln -s /Applications "$image_root/Applications"
+hdiutil create -volname "EVB IDE $version" -srcfolder "$image_root" -format UDZO "$output/$image_name"
+codesign --force --sign "$EVB_SIGNING_IDENTITY" --timestamp "$output/$image_name"
+notarize "$output/$image_name"
+xcrun stapler staple "$output/$image_name"
+xcrun stapler validate "$output/$image_name"
+rm -rf "$image_root"
+
+source_root="$output/EVB-IDE-$version-source"
+mkdir -p "$source_root"
+git archive HEAD | tar -x -C "$source_root"
+(cd "$source_root" && cargo vendor --locked --versioned-dirs vendor) > "$output/vendor-config.toml"
+cat "$output/vendor-config.toml" >> "$source_root/.cargo/config.toml"
+printf '%s\n' "$commit" > "$source_root/SOURCE_COMMIT"
+cp assets/licenses.md "$source_root/assets/licenses.md"
+cat > "$source_root/REBUILD.md" <<EOF
+# Rebuild EVB IDE $version
+
+Source commit: $commit
+Source tag: https://github.com/evb0110/evb-ide/tree/$tag
+
+This archive contains the exact application sources, build scripts, license
+notices, Cargo.lock, and vendored Rust dependency sources. The Cargo source
+configuration points to the included vendor directory.
+
+Install the prerequisites in EVB.md: Xcode with its Metal toolchain, CMake,
+and rustup. From this directory, run script/evb-install -n. That produces a
+local ad-hoc-signed app; your own signing identity is needed for public
+Developer ID signing. Third-party build scripts may fetch platform toolchains
+or native components as described in their sources.
+
+The landing page builds separately using Node 24.21.0 and its pnpm lockfile.
+No signing credentials or private keys are part of this source archive.
+EOF
+(cd "$output" && tar -czf "$source_name" "EVB-IDE-$version-source")
+rm -rf "$source_root" "$output/vendor-config.toml"
+(cd "$output" && shasum -a 256 "$image_name" "$source_name" > SHA256SUMS)
+
+cat > "$output/RELEASE-NOTES.md" <<EOF
+EVB IDE is an independent open-source fork of Zed with JetBrains shortcuts,
+IntelliJ themes and file icons, run configurations, and Git tools for web development.
+
+- macOS 12 or later, $architecture. Developer ID signed and Apple notarized.
+- Open the DMG and drag EVB IDE into Applications. Updates are manual.
+- AI features, telemetry, and sign-in UI are disabled by default.
+- The editor is GPL-3.0-or-later, with Apache-2.0 components where marked.
+- Independent from Zed Industries and JetBrains. No hosted-service subscription is included.
+
+## Corresponding source
+
+[Exact source tag](https://github.com/evb0110/evb-ide/tree/$tag), commit $commit.
+Download $source_name below for application sources, build instructions,
+license notices, and vendored Rust dependency sources. SHA256SUMS covers both downloads.
+
+Release Notes:
+
+- Added the first public EVB IDE release for macOS.
+EOF
+printf '%s\n' "$commit" > "$output/verified-commit"
+echo "Prepared $tag at $output. Verify app startup, then run script/evb-release --publish."

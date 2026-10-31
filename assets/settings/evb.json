@@ -11,8 +11,7 @@
     "light": "IntelliJ Light",
     "dark": "IntelliJ Dark",
   },
-  // From the bundled extensions/evb-jetbrains-icons, which script/evb-install
-  // installs; Zed's icons are used until it is present.
+  // These icons are embedded so fresh installations need no separate extension.
   "icon_theme": {
     "mode": "system",
     "light": "JetBrains Icons Light",

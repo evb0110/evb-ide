@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
-# Rebases the EVB IDE commits onto the latest upstream Zed main.
-#
-# EVB IDE keeps its changes as a short series of commits on `main` on top of
-# zed-industries/zed. Most of them live in files upstream never touches
-# (assets/settings/evb.json, assets/keymaps/evb.json, crates/evb_run, script/evb-*),
-# so rebases usually apply cleanly; the rest are small hooks into upstream files.
+# Merge upstream without rewriting source history referenced by public releases.
 #
 # Usage: script/evb-sync-upstream
-# Stops on conflicts; resolve them, `git rebase --continue`, then rerun the checks
+# Stops on conflicts; resolve them, `git merge --continue`, then rerun the checks
 # listed in EVB.md.
 
 set -euo pipefail
@@ -29,5 +24,5 @@ echo "EVB commits on top of upstream:"
 git log --oneline "$base..HEAD"
 echo "Upstream commits to take: $(git rev-list --count "$base..upstream/main")"
 
-git rebase upstream/main
-echo "Rebased onto $(git rev-parse --short upstream/main)."
+git merge --no-edit upstream/main
+echo "Merged upstream $(git rev-parse --short upstream/main)."

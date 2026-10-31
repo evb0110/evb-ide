@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://evb-ide.vercel.app/sitemap.xml

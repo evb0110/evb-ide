@@ -18,11 +18,27 @@ fail_on_stderr() {
 echo -n "" >"$OUTPUT_FILE"
 
 {
+    echo -e "# ###### EVB IDE ######\n"
+    cat NOTICE.md
+    echo -e "\n# ###### EDITOR LICENSE ######\n"
+    cat LICENSE-GPL
+    echo -e "\n# ###### APACHE LICENSE ######\n"
+    cat LICENSE-APACHE
     echo -e "# ###### THEME LICENSES ######\n"
     cat assets/themes/LICENSES
 
     echo -e "\n# ###### ICON LICENSES ######\n"
     cat assets/icons/LICENSES
+
+    echo -e "\n# ###### JETBRAINS ICON LICENSE ######\n"
+    cat extensions/evb-jetbrains-icons/LICENSE
+
+    echo -e "\n# ###### FONT LICENSES ######\n"
+    for font_license in assets/fonts/*/OFL.txt assets/fonts/*/license.txt; do
+        [[ -f "$font_license" ]] || continue
+        echo -e "\n## $font_license\n"
+        cat "$font_license"
+    done
 
     echo -e "\n# ###### CODE LICENSES ######\n"
 } >>"$OUTPUT_FILE"

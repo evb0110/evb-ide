@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+mkdir -p "$repo_root/.devkit"
+deployment_root="$(mktemp -d "${TMPDIR:-$repo_root/.devkit}/evb-landing.XXXXXX")"
+trap 'rm -rf "$deployment_root"' EXIT
+
+if [[ ! -f landing/.vercel/project.json ]]; then
+    echo 'Link landing to the EVB IDE Vercel project first: cd landing && vercel link' >&2
+    exit 1
+fi
+
+rsync -a --exclude node_modules --exclude .nuxt --exclude .output --exclude .git \
+    --exclude '.env*' --exclude 'pnpm-debug.log' landing/ "$deployment_root/"
+cp LICENSE-GPL LICENSE-APACHE NOTICE.md "$deployment_root/"
+export GIT_CEILING_DIRECTORIES="$deployment_root"
+cd "$deployment_root"
+vercel deploy --prod --yes --archive=tgz "$@"
