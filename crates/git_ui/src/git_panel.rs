@@ -5083,17 +5083,18 @@ impl GitPanel {
                 this.askpass_delegate(format!("git push {}", remote.name), window, cx)
             })?;
 
+            let remote_branch = branch
+                .upstream
+                .as_ref()
+                .filter(|u| matches!(u.tracking, UpstreamTracking::Tracked(_)))
+                .and_then(|u| u.branch_name())
+                .unwrap_or_else(|| branch.name())
+                .to_owned();
+            let remote_name = remote.name.to_string();
             let push = repo.update(cx, |repo, cx| {
                 repo.push(
                     branch.name().to_owned().into(),
-                    branch
-                        .upstream
-                        .as_ref()
-                        .filter(|u| matches!(u.tracking, UpstreamTracking::Tracked(_)))
-                        .and_then(|u| u.branch_name())
-                        .unwrap_or_else(|| branch.name())
-                        .to_owned()
-                        .into(),
+                    remote_branch.clone().into(),
                     remote.name.clone(),
                     options,
                     askpass_delegate,
@@ -5107,7 +5108,12 @@ impl GitPanel {
             this.update_in(cx, |this, window, cx| {
                 match remote_output {
                     Ok(_) if create_pull_request => {
-                        let pushed = (repo.clone(), branch.name().to_string());
+                        let pushed = crate::pull_requests::PushedBranch {
+                            repository: repo.clone(),
+                            branch: branch.name().to_string(),
+                            remote: remote_name,
+                            remote_branch,
+                        };
                         this.workspace
                             .update(cx, |workspace, cx| {
                                 crate::pull_requests::create_pull_request(
@@ -5161,11 +5167,17 @@ impl GitPanel {
         }
     }
 
-    pub fn create_pull_request(&self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the hosting provider's page for a new pull request of `repository`'s branch, or of
+    /// the active repository's.
+    pub fn create_pull_request(
+        &self,
+        repository: Option<Entity<Repository>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let result = (|| -> anyhow::Result<()> {
-            let repo = self
-                .active_repository
-                .clone()
+            let repo = repository
+                .or_else(|| self.active_repository.clone())
                 .ok_or_else(|| anyhow::anyhow!("No active repository"))?;
 
             let (branch, remote_origin, remote_upstream) = {

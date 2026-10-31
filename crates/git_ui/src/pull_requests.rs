@@ -226,22 +226,26 @@ fn target_repository(
     ))
 }
 
-/// Where `git push` sends the branch, as `git for-each-ref` reports it: `pushRemote`,
-/// `remote.pushDefault`, then the upstream, with the remote branch it updates.
+/// Where the branch is pushed, by the git panel's rule: to the branch's push remote
+/// (`pushRemote`, `remote.pushDefault`, the upstream's remote, as `git for-each-ref` reports it),
+/// under the upstream branch's name, or the local name without an upstream.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct PushTarget {
-    remote: Option<String>,
-    branch: Option<String>,
+pub(crate) struct PushTarget {
+    pub remote: Option<String>,
+    pub branch: Option<String>,
 }
 
-fn parse_push_target(output: &str) -> PushTarget {
-    let line = output.lines().next().unwrap_or_default();
-    let (remote, reference) = line.split_once('\0').unwrap_or((line, ""));
-    let nonempty = |value: &str| (!value.trim().is_empty()).then(|| value.trim().to_string());
-    PushTarget {
-        remote: nonempty(remote),
-        branch: nonempty(reference.trim().strip_prefix("refs/heads/").unwrap_or(reference)),
-    }
+fn parse_push_remote(output: &str) -> Option<String> {
+    let remote = output.lines().next().unwrap_or_default().trim();
+    (!remote.is_empty()).then(|| remote.to_string())
+}
+
+/// A branch a push just sent, where the push sent it.
+pub(crate) struct PushedBranch {
+    pub repository: Entity<Repository>,
+    pub branch: String,
+    pub remote: String,
+    pub remote_branch: String,
 }
 
 fn resolve_from_remotes(
@@ -274,8 +278,10 @@ fn resolve_from_remotes(
 }
 
 /// Resolves to `None` when the repository has no branch checked out or no GitHub remote.
+/// `pushed` is where a push just went, which then needs no working out.
 pub(crate) fn resolve_branch(
     repository: &Entity<Repository>,
+    pushed: Option<PushTarget>,
     cx: &mut App,
 ) -> Task<Option<ResolvedBranch>> {
     let (branch, origin_url, upstream_url) = {
@@ -293,16 +299,15 @@ pub(crate) fn resolve_branch(
     let upstream = branch
         .upstream
         .filter(|upstream| matches!(upstream.tracking, UpstreamTracking::Tracked(_)));
-    let upstream_push = PushTarget {
-        remote: upstream
-            .as_ref()
-            .and_then(|upstream| upstream.remote_name())
-            .map(ToString::to_string),
-        branch: upstream
-            .as_ref()
-            .and_then(|upstream| upstream.branch_name())
-            .map(ToString::to_string),
-    };
+    let upstream_remote = upstream
+        .as_ref()
+        .and_then(|upstream| upstream.remote_name())
+        .map(ToString::to_string);
+    let remote_branch = upstream
+        .as_ref()
+        .and_then(|upstream| upstream.branch_name())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| local_branch.clone());
     let (config, push) = repository.update(cx, |repository, _| {
         (
             repository.read_git_command(args([
@@ -312,7 +317,7 @@ pub(crate) fn resolve_branch(
             ])),
             repository.read_git_command(args([
                 "for-each-ref",
-                "--format=%(push:remotename)%00%(push:remoteref)",
+                "--format=%(push:remotename)",
                 &format!("refs/heads/{local_branch}"),
             ])),
         )
@@ -335,9 +340,16 @@ pub(crate) fn resolve_branch(
                 }
             }
         }
-        let push = match push.await {
-            Ok(Ok(output)) => parse_push_target(&output),
-            _ => upstream_push,
+        let push = match pushed {
+            Some(pushed) => pushed,
+            None => PushTarget {
+                remote: match push.await {
+                    Ok(Ok(output)) => parse_push_remote(&output),
+                    _ => None,
+                }
+                .or(upstream_remote),
+                branch: Some(remote_branch),
+            },
         };
         resolve_from_remotes(&remotes, &registry, local_branch, &push)
     })
@@ -494,7 +506,7 @@ impl PullRequestIndicator {
             self.task = None;
             return;
         };
-        let resolve = resolve_branch(&repository, cx);
+        let resolve = resolve_branch(&repository, None, cx);
         let client = github_client(cx);
         self.task = Some(cx.spawn(async move |this, cx| {
             let outcome = match resolve.await {
@@ -887,16 +899,16 @@ impl StatusItemView for PullRequestIndicator {
 }
 
 /// Opens the form for a pull request of the current branch, or the hosting provider's page when
-/// the repository is not on GitHub. `pushed` names the repository and branch a push just sent,
-/// so the form is for them even if the active repository changed meanwhile.
+/// the repository is not on GitHub. `pushed` is the branch a push just sent, so the form is for
+/// it and its destination even if the active repository changed meanwhile.
 pub(crate) fn create_pull_request(
     workspace: &mut Workspace,
-    pushed: Option<(Entity<Repository>, String)>,
+    pushed: Option<PushedBranch>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
     let repository = match &pushed {
-        Some((repository, _)) => Some(repository.clone()),
+        Some(pushed) => Some(pushed.repository.clone()),
         None => workspace
             .project()
             .read(cx)
@@ -907,7 +919,7 @@ pub(crate) fn create_pull_request(
     let Some(repository) = repository else {
         return;
     };
-    if let Some((_, branch)) = &pushed {
+    if let Some(PushedBranch { branch, .. }) = &pushed {
         let current = repository
             .read(cx)
             .branch
@@ -922,13 +934,20 @@ pub(crate) fn create_pull_request(
             return;
         }
     }
-    let resolve = resolve_branch(&repository, cx);
+    let push_target = pushed.map(|pushed| PushTarget {
+        remote: Some(pushed.remote),
+        branch: Some(pushed.remote_branch),
+    });
+    let resolve = resolve_branch(&repository, push_target, cx);
     let client = github_client(cx);
     cx.spawn_in(window, async move |workspace, cx| {
         let Some(branch) = resolve.await else {
+            // Another host: its own page, for this repository rather than the active one.
             workspace.update_in(cx, |workspace, window, cx| {
                 if let Some(panel) = workspace.panel::<crate::git_panel::GitPanel>(cx) {
-                    panel.update(cx, |panel, cx| panel.create_pull_request(window, cx));
+                    panel.update(cx, |panel, cx| {
+                        panel.create_pull_request(Some(repository.clone()), window, cx)
+                    });
                 }
             })?;
             return anyhow::Ok(());
@@ -1485,12 +1504,8 @@ pub(crate) mod tests {
                 },
             ]
         );
-        assert_eq!(
-            parse_push_target("fork\0refs/heads/feature/x\n"),
-            push(Some("fork"), Some("feature/x"))
-        );
-        assert_eq!(parse_push_target("origin\0\n"), push(Some("origin"), None));
-        assert_eq!(parse_push_target("\n"), push(None, None));
+        assert_eq!(parse_push_remote("fork\n"), Some("fork".to_string()));
+        assert_eq!(parse_push_remote("\n"), None);
     }
 
     #[test]

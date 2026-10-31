@@ -45,10 +45,16 @@ pub(crate) struct BranchReview {
     pub review: PullRequestReview,
 }
 
-/// Whether `review` is still the one shown for its repository: a branch switch or a newer read
-/// replaces it, and a write must not reach a pull request the user no longer looks at.
-fn is_current(review: &Arc<BranchReview>, cx: &App) -> bool {
-    branch_review(&review.work_directory, cx).is_some_and(|current| Arc::ptr_eq(&current, review))
+/// Whether `review` is for the pull request of the branch checked out now. A newer read of the
+/// same pull request still counts; another branch or pull request does not, and a write must not
+/// reach a pull request the user no longer looks at.
+fn is_current(review: &BranchReview, cx: &App) -> bool {
+    branch_review(&review.work_directory, cx).is_some_and(|current| {
+        current.branch == review.branch
+            && current.repository == review.repository
+            && current.review.number == review.review.number
+            && current.review.pull_request_id == review.review.pull_request_id
+    })
 }
 
 fn stale_review_error(review: &BranchReview) -> GitHubError {
@@ -168,7 +174,13 @@ struct HeadText {
     sha: String,
     path: String,
     text: Option<Arc<str>>,
+    read_at: std::time::Instant,
 }
+
+/// A failed read is tried again after this, once something may have fetched the commit.
+const HEAD_TEXT_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+/// Edits settle this long before threads are mapped onto the buffer again.
+const REMAP_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 fn editor_path(editor: &Editor, cx: &App) -> Option<PathBuf> {
     let buffer = editor.buffer().read(cx).as_singleton()?;
@@ -182,6 +194,8 @@ struct ReviewAddon {
     shown: Vec<(ReviewThread, u32)>,
     head_text: Option<HeadText>,
     head_text_task: Option<gpui::Task<()>>,
+    remap_task: Option<gpui::Task<()>>,
+    _subscriptions: Vec<Subscription>,
     expanded: HashSet<String>,
     comment_action: Option<Subscription>,
     _cache_observer: Subscription,
@@ -202,11 +216,43 @@ pub(crate) fn register_editor(editor: &mut Editor, cx: &mut Context<Editor>) {
         return;
     }
     let observer = cx.observe_global::<ReviewCache>(|editor, cx| refresh_blocks(editor, false, cx));
+    let mut subscriptions = vec![cx.subscribe(
+        &editor.buffer().clone(),
+        |editor, _, event: &multi_buffer::Event, cx| match event {
+            // Threads follow their lines as the buffer changes.
+            multi_buffer::Event::Edited { .. } | multi_buffer::Event::Reloaded => {
+                schedule_remap(editor, cx)
+            }
+            multi_buffer::Event::FileHandleChanged => refresh_blocks(editor, false, cx),
+            _ => {}
+        },
+    )];
+    if let Some(project) = editor.project() {
+        // A fetch can bring the head commit whose file could not be read.
+        let git_store = project.read(cx).git_store().clone();
+        subscriptions.push(cx.subscribe(
+            &git_store,
+            |editor, _, event: &project::git_store::GitStoreEvent, cx| {
+                if matches!(event, project::git_store::GitStoreEvent::RepositoryUpdated(..))
+                    && editor.addon::<ReviewAddon>().is_some_and(|addon| {
+                        addon
+                            .head_text
+                            .as_ref()
+                            .is_some_and(|head| head.text.is_none())
+                    })
+                {
+                    refresh_blocks(editor, false, cx);
+                }
+            },
+        ));
+    }
     editor.register_addon(ReviewAddon {
         blocks: Vec::new(),
         shown: Vec::new(),
         head_text: None,
         head_text_task: None,
+        remap_task: None,
+        _subscriptions: subscriptions,
         expanded: HashSet::default(),
         comment_action: None,
         _cache_observer: observer,
@@ -226,6 +272,7 @@ fn ensure_head_text(
     if let Some(head) = &addon.head_text
         && head.sha == sha
         && head.path == relative
+        && (head.text.is_some() || head.read_at.elapsed() < HEAD_TEXT_RETRY)
     {
         return head.text.clone();
     }
@@ -257,6 +304,7 @@ fn ensure_head_text(
                         sha,
                         path: relative,
                         text,
+                        read_at: std::time::Instant::now(),
                     });
                     addon.head_text_task = None;
                 }
@@ -351,6 +399,24 @@ fn refresh_blocks(editor: &mut Editor, force: bool, cx: &mut Context<Editor>) {
     if let Some(addon) = editor.addon_mut::<ReviewAddon>() {
         addon.blocks = block_ids;
         addon.shown = threads;
+    }
+}
+
+fn schedule_remap(editor: &mut Editor, cx: &mut Context<Editor>) {
+    if editor
+        .addon::<ReviewAddon>()
+        .is_none_or(|addon| addon.head_text.is_none())
+    {
+        return;
+    }
+    let task = cx.spawn(async move |editor, cx| {
+        cx.background_executor().timer(REMAP_DELAY).await;
+        editor
+            .update(cx, |editor, cx| refresh_blocks(editor, false, cx))
+            .log_err();
+    });
+    if let Some(addon) = editor.addon_mut::<ReviewAddon>() {
+        addon.remap_task = Some(task);
     }
 }
 
@@ -608,20 +674,20 @@ fn editor_workspace(editor: &WeakEntity<Editor>, cx: &App) -> Option<WeakEntity<
 }
 
 /// Runs a write to GitHub for `review`, then reads the pull request again so every view shows
-/// the result. A review that is no longer the current one is not written to.
+/// the result. Returns `false`, writing nothing, when the review is no longer the current one.
 fn run_write(
     workspace: WeakEntity<Workspace>,
-    review: &Arc<BranchReview>,
+    review: &BranchReview,
     write: impl Future<Output = Result<(), GitHubError>> + 'static,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> bool {
     if !is_current(review, cx) {
         let error = stale_review_error(review);
         window
             .spawn(cx, async move |cx| show_error(&workspace, error.to_string(), cx))
             .detach();
-        return;
+        return false;
     }
     window
         .spawn(cx, async move |cx| match write.await {
@@ -634,6 +700,7 @@ fn run_write(
             Err(error) => show_error(&workspace, error.to_string(), cx),
         })
         .detach();
+    true
 }
 
 fn show_error(workspace: &WeakEntity<Workspace>, message: String, cx: &mut AsyncWindowContext) {
@@ -680,7 +747,7 @@ fn reply(
                     async move { client.reply_to_review_thread(&host, &thread_id, &body).await },
                     window,
                     cx,
-                );
+                )
             }
         })],
         window,
@@ -748,6 +815,17 @@ fn add_comment(editor: WeakEntity<Editor>, row: Option<u32>, window: &mut Window
         vec![ModalAction::primary("Comment", {
             let workspace = workspace.clone();
             move |body, window, cx| {
+                // A newer push moves the head; the line was mapped against the old one.
+                let head_now = branch_review(&review.work_directory, cx)
+                    .and_then(|current| current.review.head_sha.clone());
+                if head_now.as_deref() != Some(commit_sha.as_str()) {
+                    let error = stale_review_error(&review);
+                    let workspace = workspace.clone();
+                    window
+                        .spawn(cx, async move |cx| show_error(&workspace, error.to_string(), cx))
+                        .detach();
+                    return false;
+                }
                 let client = github_client(cx);
                 let repository = repository.clone();
                 let comment = NewReviewComment {
@@ -766,7 +844,7 @@ fn add_comment(editor: WeakEntity<Editor>, row: Option<u32>, window: &mut Window
                     },
                     window,
                     cx,
-                );
+                )
             }
         })],
         window,
@@ -789,7 +867,7 @@ pub(crate) fn submit_review(
         let repository = review.repository.clone();
         let workspace = workspace.clone();
         let review = review.clone();
-        let run = move |body: String, window: &mut Window, cx: &mut App| {
+        let run = move |body: String, window: &mut Window, cx: &mut App| -> bool {
             let client = github_client(cx);
             let repository = repository.clone();
             run_write(
@@ -802,7 +880,7 @@ pub(crate) fn submit_review(
                 },
                 window,
                 cx,
-            );
+            )
         };
         ModalAction {
             label,
@@ -846,8 +924,26 @@ pub(crate) fn open_thread(
     window
         .spawn(cx, async move |cx| {
             let item = open.await?;
+            let Some(editor) = item.downcast::<Editor>() else {
+                return anyhow::Ok(());
+            };
+            // A file opened just now reads its pull request version first; until then its
+            // threads have no place in the buffer.
+            for _ in 0..30 {
+                let mapped = editor.read_with(cx, |editor, _| {
+                    editor.addon::<ReviewAddon>().is_none_or(|addon| {
+                        addon.head_text_task.is_none() && addon.head_text.is_some()
+                    })
+                });
+                if mapped {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
             cx.update(|window, cx| {
-                if let Some(editor) = item.downcast::<Editor>() {
+                {
                     editor.update(cx, |editor, cx| {
                         // The editor knows where the line is now if the buffer has changed.
                         let row = editor
@@ -873,11 +969,15 @@ struct ModalAction {
     label: &'static str,
     primary: bool,
     allow_empty: bool,
-    run: Rc<dyn Fn(String, &mut Window, &mut App)>,
+    /// Returns whether it sent the text; the form stays open, keeping it, when not.
+    run: Rc<dyn Fn(String, &mut Window, &mut App) -> bool>,
 }
 
 impl ModalAction {
-    fn primary(label: &'static str, run: impl Fn(String, &mut Window, &mut App) + 'static) -> Self {
+    fn primary(
+        label: &'static str,
+        run: impl Fn(String, &mut Window, &mut App) -> bool + 'static,
+    ) -> Self {
         Self {
             label,
             primary: true,
@@ -942,8 +1042,9 @@ impl ReviewTextModal {
             return;
         }
         let run = action.run.clone();
-        cx.emit(DismissEvent);
-        run(body, window, cx);
+        if run(body, window, cx) {
+            cx.emit(DismissEvent);
+        }
     }
 }
 
@@ -1174,8 +1275,10 @@ mod tests {
                 selections.select_ranges([Point::new(0, 0)..Point::new(0, 0)])
             });
             editor.insert("zero\n", window, cx);
-            refresh_blocks(editor, true, cx);
         });
+        // The edit remaps the threads once it settles.
+        cx.executor().advance_clock(REMAP_DELAY * 2);
+        cx.run_until_parked();
         let shown_rows = cx.update(|_, cx| {
             editor
                 .read(cx)
@@ -1260,6 +1363,43 @@ mod tests {
                 .collect(),
             comment_count: count,
         }
+    }
+
+    #[gpui::test]
+    fn writes_need_the_same_branch_and_pull_request(cx: &mut TestAppContext) {
+        let review = BranchReview {
+            work_directory: Arc::from(Path::new("/repository")),
+            branch: "feature".into(),
+            repository: RepositoryLocator {
+                host: "github.com".into(),
+                owner: "o".into(),
+                name: "r".into(),
+            },
+            url: "https://github.com/o/r/pull/1".into(),
+            review: PullRequestReview {
+                pull_request_id: "PR_1".into(),
+                number: 1,
+                head_sha: Some("a".into()),
+                threads: Vec::new(),
+            },
+        };
+        cx.update(|cx| {
+            set_branch_review(review.work_directory.clone(), Some(review.clone()), cx);
+            assert!(is_current(&review, cx));
+            // A newer read of the same pull request (new commits, new threads) keeps it current.
+            let mut newer = review.clone();
+            newer.review.head_sha = Some("b".into());
+            newer.review.threads.push(thread(&["New"], 1));
+            set_branch_review(review.work_directory.clone(), Some(newer), cx);
+            assert!(is_current(&review, cx));
+            // Another branch does not.
+            let mut other = review.clone();
+            other.branch = "other".into();
+            set_branch_review(review.work_directory.clone(), Some(other), cx);
+            assert!(!is_current(&review, cx));
+            set_branch_review(review.work_directory.clone(), None, cx);
+            assert!(!is_current(&review, cx));
+        });
     }
 
     #[test]
