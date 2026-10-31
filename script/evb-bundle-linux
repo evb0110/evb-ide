@@ -35,6 +35,8 @@ script/generate-licenses
 touch crates/assets/src/assets.rs crates/settings/src/settings.rs
 
 export CC="${CC:-$(command -v clang)}"
+# cc-rs compiles WebRTC's C++ with CXX; the system c++ may be a GCC too old for its headers.
+export CXX="${CXX:-${CC/clang/clang++}}"
 lld="${LLD:-$("$CC" -print-prog-name=ld.lld)}"
 if [[ "$lld" != /* || ! -x "$lld" ]]; then
     echo 'Bundling needs an absolute LLD path; set LLD (for example LLD=/usr/bin/ld.lld-18).' >&2

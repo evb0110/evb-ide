@@ -114,9 +114,16 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo script/linux
+          # WebRTC needs clang 17 or newer; Ubuntu 22.04 ships clang 14.
+          curl -fsSL https://apt.llvm.org/llvm.sh -o "$RUNNER_TEMP/llvm.sh"
+          sudo bash "$RUNNER_TEMP/llvm.sh" 18
           sudo apt-get install -y llvm python3-pil
 
       - name: Build the archive
+        env:
+          CC: clang-18
+          CXX: clang++-18
+          LLD: /usr/bin/ld.lld-18
         run: |
           # The bundle script reads target/; the build lives on the larger /mnt disk.
           ln -s "$CARGO_TARGET_DIR" target
