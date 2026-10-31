@@ -1,4 +1,7 @@
-use crate::commit_operations::args;
+use crate::{
+    commit_operations::args,
+    pull_request_review::{BranchReview, branch_review, set_branch_review},
+};
 use editor::Editor;
 use evb_github::{
     BranchHead, BranchPullRequests, CheckStatus, ChecksSummary, GitHubClient, GitHubError,
@@ -45,6 +48,7 @@ const FAILURE_BASE_DELAY: Duration = Duration::from_secs(30);
 const FAILURE_MAX_DELAY: Duration = Duration::from_secs(15 * 60);
 const MINIMUM_RATE_LIMIT_DELAY: Duration = Duration::from_secs(60);
 const MENU_CHECK_LIMIT: usize = 12;
+const MENU_THREAD_LIMIT: usize = 15;
 
 struct GitHubClientHandle(Arc<GitHubClient>);
 
@@ -54,7 +58,7 @@ pub fn set_github_client(client: Arc<GitHubClient>, cx: &mut App) {
     cx.set_global(GitHubClientHandle(client));
 }
 
-fn github_client(cx: &mut App) -> Arc<GitHubClient> {
+pub(crate) fn github_client(cx: &mut App) -> Arc<GitHubClient> {
     if let Some(handle) = cx.try_global::<GitHubClientHandle>() {
         return handle.0.clone();
     }
@@ -307,7 +311,12 @@ impl StatusKey {
 
 enum Outcome {
     NotGitHub,
-    Fetched(ResolvedBranch, Result<BranchPullRequests, GitHubError>),
+    Fetched {
+        branch: ResolvedBranch,
+        result: Result<BranchPullRequests, GitHubError>,
+        /// The open pull request's review threads.
+        review: Option<Result<evb_github::PullRequestReview, GitHubError>>,
+    },
 }
 
 fn failure_delay(error: &GitHubError, failures: u32, now: SystemTime) -> Duration {
@@ -339,6 +348,7 @@ fn success_delay(result: &BranchPullRequests) -> Duration {
 
 /// The status bar button for the current branch's pull request, like JetBrains' GitHub widget.
 pub struct PullRequestIndicator {
+    workspace: WeakEntity<Workspace>,
     git_store: Entity<GitStore>,
     key: Option<StatusKey>,
     pull_request: Option<PullRequest>,
@@ -368,6 +378,7 @@ impl PullRequestIndicator {
             }),
         ];
         let mut indicator = Self {
+            workspace: workspace.weak_handle(),
             git_store,
             key: None,
             pull_request: None,
@@ -422,7 +433,25 @@ impl PullRequestIndicator {
             let outcome = match resolve.await {
                 Some(branch) => {
                     let result = client.branch_pull_request(&branch.head).await;
-                    Outcome::Fetched(branch, result)
+                    let open = result.as_ref().ok().and_then(|result| {
+                        result
+                            .pull_request
+                            .as_ref()
+                            .filter(|pull_request| pull_request.state.is_open())
+                    });
+                    let review = match open {
+                        Some(pull_request) => Some(
+                            client
+                                .review_threads(&branch.head.target, pull_request.number)
+                                .await,
+                        ),
+                        None => None,
+                    };
+                    Outcome::Fetched {
+                        branch,
+                        result,
+                        review,
+                    }
                 }
                 None => Outcome::NotGitHub,
             };
@@ -446,13 +475,18 @@ impl PullRequestIndicator {
             return None;
         }
         cx.notify();
-        let (branch, result) = match outcome {
+        let (branch, result, review) = match outcome {
             Outcome::NotGitHub => {
                 self.pull_request = None;
                 self.error = None;
+                set_branch_review(key.work_directory.clone(), None, cx);
                 return None;
             }
-            Outcome::Fetched(branch, result) => (branch, result),
+            Outcome::Fetched {
+                branch,
+                result,
+                review,
+            } => (branch, result, review),
         };
         match result {
             Ok(result) => {
@@ -460,6 +494,23 @@ impl PullRequestIndicator {
                 self.error = None;
                 self.pull_request = result.pull_request.clone();
                 let delay = success_delay(&result);
+                match (review, &result.pull_request) {
+                    (Some(Ok(review)), Some(pull_request)) => set_branch_review(
+                        key.work_directory.clone(),
+                        Some(BranchReview {
+                            repository: branch.head.target.clone(),
+                            url: pull_request.url.clone(),
+                            review,
+                        }),
+                        cx,
+                    ),
+                    // Threads that failed to load keep showing as they were.
+                    (Some(Err(error)), _) => {
+                        log::warn!("could not read the pull request's review threads: {error}")
+                    }
+                    (None, _) => set_branch_review(key.work_directory.clone(), None, cx),
+                    (Some(Ok(_)), None) => {}
+                }
                 cx.default_global::<PullRequestCache>()
                     .0
                     .insert((key.work_directory.clone(), branch.local_branch), result);
@@ -481,6 +532,8 @@ impl PullRequestIndicator {
 
     fn build_menu(
         pull_request: PullRequest,
+        review: Option<(Arc<Path>, Arc<BranchReview>)>,
+        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<ContextMenu> {
@@ -517,6 +570,64 @@ impl PullRequestIndicator {
                         move |_, cx| cx.open_url(&url),
                     );
                 }
+            }
+            if let Some((work_directory, review)) = review.clone() {
+                let mut threads = review.review.threads.clone();
+                let unresolved = threads.iter().filter(|thread| !thread.is_resolved).count();
+                threads.sort_by_key(|thread| thread.is_resolved);
+                menu = menu.separator().header(if unresolved == 0 {
+                    format!("Review Threads ({})", threads.len())
+                } else {
+                    format!("Review Threads ({unresolved} unresolved)")
+                });
+                for thread in threads.into_iter().take(MENU_THREAD_LIMIT) {
+                    let summary = thread
+                        .comments
+                        .first()
+                        .map(|comment| {
+                            let line = comment.body.lines().next().unwrap_or_default();
+                            let line = line.chars().take(48).collect::<String>();
+                            format!("{}: {line}", comment.author)
+                        })
+                        .unwrap_or_default();
+                    let location = match thread.line {
+                        Some(line) => format!("{}:{line}", thread.path),
+                        None => format!("{} (outdated)", thread.path),
+                    };
+                    let (icon, color) = if thread.is_resolved {
+                        (IconName::Check, Color::Success)
+                    } else {
+                        (IconName::Chat, Color::Accent)
+                    };
+                    let workspace = workspace.clone();
+                    let work_directory = work_directory.clone();
+                    menu = menu.item(
+                        ui::ContextMenuEntry::new(format!("{location}  {summary}"))
+                            .icon(icon)
+                            .icon_color(color)
+                            .handler(move |window, cx| {
+                                if thread.line.is_some() {
+                                    crate::pull_request_review::open_thread(
+                                        workspace.clone(),
+                                        &work_directory,
+                                        &thread,
+                                        window,
+                                        cx,
+                                    );
+                                } else if let Some(url) = thread.url() {
+                                    cx.open_url(url);
+                                }
+                            }),
+                    );
+                }
+                menu = menu.entry("Submit Review…", None, move |window, cx| {
+                    crate::pull_request_review::submit_review(
+                        workspace.clone(),
+                        work_directory.clone(),
+                        window,
+                        cx,
+                    );
+                });
             }
             menu.separator()
                 .action("Refresh", RefreshPullRequestStatus.boxed_clone())
@@ -665,7 +776,22 @@ impl Render for PullRequestIndicator {
             })
             .anchor(Anchor::BottomLeft)
             .with_handle(self.menu_handle.clone())
-            .menu(move |window, cx| Some(Self::build_menu(pull_request.clone(), window, cx)))
+            .menu({
+                let workspace = self.workspace.clone();
+                let work_directory = self.key.as_ref().map(|key| key.work_directory.clone());
+                move |window, cx| {
+                    let review = work_directory.clone().and_then(|work_directory| {
+                        branch_review(&work_directory, cx).map(|review| (work_directory, review))
+                    });
+                    Some(Self::build_menu(
+                        pull_request.clone(),
+                        review,
+                        workspace.clone(),
+                        window,
+                        cx,
+                    ))
+                }
+            })
             .into_any_element()
     }
 }
@@ -1003,7 +1129,7 @@ impl Render for CreatePullRequestModal {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::commit_operations::tests::{
         commit_file, create_repository, init_test, open, run_git, wait_for,
@@ -1019,7 +1145,7 @@ mod tests {
     };
     use util::test::TempTree;
 
-    struct FixedToken;
+    pub(crate) struct FixedToken;
 
     impl evb_github::CredentialSource for FixedToken {
         fn token(&self, _host: &str) -> BoxFuture<'static, Result<String, GitHubError>> {
@@ -1029,7 +1155,7 @@ mod tests {
         fn invalidate(&self, _host: &str) {}
     }
 
-    fn json_response(status: u16, body: Value) -> Response<AsyncBody> {
+    pub(crate) fn json_response(status: u16, body: Value) -> Response<AsyncBody> {
         Response::builder()
             .status(status)
             .body(AsyncBody::from(body.to_string()))
@@ -1091,6 +1217,15 @@ mod tests {
                         ));
                     }
                     let query = body["query"].as_str().unwrap_or_default();
+                    if query.contains("ReviewThreads") {
+                        return Ok(json_response(
+                            200,
+                            json!({ "data": { "repository": { "pullRequest": {
+                                "id": "PR_12", "headRefOid": "abc",
+                                "reviewThreads": { "pageInfo": null, "nodes": [] }
+                            } } } }),
+                        ));
+                    }
                     if query.contains("PullRequestStatus") {
                         return Ok(json_response(
                             200,

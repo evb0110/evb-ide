@@ -443,6 +443,24 @@ mod capture {
         save(&mut cx, any_window, &output_dir, "15-pull-request-menu")?;
         cx.simulate_click(any_window, point(px(1000.), px(420.)), Default::default());
         settle(&mut cx, 3);
+        // The review thread under line 10 of the open file.
+        workspace
+            .update_in_window(any_window, &mut cx, |workspace, window, cx| {
+                workspace.close_panel::<git_ui::git_log_panel::GitLogPanel>(window, cx);
+            })
+            .log_err();
+        cx.dispatch_action(any_window, git::Blame);
+        settle(&mut cx, 5);
+        save(&mut cx, any_window, &output_dir, "17-review-threads")?;
+        right_click(&mut cx, any_window, point(px(525.), px(106.)));
+        save(&mut cx, any_window, &output_dir, "18-review-gutter-menu")?;
+        cx.simulate_click(any_window, point(px(1000.), px(600.)), Default::default());
+        settle(&mut cx, 3);
+        cx.simulate_click(any_window, point(px(PULL_REQUEST_X), px(889.)), Default::default());
+        settle(&mut cx, 5);
+        save(&mut cx, any_window, &output_dir, "19-pull-request-menu-threads")?;
+        cx.simulate_click(any_window, point(px(1000.), px(600.)), Default::default());
+        settle(&mut cx, 3);
         PULL_REQUEST_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
         cx.dispatch_action(any_window, zed_actions::git::CreatePullRequest);
         wait_real_time(&mut cx, Duration::from_secs(2));
@@ -479,7 +497,35 @@ mod capture {
             request.body_mut().read_to_string(&mut body).await?;
             let body: serde_json::Value = serde_json::from_str(&body)?;
             let query = body["query"].as_str().unwrap_or_default();
-            let data = if query.contains("PullRequestStatus") {
+            let data = if query.contains("ReviewThreads") {
+                let comment = |id: &str, author: &str, body: &str| json!({
+                    "id": id, "author": { "login": author }, "body": body,
+                    "createdAt": "2026-10-31T07:15:00Z",
+                    "url": "https://github.com/trailmap-app/trailmap/pull/128#discussion_r1"
+                });
+                json!({ "repository": { "pullRequest": {
+                    "id": "PR_128", "headRefOid": "abc",
+                    "reviewThreads": { "pageInfo": null, "nodes": [
+                        {
+                            "id": "T1", "isResolved": false, "isOutdated": false,
+                            "path": "server/api/trip.get.ts", "line": 10,
+                            "viewerCanReply": true, "viewerCanResolve": true, "viewerCanUnresolve": false,
+                            "comments": { "totalCount": 2, "nodes": [
+                                comment("C1", "rivera", "Should a trip shared with someone else be a 404 too? The client cannot tell it from a deleted one."),
+                                comment("C2", "alexchen", "Yes, on purpose: a 403 would confirm that the trip exists.")
+                            ] }
+                        },
+                        {
+                            "id": "T2", "isResolved": true, "isOutdated": false,
+                            "path": "server/api/trip.get.ts", "line": 17,
+                            "viewerCanReply": true, "viewerCanResolve": false, "viewerCanUnresolve": true,
+                            "comments": { "totalCount": 1, "nodes": [
+                                comment("C3", "rivera", "nosniff belongs with the other security headers.")
+                            ] }
+                        }
+                    ] }
+                } } })
+            } else if query.contains("PullRequestStatus") {
                 json!({ "repository": { "pullRequest": {
                     "mergeable": "MERGEABLE",
                     "reviewDecision": "APPROVED",

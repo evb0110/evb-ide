@@ -625,7 +625,7 @@ fn time_of_day_format() -> &'static [BorrowedFormatItem<'static>] {
     FORMAT.get_or_init(|| time::format_description::parse("[hour]:[minute]").unwrap_or_default())
 }
 
-fn format_timestamp(timestamp: i64) -> String {
+pub(crate) fn format_timestamp(timestamp: i64) -> String {
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     format_log_timestamp(timestamp, OffsetDateTime::now_utc(), local_offset)
 }

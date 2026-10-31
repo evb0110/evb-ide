@@ -615,6 +615,145 @@ impl GitHubClient {
         )
         .await
     }
+
+    /// The pull request's review threads with their first comments, page by page.
+    pub async fn review_threads(
+        &self,
+        repository: &RepositoryLocator,
+        number: u64,
+    ) -> Result<PullRequestReview, GitHubError> {
+        let mut review: Option<PullRequestReview> = None;
+        let mut after: Option<String> = None;
+        for _ in 0..REVIEW_THREAD_PAGES {
+            let data: ReviewQueryData = self
+                .graphql(
+                    &repository.host,
+                    REVIEW_THREADS_QUERY,
+                    json!({
+                        "owner": repository.owner,
+                        "name": repository.name,
+                        "number": number,
+                        "after": after,
+                    }),
+                )
+                .await?;
+            let pull_request = data
+                .repository
+                .and_then(|repository| repository.pull_request)
+                .ok_or_else(|| GitHubError::NotFound {
+                    host: normalize_host(&repository.host),
+                })?;
+            let page = pull_request.review_threads;
+            let review = review.get_or_insert_with(|| PullRequestReview {
+                pull_request_id: pull_request.id.clone(),
+                number,
+                head_sha: pull_request.head_ref_oid.clone(),
+                threads: Vec::new(),
+            });
+            review
+                .threads
+                .extend(page.nodes.into_iter().map(ReviewThreadNode::into_thread));
+            match page.page_info {
+                Some(PageInfo {
+                    has_next_page: true,
+                    end_cursor: Some(cursor),
+                }) => after = Some(cursor),
+                _ => break,
+            }
+        }
+        review.ok_or_else(|| GitHubError::NotFound {
+            host: normalize_host(&repository.host),
+        })
+    }
+
+    pub async fn reply_to_review_thread(
+        &self,
+        host: &str,
+        thread_id: &str,
+        body: &str,
+    ) -> Result<(), GitHubError> {
+        self.graphql::<Value>(
+            host,
+            r#"mutation ReplyToReviewThread($threadId: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } }
+}"#,
+            json!({ "threadId": thread_id, "body": body }),
+        )
+        .await
+        .map(drop)
+    }
+
+    pub async fn set_review_thread_resolved(
+        &self,
+        host: &str,
+        thread_id: &str,
+        resolved: bool,
+    ) -> Result<(), GitHubError> {
+        let query = if resolved {
+            "mutation ResolveReviewThread($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } } }"
+        } else {
+            "mutation UnresolveReviewThread($threadId: ID!) { unresolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } } }"
+        };
+        self.graphql::<Value>(host, query, json!({ "threadId": thread_id }))
+            .await
+            .map(drop)
+    }
+
+    /// Comments on a line of the pull request's head commit. GitHub accepts lines inside the
+    /// diff only.
+    pub async fn add_review_comment(
+        &self,
+        repository: &RepositoryLocator,
+        number: u64,
+        comment: &NewReviewComment,
+    ) -> Result<(), GitHubError> {
+        self.rest::<Value>(
+            &repository.host,
+            Method::POST,
+            &format!(
+                "repos/{}/{}/pulls/{number}/comments",
+                repository.owner, repository.name
+            ),
+            Some(json!({
+                "body": comment.body,
+                "commit_id": comment.commit_sha,
+                "path": comment.path,
+                "line": comment.line,
+                "side": "RIGHT",
+            })),
+        )
+        .await
+        .map(drop)
+    }
+
+    pub async fn submit_review(
+        &self,
+        repository: &RepositoryLocator,
+        number: u64,
+        verdict: ReviewVerdict,
+        body: &str,
+    ) -> Result<(), GitHubError> {
+        let event = match verdict {
+            ReviewVerdict::Comment => "COMMENT",
+            ReviewVerdict::Approve => "APPROVE",
+            ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+        };
+        let mut request = json!({ "event": event });
+        if !body.is_empty() {
+            request["body"] = Value::String(body.to_string());
+        }
+        self.rest::<Value>(
+            &repository.host,
+            Method::POST,
+            &format!(
+                "repos/{}/{}/pulls/{number}/reviews",
+                repository.owner, repository.name
+            ),
+            Some(request),
+        )
+        .await
+        .map(drop)
+    }
 }
 
 fn rest_error_messages(body: &[u8]) -> Vec<String> {
@@ -1086,6 +1225,198 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
     latest.into_iter().map(|(check, _)| check).collect()
 }
 
+/// Bounds one read: a hundred threads a page, comments limited per thread.
+const REVIEW_THREAD_PAGES: usize = 5;
+
+/// Only ten comments ride with each thread: a hundred threads times a hundred comments made
+/// GitHub charge a hundred points for one read.
+const REVIEW_THREADS_QUERY: &str = r#"
+query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+      headRefOid
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          viewerCanReply
+          viewerCanResolve
+          viewerCanUnresolve
+          comments(first: 10) {
+            totalCount
+            nodes { id author { login } body createdAt url }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewComment {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewThread {
+    pub id: String,
+    pub path: String,
+    /// The line on the head commit; `None` once the line left the diff.
+    pub line: Option<u32>,
+    pub is_resolved: bool,
+    pub is_outdated: bool,
+    pub can_reply: bool,
+    pub can_resolve: bool,
+    pub can_unresolve: bool,
+    pub comments: Vec<ReviewComment>,
+    /// All comments, including those past the ones read.
+    pub comment_count: usize,
+}
+
+impl ReviewThread {
+    pub fn url(&self) -> Option<&str> {
+        self.comments.first().map(|comment| comment.url.as_str())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestReview {
+    pub pull_request_id: String,
+    pub number: u64,
+    pub head_sha: Option<String>,
+    pub threads: Vec<ReviewThread>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewReviewComment {
+    pub commit_sha: String,
+    pub path: String,
+    pub line: u32,
+    pub body: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewVerdict {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+#[derive(Deserialize)]
+struct ReviewQueryData {
+    repository: Option<ReviewQueryRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewQueryRepository {
+    pull_request: Option<ReviewQueryPullRequest>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewQueryPullRequest {
+    id: String,
+    head_ref_oid: Option<String>,
+    review_threads: ReviewThreadPage,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadPage {
+    #[serde(default)]
+    page_info: Option<PageInfo>,
+    #[serde(default)]
+    nodes: Vec<ReviewThreadNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadNode {
+    id: String,
+    is_resolved: bool,
+    #[serde(default)]
+    is_outdated: bool,
+    path: String,
+    line: Option<u32>,
+    #[serde(default)]
+    viewer_can_reply: bool,
+    #[serde(default)]
+    viewer_can_resolve: bool,
+    #[serde(default)]
+    viewer_can_unresolve: bool,
+    comments: ReviewCommentPage,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCommentPage {
+    #[serde(default)]
+    total_count: usize,
+    #[serde(default)]
+    nodes: Vec<ReviewCommentNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCommentNode {
+    id: String,
+    author: Option<Login>,
+    body: String,
+    created_at: String,
+    url: String,
+}
+
+impl ReviewThreadNode {
+    fn into_thread(self) -> ReviewThread {
+        let comment_count = self.comments.total_count.max(self.comments.nodes.len());
+        ReviewThread {
+            id: self.id,
+            path: self.path,
+            line: self.line,
+            is_resolved: self.is_resolved,
+            is_outdated: self.is_outdated,
+            can_reply: self.viewer_can_reply,
+            can_resolve: self.viewer_can_resolve,
+            can_unresolve: self.viewer_can_unresolve,
+            comments: self
+                .comments
+                .nodes
+                .into_iter()
+                .map(|comment| ReviewComment {
+                    id: comment.id,
+                    // A deleted account has no author.
+                    author: comment
+                        .author
+                        .map(|author| author.login)
+                        .unwrap_or_else(|| "ghost".into()),
+                    body: comment.body,
+                    created_at: comment.created_at,
+                    url: comment.url,
+                })
+                .collect(),
+            comment_count,
+        }
+    }
+}
+
 /// `gh pr create --fill`: one commit gives the title and body, several give the branch name and
 /// a list of their subjects.
 pub fn fill_pull_request_text(branch: &str, commits: &[(String, String)]) -> (String, String) {
@@ -1531,6 +1862,142 @@ mod tests {
             Err(GitHubError::RateLimited { .. })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[gpui::test]
+    async fn reads_review_threads_across_pages(cx: &mut gpui::TestAppContext) {
+        let afters = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let http = FakeHttpClient::create({
+            let afters = afters.clone();
+            move |mut request| {
+                let afters = afters.clone();
+                async move {
+                    let mut body = String::new();
+                    request.body_mut().read_to_string(&mut body).await?;
+                    let body: Value = serde_json::from_str(&body)?;
+                    let after = body["variables"]["after"].clone();
+                    afters.lock().push(after.clone());
+                    let thread = |id: &str, line: Value, resolved: bool| {
+                        json!({
+                            "id": id,
+                            "isResolved": resolved,
+                            "isOutdated": line.is_null(),
+                            "path": "src/main.rs",
+                            "line": line,
+                            "viewerCanReply": true,
+                            "viewerCanResolve": !resolved,
+                            "viewerCanUnresolve": resolved,
+                            "comments": {
+                                "totalCount": 12,
+                                "nodes": [{ "id": format!("{id}-c"), "author": null, "body": "Why?", "createdAt": "2026-10-31T10:00:00Z", "url": format!("https://github.com/o/r/pull/7#discussion_{id}") }]
+                            }
+                        })
+                    };
+                    let (nodes, page_info) = if after.is_null() {
+                        (
+                            json!([thread("a", json!(3), false)]),
+                            json!({ "hasNextPage": true, "endCursor": "cursor-1" }),
+                        )
+                    } else {
+                        (
+                            json!([thread("b", Value::Null, true)]),
+                            json!({ "hasNextPage": false, "endCursor": null }),
+                        )
+                    };
+                    Ok(json_response(
+                        200,
+                        json!({ "data": { "repository": { "pullRequest": {
+                            "id": "PR_node",
+                            "headRefOid": "head",
+                            "reviewThreads": { "pageInfo": page_info, "nodes": nodes }
+                        } } } }),
+                    ))
+                }
+            }
+        });
+        let client = GitHubClient::new(http, Arc::new(FixedToken), cx.executor());
+        let review = client
+            .review_threads(&locator("o", "r"), 7)
+            .await
+            .unwrap();
+        assert_eq!(*afters.lock(), vec![Value::Null, json!("cursor-1")]);
+        assert_eq!(review.pull_request_id, "PR_node");
+        assert_eq!(review.head_sha.as_deref(), Some("head"));
+        assert_eq!(
+            review
+                .threads
+                .iter()
+                .map(|thread| (thread.id.as_str(), thread.line, thread.is_resolved, thread.comment_count))
+                .collect::<Vec<_>>(),
+            vec![("a", Some(3), false, 12), ("b", None, true, 12)]
+        );
+        assert_eq!(review.threads[0].comments[0].author, "ghost");
+        assert_eq!(
+            review.threads[0].url(),
+            Some("https://github.com/o/r/pull/7#discussion_a")
+        );
+    }
+
+    #[gpui::test]
+    async fn sends_review_writes(cx: &mut gpui::TestAppContext) {
+        let sent = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let http = FakeHttpClient::create({
+            let sent = sent.clone();
+            move |mut request| {
+                let sent = sent.clone();
+                async move {
+                    let mut body = String::new();
+                    request.body_mut().read_to_string(&mut body).await?;
+                    sent.lock()
+                        .push((request.uri().to_string(), serde_json::from_str(&body)?));
+                    Ok(json_response(200, json!({ "data": {} })))
+                }
+            }
+        });
+        let client = GitHubClient::new(http, Arc::new(FixedToken), cx.executor());
+        let repository = locator("o", "r");
+        client
+            .reply_to_review_thread("github.com", "T1", "Done")
+            .await
+            .unwrap();
+        client
+            .set_review_thread_resolved("github.com", "T1", true)
+            .await
+            .unwrap();
+        client
+            .add_review_comment(
+                &repository,
+                7,
+                &NewReviewComment {
+                    commit_sha: "head".into(),
+                    path: "src/main.rs".into(),
+                    line: 4,
+                    body: "Nit".into(),
+                },
+            )
+            .await
+            .unwrap();
+        client
+            .submit_review(&repository, 7, ReviewVerdict::RequestChanges, "")
+            .await
+            .unwrap();
+        let sent = sent.lock().clone();
+        assert_eq!(sent[0].1["variables"], json!({ "threadId": "T1", "body": "Done" }));
+        assert!(sent[1].1["query"].as_str().unwrap().contains("resolveReviewThread"));
+        assert_eq!(
+            sent[2],
+            (
+                "https://api.github.com/repos/o/r/pulls/7/comments".to_string(),
+                json!({ "body": "Nit", "commit_id": "head", "path": "src/main.rs", "line": 4, "side": "RIGHT" })
+            )
+        );
+        assert_eq!(
+            sent[3],
+            (
+                "https://api.github.com/repos/o/r/pulls/7/reviews".to_string(),
+                json!({ "event": "REQUEST_CHANGES" })
+            )
+        );
     }
 
     #[gpui::test]

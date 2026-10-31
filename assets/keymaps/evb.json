@@ -33,6 +33,14 @@
     },
   },
   {
+    // Enter adds a line in a review comment; cmd-enter sends it.
+    "context": "ReviewTextModal > Editor",
+    "bindings": {
+      "enter": "editor::Newline",
+      "cmd-enter": "menu::Confirm",
+    },
+  },
+  {
     // Enter adds a line in the description; cmd-enter creates the pull request.
     "context": "CreatePullRequestModal > Editor",
     "bindings": {

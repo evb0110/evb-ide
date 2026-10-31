@@ -54,6 +54,7 @@ mod git_runtime_diagnostics;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
+mod pull_request_review;
 pub mod pull_requests;
 pub(crate) mod remote_output;
 pub mod repository_selector;
@@ -108,6 +109,7 @@ pub fn init(cx: &mut App) {
 
     cx.observe_new(|editor: &mut Editor, _, cx| {
         conflict_view::register_editor(editor, editor.buffer().clone(), cx);
+        pull_request_review::register_editor(editor, cx);
     })
     .detach();
 

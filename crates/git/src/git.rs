@@ -150,6 +150,18 @@ actions!(
     ]
 );
 
+/// Comments on a line of the current file in the branch's GitHub pull request.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct AddPullRequestComment {
+    /// The zero-based row to comment on.
+    ///
+    /// Default: the row of the cursor.
+    #[serde(default)]
+    pub row: Option<u32>,
+}
+
 /// Renames a git branch.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = git)]

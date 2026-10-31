@@ -4539,6 +4539,9 @@ impl Editor {
 
         let (anchor, breakpoint) =
             breakpoint.unwrap_or_else(|| (anchor, Arc::new(Breakpoint::new_standard())));
+        let can_comment_on_pull_request =
+            window.is_action_available(&::git::AddPullRequestComment::default(), cx);
+        let comment_focus_handle = focus_handle.clone();
 
         ContextMenu::build(window, cx, |menu, _, _cx| {
             menu.on_blur_subscription(Subscription::new(|| {}))
@@ -4695,6 +4698,16 @@ impl Editor {
                         }
                     },
                 )
+                .when(can_comment_on_pull_request, |menu| {
+                        let focus_handle = comment_focus_handle;
+                        menu.entry("Add Pull Request Comment…", None, move |window, cx| {
+                            focus_handle.dispatch_action(
+                                &::git::AddPullRequestComment { row: Some(row) },
+                                window,
+                                cx,
+                            );
+                        })
+                    })
                 .separator()
                 .entry(set_bookmark_msg, Some(ToggleBookmark.boxed_clone()), {
                     let weak_editor = weak_editor.clone();
