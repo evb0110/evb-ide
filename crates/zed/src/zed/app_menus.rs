@@ -325,7 +325,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 ),
                 MenuItem::action("EVB IDE Repository", feedback::OpenZedRepo),
                 MenuItem::action(
-                    "Upstream Zed Documentation",
+                    "Upstream Editor Documentation",
                     super::OpenBrowser {
                         url: "https://zed.dev/docs".into(),
                     },

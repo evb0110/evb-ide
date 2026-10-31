@@ -927,7 +927,7 @@ impl EditPredictionButton {
                                     .child(
                                         Label::new(indoc!{
                                             "Help us improve our open dataset model by sharing data from open source repositories. \
-                                            Zed must detect a license file in your repo for this setting to take effect. \
+                                            EVB IDE must detect a license file in your repo for this setting to take effect. \
                                             Files with sensitive data and secrets are excluded by default."
                                         })
                                     )
@@ -981,7 +981,7 @@ impl EditPredictionButton {
                 .icon_color(Color::Muted)
                 .documentation_aside(DocumentationSide::Left, |_| {
                     Label::new(indoc!{"
-                        Open your settings to add sensitive paths for which Zed will never predict edits."}).into_any_element()
+                        Open your settings to add sensitive paths for which EVB IDE will never predict edits."}).into_any_element()
                 })
                 .handler(move |window, cx| {
                     telemetry::event!(

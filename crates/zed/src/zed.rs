@@ -68,7 +68,7 @@ use project::{
 use project_panel::ProjectPanel;
 use quick_action_bar::QuickActionBar;
 use recent_projects::open_remote_project;
-use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
+use release_channel::{AppCommitSha, ReleaseChannel};
 use rope::Rope;
 use search::project_search::ProjectSearchBar;
 use settings::{
@@ -1547,14 +1547,12 @@ fn open_about_window(cx: &mut App) {
         app_icon: Arc<Image>,
         message: SharedString,
         commit: Option<SharedString>,
-        full_version: SharedString,
     }
 
     impl AboutWindow {
         fn new(cx: &mut Context<Self>) -> Self {
             let release_channel = ReleaseChannel::global(cx);
             let release_channel_name = release_channel.display_name();
-            let full_version: SharedString = AppVersion::global(cx).to_string().into();
             let version = include_str!("../../../EVB_VERSION").trim();
 
             let debug = if cfg!(debug_assertions) {
@@ -1562,7 +1560,10 @@ fn open_about_window(cx: &mut App) {
             } else {
                 ""
             };
-            let message: SharedString = format!("{release_channel_name} {version} {debug}").into();
+            let message: SharedString = format!("{release_channel_name} {version} {debug}")
+                .trim_end()
+                .to_string()
+                .into();
             let commit = AppCommitSha::try_global(cx)
                 .map(|sha| sha.full())
                 .filter(|commit| !commit.is_empty())
@@ -1575,19 +1576,13 @@ fn open_about_window(cx: &mut App) {
                 app_icon: about_window_icon(),
                 message,
                 commit,
-                full_version,
             }
         }
 
         fn copy_details(&self, window: &mut Window, cx: &mut Context<Self>) {
             let content = match self.commit.as_ref() {
-                Some(commit) => {
-                    format!(
-                        "{}\nCommit: {}\nVersion: {}",
-                        self.message, commit, self.full_version
-                    )
-                }
-                None => format!("{}\nVersion: {}", self.message, self.full_version),
+                Some(commit) => format!("{}\nCommit: {}", self.message, commit),
+                None => self.message.to_string(),
             };
             cx.write_to_clipboard(ClipboardItem::new_string(content));
             window.remove_window();
@@ -1629,13 +1624,7 @@ fn open_about_window(cx: &mut App) {
                                         .size(LabelSize::XSmall),
                                 )
                                 .child(Label::new(commit).size(LabelSize::Small))
-                            })
-                            .child(
-                                Label::new("Upstream Zed version")
-                                    .color(Color::Muted)
-                                    .size(LabelSize::XSmall),
-                            )
-                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small)),
+                            }),
                     )
                     .child(
                         h_flex()

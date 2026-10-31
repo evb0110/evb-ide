@@ -551,7 +551,7 @@ fn run() -> Result<()> {
     if args.system_specs {
         let path = app.path();
         let msg = [
-            "The `--system-specs` argument is not supported in the Zed CLI, only on Zed binary.",
+            "The `--system-specs` argument is not supported in the EVB IDE CLI, only by the EVB IDE app.",
             "To retrieve the system specs on the command line, run the following command:",
             &format!("{} --system-specs", path.display()),
         ];
@@ -851,7 +851,7 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let blue = console::Style::new().blue();
     let items = [
         format!(
-            "Add to existing Zed window ({})",
+            "Add to existing EVB IDE window ({})",
             blue.apply_to("zed --existing")
         ),
         format!("Open a new window ({})", blue.apply_to("zed --classic")),
@@ -860,7 +860,7 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let prompt = format!(
         "Configure default behavior for {}\n{}",
         blue.apply_to("zed <path>"),
-        console::style("You can change this later in Zed settings"),
+        console::style("You can change this later in EVB IDE settings"),
     );
 
     let selection = dialoguer::Select::new()

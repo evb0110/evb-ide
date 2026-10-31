@@ -63,7 +63,7 @@ pub struct ProjectTerminalSettingsContent {
     /// }
     /// ```
     ///
-    /// Use `"..."` to add regexes without repeating Zed's defaults. In project
+    /// Use `"..."` to add regexes without repeating EVB IDE's defaults. In project
     /// settings, it extends the user or parent configuration value. Omit
     /// `"..."` to replace the inherited list. Set `[]` to clear it. Omitting this
     /// setting keeps the inherited list.

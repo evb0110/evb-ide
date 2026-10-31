@@ -135,7 +135,7 @@ pub struct EditPredictionSettingsContent {
     pub provider: Option<EditPredictionProvider>,
     /// Disable edit predictions for files matching these glob patterns.
     ///
-    /// Use `"..."` to add patterns without repeating Zed's defaults. In project
+    /// Use `"..."` to add patterns without repeating EVB IDE's defaults. In project
     /// settings, it extends the user or parent configuration value. Omit
     /// `"..."` to replace the inherited list.
     ///
@@ -634,7 +634,7 @@ pub struct LanguageSettingsContent {
     ///
     /// Default: auto
     pub formatter: Option<FormatterList>,
-    /// Zed's Prettier integration settings.
+    /// EVB IDE's Prettier integration settings.
     /// Allows to enable/disable formatting with Prettier
     /// and configure default Prettier, used when no project-level Prettier installation is found.
     ///
@@ -746,12 +746,12 @@ pub struct LanguageSettingsContent {
     /// Inlay hint related settings.
     pub inlay_hints: Option<InlayHintSettingsContent>,
     /// Whether to automatically type closing characters for you. For example,
-    /// when you type '(', Zed will automatically add a closing ')' at the correct position.
+    /// when you type '(', EVB IDE will automatically add a closing ')' at the correct position.
     ///
     /// Default: true
     pub use_autoclose: Option<bool>,
     /// Whether to automatically surround text with characters for you. For example,
-    /// when you select text and type '(', Zed will automatically surround text with ().
+    /// when you select text and type '(', EVB IDE will automatically surround text with ().
     ///
     /// Default: true
     pub use_auto_surround: Option<bool>,
@@ -1178,13 +1178,13 @@ impl AsRef<[Formatter]> for FormatterList {
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom)]
 #[serde(rename_all = "snake_case")]
 pub enum Formatter {
-    /// Format files using Zed's Prettier integration (if applicable),
+    /// Format files using EVB IDE's Prettier integration (if applicable),
     /// or falling back to formatting via language server.
     #[default]
     Auto,
     /// Do not format code.
     None,
-    /// Format code using Zed's Prettier integration.
+    /// Format code using EVB IDE's Prettier integration.
     Prettier,
     /// Format code using an external command.
     External {
@@ -1297,13 +1297,13 @@ pub struct LanguageTaskSettingsContent {
     /// Extra task variables to set for a particular language.
     pub variables: Option<HashMap<String, String>>,
     pub enabled: Option<bool>,
-    /// Use LSP tasks over Zed language extension ones.
+    /// Use LSP tasks over EVB IDE language extension ones.
     /// If no LSP tasks are returned due to error/timeout or regular execution,
-    /// Zed language extension tasks will be used instead.
+    /// EVB IDE language extension tasks will be used instead.
     ///
-    /// Other Zed tasks will still be shown:
-    /// * Zed task from either of the task config file
-    /// * Zed task from history (e.g. one-off task was spawned before)
+    /// Other EVB IDE tasks will still be shown:
+    /// * EVB IDE task from either of the task config file
+    /// * EVB IDE task from history (e.g. one-off task was spawned before)
     pub prefer_lsp: Option<bool>,
 }
 

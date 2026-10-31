@@ -177,7 +177,7 @@ impl NodeRuntime {
                     Box::new(UnavailableNodeRuntime {
                         error_message: format!(
                             "failure while downloading and/or installing Zed managed Node.js, \
-                            restart Zed to retry: {}",
+                            restart EVB IDE to retry: {}",
                             err
                         )
                         .into(),

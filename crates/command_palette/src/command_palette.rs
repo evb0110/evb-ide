@@ -865,6 +865,16 @@ impl PickerDelegate for CommandPaletteDelegate {
 }
 
 pub fn humanize_action_name(name: &str) -> String {
+    // Actions keep upstream's `zed` namespaces so keymaps stay compatible; the UI shows the
+    // application's own name instead.
+    let renamed = match name.split_once("::") {
+        Some(("zed", action)) => Some(format!("evb_ide::{action}")),
+        Some(("zed_predict_onboarding", action)) => {
+            Some(format!("edit_prediction_onboarding::{action}"))
+        }
+        _ => None,
+    };
+    let name = renamed.as_deref().unwrap_or(name);
     let chars = name.chars().collect::<Vec<_>>();
     let capacity = name.len() + chars.iter().filter(|c| c.is_uppercase()).count();
     let mut result = String::with_capacity(capacity);
@@ -954,6 +964,10 @@ mod tests {
 
     #[test]
     fn test_humanize_action_name() {
+        assert_eq!(
+            humanize_action_name("zed::OpenSettings"),
+            "evb ide: open settings"
+        );
         assert_eq!(
             humanize_action_name("editor::GoToDefinition"),
             "editor: go to definition"

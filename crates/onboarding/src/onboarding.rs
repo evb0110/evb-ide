@@ -352,7 +352,7 @@ impl Render for Onboarding {
                                                         .size(HeadlineSize::Small),
                                                 )
                                                 .child(
-                                                    Label::new("An independent fork of Zed")
+                                                    Label::new("A JetBrains-style IDE")
                                                         .color(Color::Muted)
                                                         .size(LabelSize::Small)
                                                         .italic(),

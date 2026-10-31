@@ -477,7 +477,7 @@ impl Render for WelcomePage {
                     .child(
                         h_flex().w_full().justify_center().mb_4().gap_4().child(
                             v_flex().child(Headline::new(welcome_label)).child(
-                                Label::new("An independent fork of Zed")
+                                Label::new("A JetBrains-style IDE")
                                     .size(LabelSize::Small)
                                     .color(Color::Muted)
                                     .italic(),

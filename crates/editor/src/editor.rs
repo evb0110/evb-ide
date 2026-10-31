@@ -3006,7 +3006,7 @@ impl Editor {
             cx,
             |e, _, _| match e.error_code() {
                 ErrorCode::RemoteUpgradeRequired => Some(format!(
-                "The remote instance of Zed does not support this yet. It must be upgraded to {}",
+                "The remote instance of EVB IDE does not support this yet. It must be upgraded to {}",
                 e.error_tag("required").unwrap_or("the latest version")
             )),
                 _ => None,
@@ -3092,7 +3092,7 @@ impl Editor {
         .detach_and_prompt_err("Failed to create buffer", window, cx, |e, _, _| {
             match e.error_code() {
                 ErrorCode::RemoteUpgradeRequired => Some(format!(
-                "The remote instance of Zed does not support this yet. It must be upgraded to {}",
+                "The remote instance of EVB IDE does not support this yet. It must be upgraded to {}",
                 e.error_tag("required").unwrap_or("the latest version")
             )),
                 _ => None,
@@ -4699,15 +4699,15 @@ impl Editor {
                     },
                 )
                 .when(can_comment_on_pull_request, |menu| {
-                        let focus_handle = comment_focus_handle;
-                        menu.entry("Add Pull Request Comment…", None, move |window, cx| {
-                            focus_handle.dispatch_action(
-                                &::git::AddPullRequestComment { row: Some(row) },
-                                window,
-                                cx,
-                            );
-                        })
+                    let focus_handle = comment_focus_handle;
+                    menu.entry("Add Pull Request Comment…", None, move |window, cx| {
+                        focus_handle.dispatch_action(
+                            &::git::AddPullRequestComment { row: Some(row) },
+                            window,
+                            cx,
+                        );
                     })
+                })
                 .separator()
                 .entry(set_bookmark_msg, Some(ToggleBookmark.boxed_clone()), {
                     let weak_editor = weak_editor.clone();
