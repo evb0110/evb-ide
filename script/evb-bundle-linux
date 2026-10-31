@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Builds the EVB IDE archive for Linux on the machine's architecture:
+#   target/evb-bundle/EVB-IDE-<version>-linux-<arch>.tar.gz
+# Based on upstream script/bundle-linux. Requires clang and LLD 12 or newer (set CC or LLD to
+# pick others), plus the libraries script/linux installs.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+[[ "$(uname -s)" == Linux ]] || { echo 'Run this on Linux.' >&2; exit 1; }
+if [[ -n "${RUSTFLAGS:-}" || -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    echo 'Unset RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS; the bundle sets its own linker flags.' >&2
+    exit 1
+fi
+
+version="$(tr -d '\n' < EVB_VERSION)"
+if [[ -f SOURCE_COMMIT ]]; then
+    commit_sha="$(tr -d '\n' < SOURCE_COMMIT)"
+else
+    commit_sha="$(git rev-parse HEAD)"
+fi
+case "$(uname -m)" in
+    x86_64) arch=x64 ;;
+    aarch64) arch=arm64 ;;
+    *) echo "Unsupported architecture $(uname -m)." >&2; exit 1 ;;
+esac
+export ZED_RELEASE_CHANNEL=stable
+export ZED_COMMIT_SHA="$commit_sha"
+export ZED_BUNDLE=true
+export RELEASE_VERSION="$version"
+
+echo "Building EVB IDE $version (${commit_sha:0:10}) for linux-$arch"
+script/generate-licenses
+# Release builds embed assets at compile time; Cargo does not notice newly added files.
+touch crates/assets/src/assets.rs crates/settings/src/settings.rs
+
+export CC="${CC:-$(command -v clang)}"
+lld="${LLD:-$("$CC" -print-prog-name=ld.lld)}"
+if [[ "$lld" != /* || ! -x "$lld" ]]; then
+    echo 'Bundling needs an absolute LLD path; set LLD (for example LLD=/usr/bin/ld.lld-18).' >&2
+    exit 1
+fi
+cargo --config .cargo/bundle-config.toml rustc --release --package zed --bin evb-ide -- \
+    -C linker="$CC" -C llvm-args=-addrsig -C link-arg=-fuse-ld=lld -C link-arg=--ld-path="$lld" \
+    -C link-arg=-Wl,--icf=safe
+cargo --config .cargo/bundle-config.toml build --release --package cli
+
+objcopy="$(command -v llvm-objcopy || true)"
+[[ -n "$objcopy" ]] || objcopy="$("$CC" -print-prog-name=llvm-objcopy)"
+[[ -x "$objcopy" ]] || { echo 'Bundling needs llvm-objcopy.' >&2; exit 1; }
+
+out_dir="target/evb-bundle"
+app_dir="$out_dir/evb-ide"
+rm -rf "$app_dir"
+mkdir -p "$app_dir/bin" "$app_dir/libexec" "$app_dir/lib" "$app_dir/licenses"
+"$objcopy" --strip-unneeded target/release/evb-ide "$app_dir/libexec/evb-ide-editor"
+"$objcopy" --strip-debug --discard-all target/release/cli "$app_dir/bin/evb-ide"
+
+# Bundle libraries newer distributions might lack, as upstream does, but never the C runtime,
+# ALSA or the GLib family: libraries the host loads at run time are built against its own.
+ldd target/release/evb-ide | cut -d' ' -f3 \
+    | grep -v '\<\(libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' \
+    | grep -v '\<\(libglib-2.0.so\|libgobject-2.0.so\|libgio-2.0.so\|libgmodule-2.0.so\|libpcre.so\|libpcre2-8.so\|libmount.so\|libblkid.so\|libselinux.so\|libffi.so\|libresolv.so\|libz.so\)' \
+    | grep '^/' | xargs -r cp -t "$app_dir/lib"
+
+icon_source="crates/zed/resources/evb/app-icon.png"
+for size in 512 1024; do
+    icon_dir="$app_dir/share/icons/hicolor/${size}x${size}/apps"
+    mkdir -p "$icon_dir"
+    if [[ "$size" == 1024 ]]; then
+        cp "$icon_source" "$icon_dir/evb-ide.png"
+    else
+        python3 - "$icon_source" "$icon_dir/evb-ide.png" "$size" <<'PY' || cp "$icon_source" "$icon_dir/evb-ide.png"
+import sys
+from PIL import Image
+Image.open(sys.argv[1]).resize((int(sys.argv[3]),) * 2, Image.LANCZOS).save(sys.argv[2])
+PY
+    fi
+done
+
+mkdir -p "$app_dir/share/applications"
+cat > "$app_dir/share/applications/dev.evb.EVB-IDE.desktop" <<DESKTOP
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=EVB IDE
+GenericName=Text Editor
+Comment=A JetBrains-style IDE built on Zed
+TryExec=evb-ide
+StartupNotify=true
+StartupWMClass=dev.evb.EVB-IDE
+Exec=evb-ide %U
+Icon=evb-ide
+Categories=Utility;TextEditor;Development;IDE;
+Keywords=evb;ide;editor;
+MimeType=text/plain;application/x-zerosize;
+Actions=NewWorkspace;
+
+[Desktop Action NewWorkspace]
+Exec=evb-ide --new %U
+Name=Open a new workspace
+DESKTOP
+
+cp LICENSE-GPL LICENSE-APACHE NOTICE.md assets/licenses.md NATIVE-SOURCES.md assets/WEBRTC-LICENSE.md "$app_dir/licenses/"
+cat > "$app_dir/licenses/SOURCE.txt" <<SOURCE
+EVB IDE $version, built from commit $commit_sha.
+Corresponding source, dependency sources, and build instructions:
+https://github.com/evb0110/evb-ide/releases/tag/v$version
+Source repository: https://github.com/evb0110/evb-ide
+License: GPL-3.0-or-later, with Apache-2.0 components where marked.
+SOURCE
+
+cat > "$app_dir/install.sh" <<'INSTALL'
+#!/bin/sh
+# Installs EVB IDE for the current user: the app in ~/.local/evb-ide, the evb-ide command in
+# ~/.local/bin, and a menu entry.
+set -eu
+here="$(cd "$(dirname "$0")" && pwd)"
+target="$HOME/.local/evb-ide"
+if [ "$here" != "$target" ]; then
+    rm -rf "$target"
+    mkdir -p "$HOME/.local"
+    cp -R "$here" "$target"
+fi
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
+ln -sf "$target/bin/evb-ide" "$HOME/.local/bin/evb-ide"
+for size in 512 1024; do
+    mkdir -p "$HOME/.local/share/icons/hicolor/${size}x${size}/apps"
+    cp "$target/share/icons/hicolor/${size}x${size}/apps/evb-ide.png" "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/"
+done
+sed "s|^TryExec=evb-ide|TryExec=$target/bin/evb-ide|; s|^Exec=evb-ide|Exec=$target/bin/evb-ide|" \
+    "$target/share/applications/dev.evb.EVB-IDE.desktop" > "$HOME/.local/share/applications/dev.evb.EVB-IDE.desktop"
+echo "EVB IDE is installed. Run evb-ide, or open it from the applications menu."
+INSTALL
+chmod +x "$app_dir/install.sh"
+
+archive="EVB-IDE-$version-linux-$arch.tar.gz"
+rm -f "$out_dir/$archive"
+tar -czf "$out_dir/$archive" -C "$out_dir" evb-ide
+echo "Assembled $out_dir/$archive"
