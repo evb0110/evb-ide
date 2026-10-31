@@ -1565,7 +1565,12 @@ pub(crate) mod tests {
             .unwrap_or_else(|error| panic!("git {arguments:?} failed: {error}"))
     }
 
-    pub(crate) fn commit_file(directory: &Path, file: &str, contents: &str, message: &str) -> String {
+    pub(crate) fn commit_file(
+        directory: &Path,
+        file: &str,
+        contents: &str,
+        message: &str,
+    ) -> String {
         std::fs::write(directory.join(file), contents).expect("writing a fixture file");
         run_git(directory, &["add", file]);
         run_git(directory, &["commit", "-q", "-m", message]);
@@ -1615,7 +1620,10 @@ pub(crate) mod tests {
 
     /// Pumps the app until `condition` returns a value; git runs in real processes.
     #[track_caller]
-    pub(crate) fn wait_for<T>(cx: &mut VisualTestContext, mut condition: impl FnMut(&App) -> Option<T>) -> T {
+    pub(crate) fn wait_for<T>(
+        cx: &mut VisualTestContext,
+        mut condition: impl FnMut(&App) -> Option<T>,
+    ) -> T {
         for _ in 0..3000 {
             cx.run_until_parked();
             if let Some(value) = cx.update(|_, cx| condition(cx)) {

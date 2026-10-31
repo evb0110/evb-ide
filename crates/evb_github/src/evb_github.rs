@@ -150,7 +150,10 @@ pub fn api_urls(host: &str) -> ApiUrls {
 
 /// The token from the environment, like `gh` reads it. `GH_ENTERPRISE_TOKEN` is only handed to
 /// `GH_HOST`, so a repository's remote URL cannot make it leak to another host.
-pub fn environment_token(host: &str, environment: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+pub fn environment_token(
+    host: &str,
+    environment: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
     let host = normalize_host(host);
     let names: &[&str] = if is_github_dot_com(&host) {
         &["GH_TOKEN", "GITHUB_TOKEN"]
@@ -275,11 +278,15 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 /// When a rate-limited host may be asked again: `retry-after`, else `x-ratelimit-reset`.
 pub fn retry_at(headers: &HeaderMap, now: SystemTime) -> Option<SystemTime> {
-    if let Some(seconds) = header(headers, "retry-after").and_then(|value| value.trim().parse::<u64>().ok())
+    if let Some(seconds) =
+        header(headers, "retry-after").and_then(|value| value.trim().parse::<u64>().ok())
     {
         return Some(now + Duration::from_secs(seconds));
     }
-    let reset = header(headers, "x-ratelimit-reset")?.trim().parse::<u64>().ok()?;
+    let reset = header(headers, "x-ratelimit-reset")?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
     let reset = SystemTime::UNIX_EPOCH + Duration::from_secs(reset);
     (reset > now).then_some(reset)
 }
@@ -411,9 +418,10 @@ impl GitHubClient {
         if is_rate_limited(answer.status, &answer.headers, graphql_errors, &body) {
             let now = SystemTime::now();
             let retry_at = retry_at(&answer.headers, now);
-            self.paused_until
-                .lock()
-                .insert(host.clone(), retry_at.unwrap_or(now + DEFAULT_RATE_LIMIT_PAUSE));
+            self.paused_until.lock().insert(
+                host.clone(),
+                retry_at.unwrap_or(now + DEFAULT_RATE_LIMIT_PAUSE),
+            );
             return Err(GitHubError::RateLimited { host, retry_at });
         }
         match answer.status {
@@ -494,11 +502,16 @@ impl GitHubClient {
             .as_ref()
             .is_some_and(|errors| !errors.is_empty());
         match (envelope.data, envelope.errors) {
-            (Some(_), Some(errors)) if errors_fail && errors_present => Err(GitHubError::Response {
-                host: normalize_host(host),
-                status: answer.status,
-                messages: errors.into_iter().filter_map(|error| error.message).collect(),
-            }),
+            (Some(_), Some(errors)) if errors_fail && errors_present => {
+                Err(GitHubError::Response {
+                    host: normalize_host(host),
+                    status: answer.status,
+                    messages: errors
+                        .into_iter()
+                        .filter_map(|error| error.message)
+                        .collect(),
+                })
+            }
             (Some(data), errors) => {
                 if let Some(errors) = errors.filter(|errors| !errors.is_empty()) {
                     log::warn!(
@@ -525,7 +538,10 @@ impl GitHubClient {
                 Err(GitHubError::Response {
                     host: normalize_host(host),
                     status: answer.status,
-                    messages: errors.into_iter().filter_map(|error| error.message).collect(),
+                    messages: errors
+                        .into_iter()
+                        .filter_map(|error| error.message)
+                        .collect(),
                 })
             }
         }
@@ -603,21 +619,25 @@ impl GitHubClient {
                     }),
                 )
                 .await?;
-            if let Some(status) = status.repository.and_then(|repository| repository.pull_request)
+            if let Some(status) = status
+                .repository
+                .and_then(|repository| repository.pull_request)
             {
                 pull_request.mergeable = match status.mergeable.as_deref() {
                     Some("MERGEABLE") => Mergeable::Mergeable,
                     Some("CONFLICTING") => Mergeable::Conflicting,
                     _ => Mergeable::Unknown,
                 };
-                pull_request.review = status.review_decision.as_deref().and_then(|decision| {
-                    match decision {
-                        "APPROVED" => Some(ReviewDecision::Approved),
-                        "CHANGES_REQUESTED" => Some(ReviewDecision::ChangesRequested),
-                        "REVIEW_REQUIRED" => Some(ReviewDecision::ReviewRequired),
-                        _ => None,
-                    }
-                });
+                pull_request.review =
+                    status
+                        .review_decision
+                        .as_deref()
+                        .and_then(|decision| match decision {
+                            "APPROVED" => Some(ReviewDecision::Approved),
+                            "CHANGES_REQUESTED" => Some(ReviewDecision::ChangesRequested),
+                            "REVIEW_REQUIRED" => Some(ReviewDecision::ReviewRequired),
+                            _ => None,
+                        });
                 let contexts = status
                     .commits
                     .nodes
@@ -1262,7 +1282,10 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
             required: node.is_required.unwrap_or(false),
             url: node.details_url.or(node.target_url),
         };
-        match latest.iter_mut().find(|(existing, _)| existing.name == check.name) {
+        match latest
+            .iter_mut()
+            .find(|(existing, _)| existing.name == check.name)
+        {
             Some((existing, existing_at)) => {
                 let required = existing.required || check.required;
                 let replaces = match (
@@ -1589,7 +1612,10 @@ mod tests {
         let both = environment(&[("GH_TOKEN", "gh"), ("GITHUB_TOKEN", "github")]);
         assert_eq!(environment_token("GitHub.com", &both), Some("gh".into()));
         let blank = environment(&[("GH_TOKEN", "  "), ("GITHUB_TOKEN", "github")]);
-        assert_eq!(environment_token("github.com", &blank), Some("github".into()));
+        assert_eq!(
+            environment_token("github.com", &blank),
+            Some("github".into())
+        );
         let enterprise = environment(&[
             ("GH_TOKEN", "gh"),
             ("GH_HOST", "git.example.com"),
@@ -1601,12 +1627,18 @@ mod tests {
         );
         // A remote naming another host must not receive the enterprise token.
         assert_eq!(environment_token("evil.example.com", &enterprise), None);
-        assert_eq!(environment_token("tenant.ghe.com", &both), Some("gh".into()));
+        assert_eq!(
+            environment_token("tenant.ghe.com", &both),
+            Some("gh".into())
+        );
     }
 
     #[test]
     fn api_urls_per_host() {
-        assert_eq!(api_urls("github.com").graphql, "https://api.github.com/graphql");
+        assert_eq!(
+            api_urls("github.com").graphql,
+            "https://api.github.com/graphql"
+        );
         assert_eq!(api_urls("acme.ghe.com").rest, "https://api.acme.ghe.com");
         assert_eq!(
             api_urls("git.example.com").graphql,
@@ -1627,7 +1659,12 @@ mod tests {
             None,
             "You have exceeded a secondary rate limit"
         ));
-        assert!(!is_rate_limited(403, &empty, None, "Resource not accessible"));
+        assert!(!is_rate_limited(
+            403,
+            &empty,
+            None,
+            "Resource not accessible"
+        ));
         let limited = [GraphQlError {
             kind: Some("RATE_LIMITED".into()),
             message: None,
@@ -1661,14 +1698,20 @@ mod tests {
             pull(3, "closed", false, "evb0110/evb-ide"),
             pull(2, "open", false, "evb0110/evb-ide"),
         ]);
-        assert_eq!(choose_pull_request(&list, &branch).map(|pull| pull.number), Some(2));
+        assert_eq!(
+            choose_pull_request(&list, &branch).map(|pull| pull.number),
+            Some(2)
+        );
 
         let finished = pulls(vec![
             pull(6, "closed", true, "evb0110/evb-ide"),
             pull(5, "closed", false, "evb0110/evb-ide"),
         ]);
         let chosen = choose_pull_request(&finished, &branch).unwrap();
-        assert_eq!((chosen.number, chosen.state()), (6, PullRequestState::Merged));
+        assert_eq!(
+            (chosen.number, chosen.state()),
+            (6, PullRequestState::Merged)
+        );
 
         // One organization can own a fork and its parent: `owner:branch` matches both, so the
         // head repository decides.
@@ -1685,7 +1728,10 @@ mod tests {
             choose_pull_request(&same_owner, &fork_branch).map(|pull| pull.number),
             Some(9)
         );
-        assert_eq!(query_value("contributor:feature/a b"), "contributor:feature%2Fa%20b");
+        assert_eq!(
+            query_value("contributor:feature/a b"),
+            "contributor:feature%2Fa%20b"
+        );
     }
 
     fn check(value: Value) -> CheckNode {
@@ -1695,11 +1741,21 @@ mod tests {
     #[test]
     fn collapses_and_summarizes_checks() {
         let checks = collapse_checks(vec![
-            check(json!({ "name": "test", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-31T09:00:00Z" })),
-            check(json!({ "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": "2026-10-31T10:00:00Z" })),
-            check(json!({ "name": "lint", "status": "IN_PROGRESS", "conclusion": null, "isRequired": true })),
-            check(json!({ "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": "2026-10-31T11:00:00Z" })),
-            check(json!({ "context": "ci/legacy", "state": "SUCCESS", "targetUrl": "https://ci.example.com/1" })),
+            check(
+                json!({ "name": "test", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-31T09:00:00Z" }),
+            ),
+            check(
+                json!({ "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": "2026-10-31T10:00:00Z" }),
+            ),
+            check(
+                json!({ "name": "lint", "status": "IN_PROGRESS", "conclusion": null, "isRequired": true }),
+            ),
+            check(
+                json!({ "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": "2026-10-31T11:00:00Z" }),
+            ),
+            check(
+                json!({ "context": "ci/legacy", "state": "SUCCESS", "targetUrl": "https://ci.example.com/1" }),
+            ),
             check(json!({ "name": "  " })),
         ]);
         assert_eq!(
@@ -1743,8 +1799,14 @@ mod tests {
             required,
             url: None,
         };
-        assert_eq!(pull_request(checks).checks_summary(), ChecksSummary::Pending);
-        assert_eq!(pull_request(Vec::new()).checks_summary(), ChecksSummary::None);
+        assert_eq!(
+            pull_request(checks).checks_summary(),
+            ChecksSummary::Pending
+        );
+        assert_eq!(
+            pull_request(Vec::new()).checks_summary(),
+            ChecksSummary::None
+        );
         // Only required checks gate passing; an advisory one still running does not.
         assert_eq!(
             pull_request(vec![
@@ -1985,10 +2047,7 @@ mod tests {
             }
         });
         let client = GitHubClient::new(http, Arc::new(FixedToken), cx.executor());
-        let review = client
-            .review_threads(&locator("o", "r"), 7)
-            .await
-            .unwrap();
+        let review = client.review_threads(&locator("o", "r"), 7).await.unwrap();
         assert_eq!(*afters.lock(), vec![Value::Null, json!("cursor-1")]);
         assert_eq!(review.pull_request_id, "PR_node");
         assert_eq!(review.head_sha.as_deref(), Some("head"));
@@ -2004,7 +2063,10 @@ mod tests {
                     thread.comment_count
                 ))
                 .collect::<Vec<_>>(),
-            vec![("a", Some(3), true, false, 12), ("b", None, false, true, 12)]
+            vec![
+                ("a", Some(3), true, false, 12),
+                ("b", None, false, true, 12)
+            ]
         );
         assert_eq!(review.threads[0].comments[0].author, "ghost");
         assert_eq!(
@@ -2078,8 +2140,16 @@ mod tests {
             .await
             .unwrap();
         let sent = sent.lock().clone();
-        assert_eq!(sent[0].1["variables"], json!({ "threadId": "T1", "body": "Done" }));
-        assert!(sent[1].1["query"].as_str().unwrap().contains("resolveReviewThread"));
+        assert_eq!(
+            sent[0].1["variables"],
+            json!({ "threadId": "T1", "body": "Done" })
+        );
+        assert!(
+            sent[1].1["query"]
+                .as_str()
+                .unwrap()
+                .contains("resolveReviewThread")
+        );
         assert_eq!(
             sent[3],
             (
@@ -2117,14 +2187,14 @@ mod tests {
         let client = GitHubClient::new(http, Arc::new(FixedToken), cx.executor());
         let created = client
             .create_pull_request(&NewPullRequest {
-            head: BranchHead {
-                target: locator("evb0110", "evb-ide"),
-                head: locator("contributor", "evb-ide"),
-                branch: "feature".into(),
-            },
-            base: "main".into(),
-            title: "Title".into(),
-            body: "Body".into(),
+                head: BranchHead {
+                    target: locator("evb0110", "evb-ide"),
+                    head: locator("contributor", "evb-ide"),
+                    branch: "feature".into(),
+                },
+                base: "main".into(),
+                title: "Title".into(),
+                body: "Body".into(),
                 draft: true,
             })
             .await

@@ -233,14 +233,15 @@ pub(crate) fn register_editor(editor: &mut Editor, cx: &mut Context<Editor>) {
         subscriptions.push(cx.subscribe(
             &git_store,
             |editor, _, event: &project::git_store::GitStoreEvent, cx| {
-                if matches!(event, project::git_store::GitStoreEvent::RepositoryUpdated(..))
-                    && editor.addon::<ReviewAddon>().is_some_and(|addon| {
-                        addon
-                            .head_text
-                            .as_ref()
-                            .is_some_and(|head| head.text.is_none())
-                    })
-                {
+                if matches!(
+                    event,
+                    project::git_store::GitStoreEvent::RepositoryUpdated(..)
+                ) && editor.addon::<ReviewAddon>().is_some_and(|addon| {
+                    addon
+                        .head_text
+                        .as_ref()
+                        .is_some_and(|head| head.text.is_none())
+                }) {
                     refresh_blocks(editor, false, cx);
                 }
             },
@@ -685,7 +686,9 @@ fn run_write(
     if !is_current(review, cx) {
         let error = stale_review_error(review);
         window
-            .spawn(cx, async move |cx| show_error(&workspace, error.to_string(), cx))
+            .spawn(cx, async move |cx| {
+                show_error(&workspace, error.to_string(), cx)
+            })
             .detach();
         return false;
     }
@@ -744,7 +747,11 @@ fn reply(
                 run_write(
                     workspace.clone(),
                     &review,
-                    async move { client.reply_to_review_thread(&host, &thread_id, &body).await },
+                    async move {
+                        client
+                            .reply_to_review_thread(&host, &thread_id, &body)
+                            .await
+                    },
                     window,
                     cx,
                 )
@@ -822,7 +829,9 @@ fn add_comment(editor: WeakEntity<Editor>, row: Option<u32>, window: &mut Window
                     let error = stale_review_error(&review);
                     let workspace = workspace.clone();
                     window
-                        .spawn(cx, async move |cx| show_error(&workspace, error.to_string(), cx))
+                        .spawn(cx, async move |cx| {
+                            show_error(&workspace, error.to_string(), cx)
+                        })
                         .detach();
                     return false;
                 }
@@ -1108,9 +1117,9 @@ impl Render for ReviewTextModal {
                                     KeyBinding::for_action_in(&Confirm, &focus_handle, cx),
                                 )
                             })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.run(index, window, cx)
-                            }))
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| this.run(index, window, cx)),
+                            )
                     })),
             )
     }
@@ -1146,7 +1155,12 @@ mod tests {
         create_repository(root);
         run_git(
             root,
-            &["remote", "add", "origin", "https://github.com/evb0110/evb-ide.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/evb0110/evb-ide.git",
+            ],
         );
         std::fs::write(root.join("e.txt"), "one\ntwo\nthree\n").expect("writing a fixture file");
         run_git(root, &["add", "e.txt"]);
@@ -1192,11 +1206,13 @@ mod tests {
                         return Ok(json_response(201, json!({ "id": 1 })));
                     }
                     let query = body["query"].as_str().unwrap_or_default().to_string();
-                    let comment = |id: &str, body: &str| json!({
-                        "id": id, "author": { "login": "reviewer" }, "body": body,
-                        "createdAt": "2026-10-31T10:00:00Z",
-                        "url": format!("https://github.com/evb0110/evb-ide/pull/12#discussion_{id}")
-                    });
+                    let comment = |id: &str, body: &str| {
+                        json!({
+                            "id": id, "author": { "login": "reviewer" }, "body": body,
+                            "createdAt": "2026-10-31T10:00:00Z",
+                            "url": format!("https://github.com/evb0110/evb-ide/pull/12#discussion_{id}")
+                        })
+                    };
                     let data = if query.contains("PullRequestStatus") {
                         json!({ "repository": { "pullRequest": {
                             "mergeable": "MERGEABLE", "reviewDecision": null, "commits": { "nodes": [] }
@@ -1264,7 +1280,10 @@ mod tests {
             (addon.blocks.len() == 1).then(|| addon.shown.clone())
         });
         assert_eq!(
-            shown.iter().map(|(thread, row)| (thread.id.as_str(), *row)).collect::<Vec<_>>(),
+            shown
+                .iter()
+                .map(|(thread, row)| (thread.id.as_str(), *row))
+                .collect::<Vec<_>>(),
             vec![("T1", 1)]
         );
 
@@ -1301,18 +1320,28 @@ mod tests {
         comment_on(0, &mut cx);
         cx.run_until_parked();
         assert!(
-            cx.update(|_, cx| workspace.read(cx).active_modal::<ReviewTextModal>(cx)).is_none(),
+            cx.update(|_, cx| workspace.read(cx).active_modal::<ReviewTextModal>(cx))
+                .is_none(),
             "the local line is not in the pull request"
         );
 
         comment_on(2, &mut cx);
-        let modal = wait_for(&mut cx, |cx| workspace.read(cx).active_modal::<ReviewTextModal>(cx));
+        let modal = wait_for(&mut cx, |cx| {
+            workspace.read(cx).active_modal::<ReviewTextModal>(cx)
+        });
         modal.update_in(&mut cx, |modal, window, cx| {
-            modal.editor.update(cx, |editor, cx| editor.set_text("Nit", window, cx));
+            modal
+                .editor
+                .update(cx, |editor, cx| editor.set_text("Nit", window, cx));
             modal.confirm(&Confirm, window, cx);
         });
         let comment = wait_for(&mut cx, |_| {
-            writes.lock().expect("reading writes").iter().find(|(uri, _)| uri.ends_with("/comments")).cloned()
+            writes
+                .lock()
+                .expect("reading writes")
+                .iter()
+                .find(|(uri, _)| uri.ends_with("/comments"))
+                .cloned()
         });
         assert_eq!(
             comment,
@@ -1322,11 +1351,17 @@ mod tests {
             )
         );
 
-        let review = cx.update(|_, cx| branch_review(root, cx)).expect("a review");
+        let review = cx
+            .update(|_, cx| branch_review(root, cx))
+            .expect("a review");
         cx.update(|window, cx| reply(&editor.downgrade(), &shown[0].0, &review, window, cx));
-        let modal = wait_for(&mut cx, |cx| workspace.read(cx).active_modal::<ReviewTextModal>(cx));
+        let modal = wait_for(&mut cx, |cx| {
+            workspace.read(cx).active_modal::<ReviewTextModal>(cx)
+        });
         modal.update_in(&mut cx, |modal, window, cx| {
-            modal.editor.update(cx, |editor, cx| editor.set_text("Because three", window, cx));
+            modal.editor.update(cx, |editor, cx| {
+                editor.set_text("Because three", window, cx)
+            });
             modal.confirm(&Confirm, window, cx);
         });
         let reply = wait_for(&mut cx, |_| {
@@ -1334,10 +1369,17 @@ mod tests {
                 .lock()
                 .expect("reading writes")
                 .iter()
-                .find(|(_, body)| body["query"].as_str().is_some_and(|query| query.contains("ReplyToReviewThread")))
+                .find(|(_, body)| {
+                    body["query"]
+                        .as_str()
+                        .is_some_and(|query| query.contains("ReplyToReviewThread"))
+                })
                 .cloned()
         });
-        assert_eq!(reply.1["variables"], json!({ "threadId": "T1", "body": "Because three" }));
+        assert_eq!(
+            reply.1["variables"],
+            json!({ "threadId": "T1", "body": "Because three" })
+        );
     }
 
     fn thread(bodies: &[&str], count: usize) -> ReviewThread {
@@ -1406,11 +1448,15 @@ mod tests {
     fn line_map_follows_local_changes() {
         let map = LineMap::new("a\nb\nc\nd\n", "new\na\nb\nchanged\nd");
         assert_eq!(
-            (0..4).map(|line| map.head_to_buffer(line)).collect::<Vec<_>>(),
+            (0..4)
+                .map(|line| map.head_to_buffer(line))
+                .collect::<Vec<_>>(),
             vec![Some(1), Some(2), None, Some(4)]
         );
         assert_eq!(
-            (0..5).map(|line| map.buffer_to_head(line)).collect::<Vec<_>>(),
+            (0..5)
+                .map(|line| map.buffer_to_head(line))
+                .collect::<Vec<_>>(),
             vec![None, Some(0), Some(1), None, Some(3)]
         );
     }
@@ -1420,7 +1466,10 @@ mod tests {
         assert_eq!(thread_height(&thread(&["Short"], 1), false), 2);
         assert_eq!(thread_height(&thread(&["Short"], 1), true), 5);
         let long = "x".repeat(CARD_LINE_CHARACTERS * 2 + 1);
-        assert_eq!(thread_height(&thread(&["One\nTwo", &long], 5), true), 3 + 3 + 4 + 1);
+        assert_eq!(
+            thread_height(&thread(&["One\nTwo", &long], 5), true),
+            3 + 3 + 4 + 1
+        );
         let many = vec!["line"; 40];
         assert_eq!(thread_height(&thread(&many, 40), true), 30);
     }

@@ -10,8 +10,9 @@ use evb_github::{
 };
 use git::{GitHostingProviderRegistry, parse_git_remote_url, repository::UpstreamTracking};
 use gpui::{
-    Action as _, Anchor, App, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity, EventEmitter,
-    FocusHandle, Focusable, Global, SharedString, Subscription, Task, WeakEntity, Window, actions,
+    Action as _, Anchor, App, AsyncWindowContext, ClipboardItem, Context, DismissEvent, Entity,
+    EventEmitter, FocusHandle, Focusable, Global, SharedString, Subscription, Task, WeakEntity,
+    Window, actions,
 };
 use menu::{Cancel, Confirm};
 use notifications::status_toast::StatusToast;
@@ -259,7 +260,12 @@ fn resolve_from_remotes(
     let head = match push
         .remote
         .as_deref()
-        .or_else(|| remotes.iter().any(|remote| remote.name == "origin").then_some("origin"))
+        .or_else(|| {
+            remotes
+                .iter()
+                .any(|remote| remote.name == "origin")
+                .then_some("origin")
+        })
         .and_then(|name| remotes.iter().find(|remote| remote.name == name))
         .and_then(|remote| remote.url.as_deref())
     {
@@ -814,41 +820,35 @@ impl Render for PullRequestIndicator {
             .is_open()
             .then(|| summary_icon(pull_request.checks_summary()))
             .flatten();
-        let title: SharedString =
-            format!("#{} {}", pull_request.number, pull_request.title).into();
+        let title: SharedString = format!("#{} {}", pull_request.number, pull_request.title).into();
         let details: SharedString = describe(&pull_request).into();
-        let trigger = ButtonLike::new("pull-request-indicator")
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        Icon::new(IconName::PullRequest)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
+        let trigger = ButtonLike::new("pull-request-indicator").child(
+            h_flex()
+                .gap_1()
+                .child(
+                    Icon::new(IconName::PullRequest)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Label::new(format!("#{}", pull_request.number))
+                        .size(LabelSize::Small)
+                        .color(label_color),
+                )
+                .when_some(state_label, |row, state| {
+                    row.child(Label::new(state).size(LabelSize::Small).color(Color::Muted))
+                })
+                .when_some(checks, |row, (icon, color)| {
+                    row.child(Icon::new(icon).size(IconSize::XSmall).color(color))
+                })
+                .when(pull_request.mergeable == Mergeable::Conflicting, |row| {
+                    row.child(
+                        Icon::new(IconName::Warning)
+                            .size(IconSize::XSmall)
+                            .color(Color::Warning),
                     )
-                    .child(
-                        Label::new(format!("#{}", pull_request.number))
-                            .size(LabelSize::Small)
-                            .color(label_color),
-                    )
-                    .when_some(state_label, |row, state| {
-                        row.child(
-                            Label::new(state)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
-                    })
-                    .when_some(checks, |row, (icon, color)| {
-                        row.child(Icon::new(icon).size(IconSize::XSmall).color(color))
-                    })
-                    .when(pull_request.mergeable == Mergeable::Conflicting, |row| {
-                        row.child(
-                            Icon::new(IconName::Warning)
-                                .size(IconSize::XSmall)
-                                .color(Color::Warning),
-                        )
-                    }),
-            );
+                }),
+        );
         PopoverMenu::new("pull-request-menu")
             .trigger_with_tooltip(trigger, move |_, cx| {
                 if details.is_empty() {
@@ -966,7 +966,10 @@ pub(crate) fn create_pull_request(
         {
             show_toast(
                 &workspace,
-                format!("Pull request #{} is already open for this branch", open.number),
+                format!(
+                    "Pull request #{} is already open for this branch",
+                    open.number
+                ),
                 Some(open.url.clone()),
                 cx,
             );
@@ -1186,9 +1189,7 @@ impl Render for CreatePullRequestModal {
                         h_flex()
                             .gap_1p5()
                             .child(Icon::new(IconName::PullRequest).size(IconSize::XSmall))
-                            .child(
-                                Headline::new("Create Pull Request").size(HeadlineSize::XSmall),
-                            ),
+                            .child(Headline::new("Create Pull Request").size(HeadlineSize::XSmall)),
                     )
                     .child(
                         Label::new(format!(
@@ -1221,9 +1222,9 @@ impl Render for CreatePullRequestModal {
                     .child(
                         Button::new("create-draft-pull-request", "Create Draft")
                             .disabled(creating)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.create(true, window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.create(true, window, cx)),
+                            ),
                     )
                     .child(
                         Button::new("create-pull-request", "Create Pull Request")
@@ -1288,7 +1289,12 @@ pub(crate) mod tests {
         let branch = "evb/pull-request-status";
         run_git(
             root,
-            &["remote", "add", "origin", "https://github.com/evb0110/evb-ide.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/evb0110/evb-ide.git",
+            ],
         );
         run_git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         run_git(root, &["switch", "-q", "-c", branch]);
@@ -1298,9 +1304,16 @@ pub(crate) mod tests {
         run_git(root, &["commit", "-q", "-m", "Add E", "-m", "Because E."]);
         run_git(
             root,
-            &["update-ref", &format!("refs/remotes/origin/{branch}"), "HEAD"],
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{branch}"),
+                "HEAD",
+            ],
         );
-        run_git(root, &["config", &format!("branch.{branch}.remote"), "origin"]);
+        run_git(
+            root,
+            &["config", &format!("branch.{branch}.remote"), "origin"],
+        );
         run_git(
             root,
             &[
@@ -1332,7 +1345,10 @@ pub(crate) mod tests {
                     }
                     if uri.contains("/pulls?") {
                         // The exact head: the branch on its push remote's owner.
-                        assert!(uri.ends_with("&head=evb0110:evb%2Fpull-request-status"), "{uri}");
+                        assert!(
+                            uri.ends_with("&head=evb0110:evb%2Fpull-request-status"),
+                            "{uri}"
+                        );
                         return Ok(json_response(
                             200,
                             if has_pull_request {
@@ -1352,7 +1368,10 @@ pub(crate) mod tests {
                         ));
                     }
                     if uri.ends_with("/pulls") {
-                        created.lock().expect("recording a request").push((uri, body));
+                        created
+                            .lock()
+                            .expect("recording a request")
+                            .push((uri, body));
                         return Ok(json_response(
                             201,
                             json!({ "number": 13, "html_url": "https://github.com/evb0110/evb-ide/pull/13" }),
@@ -1415,7 +1434,9 @@ pub(crate) mod tests {
 
         has_pull_request.store(false, Ordering::SeqCst);
         cx.update(|window, cx| {
-            workspace.update(cx, |workspace, cx| create_pull_request(workspace, None, window, cx))
+            workspace.update(cx, |workspace, cx| {
+                create_pull_request(workspace, None, window, cx)
+            })
         });
         let modal = wait_for(&mut cx, |cx| {
             workspace
@@ -1435,10 +1456,14 @@ pub(crate) mod tests {
             ]
         );
         modal.update_in(&mut cx, |modal, window, cx| {
-            modal.title.update(cx, |title, cx| title.set_text("Show the pull request", window, cx));
+            modal.title.update(cx, |title, cx| {
+                title.set_text("Show the pull request", window, cx)
+            });
             modal.create(true, window, cx);
         });
-        let request = wait_for(&mut cx, |_| created.lock().expect("reading requests").first().cloned());
+        let request = wait_for(&mut cx, |_| {
+            created.lock().expect("reading requests").first().cloned()
+        });
         assert_eq!(
             request,
             (
@@ -1464,9 +1489,8 @@ pub(crate) mod tests {
 
     fn registry() -> Arc<GitHostingProviderRegistry> {
         let registry = GitHostingProviderRegistry::new();
-        registry.register_hosting_provider(Arc::new(
-            git_hosting_providers::Github::public_instance(),
-        ));
+        registry
+            .register_hosting_provider(Arc::new(git_hosting_providers::Github::public_instance()));
         Arc::new(registry)
     }
 
@@ -1564,8 +1588,7 @@ pub(crate) mod tests {
             ..remote("origin", "git@github.com:me/project.git")
         }];
         let resolved =
-            resolve_from_remotes(&by_name, &registry, "feature".into(), &push(None, None))
-                .unwrap();
+            resolve_from_remotes(&by_name, &registry, "feature".into(), &push(None, None)).unwrap();
         assert_eq!(
             resolved.head.target,
             RepositoryLocator {

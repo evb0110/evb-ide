@@ -143,22 +143,18 @@ const { pending, refresh } = await useFetch('/api/trip', { query: { id: 'alps' }
     git(&["config", "user.name", "Alex Chen"])?;
     git(&["config", "user.email", "alex@example.com"])?;
     git(&["add", "."])?;
-    git(&[
-        "commit",
-        "-q",
-        "-m",
-        "feat: add shareable trip links",
-    ])?;
+    git(&["commit", "-q", "-m", "feat: add shareable trip links"])?;
     git(&["checkout", "-q", "-b", "fix/map-tiles"])?;
-    std::fs::write(path.join("README.md"), "# Trailmap\n\nPlan trips on shared maps.\n\nCI caches the tile fixtures.\n")?;
-    git(&[
-        "commit",
-        "-q",
-        "-am",
-        "ci: cache the map tile fixtures",
-    ])?;
+    std::fs::write(
+        path.join("README.md"),
+        "# Trailmap\n\nPlan trips on shared maps.\n\nCI caches the tile fixtures.\n",
+    )?;
+    git(&["commit", "-q", "-am", "ci: cache the map tile fixtures"])?;
     git(&["checkout", "-q", "master"])?;
-    std::fs::write(path.join("README.md"), "# Trailmap\n\nPlan trips on maps shared with friends.\n")?;
+    std::fs::write(
+        path.join("README.md"),
+        "# Trailmap\n\nPlan trips on maps shared with friends.\n",
+    )?;
     git(&[
         "commit",
         "-q",
@@ -178,7 +174,11 @@ const { pending, refresh } = await useFetch('/api/trip', { query: { id: 'alps' }
     git(&["branch", "feature/trip-export", "HEAD~1"])?;
     git(&["branch", "feature/offline-maps", "HEAD~2"])?;
     git(&["update-ref", "refs/remotes/origin/master", "HEAD~1"])?;
-    git(&["update-ref", "refs/remotes/origin/chore/deps-vitest", "HEAD~2"])?;
+    git(&[
+        "update-ref",
+        "refs/remotes/origin/chore/deps-vitest",
+        "HEAD~2",
+    ])?;
     // A GitHub remote that master tracks, for the pull request indicator.
     git(&[
         "remote",
@@ -339,12 +339,7 @@ mod capture {
                 });
             })
             .log_err();
-        open_file(
-            &workspace,
-            any_window,
-            "server/api/trip.get.ts",
-            &mut cx,
-        )?;
+        open_file(&workspace, any_window, "server/api/trip.get.ts", &mut cx)?;
         settle(&mut cx, 20);
         if let Ok(film_dir) = std::env::var("EVB_FILM_DIR") {
             return film(&workspace, any_window, &mut cx, Path::new(&film_dir));
@@ -429,12 +424,7 @@ mod capture {
         settle(&mut cx, 5);
         save(&mut cx, any_window, &output_dir, "09-vue-light")?;
 
-        open_file(
-            &workspace,
-            any_window,
-            "server/api/trip.get.ts",
-            &mut cx,
-        )?;
+        open_file(&workspace, any_window, "server/api/trip.get.ts", &mut cx)?;
         cx.dispatch_action(any_window, git::Blame);
         wait_real_time(&mut cx, Duration::from_secs(3));
         save(&mut cx, any_window, &output_dir, "10-blame")?;
@@ -454,7 +444,11 @@ mod capture {
 
         save(&mut cx, any_window, &output_dir, "14-pull-request-status")?;
         // The indicator in the status bar of the fixed 1440x900 window.
-        cx.simulate_click(any_window, point(px(PULL_REQUEST_X), px(889.)), Default::default());
+        cx.simulate_click(
+            any_window,
+            point(px(PULL_REQUEST_X), px(889.)),
+            Default::default(),
+        );
         settle(&mut cx, 5);
         save(&mut cx, any_window, &output_dir, "15-pull-request-menu")?;
         cx.simulate_click(any_window, point(px(1000.), px(420.)), Default::default());
@@ -472,9 +466,18 @@ mod capture {
         save(&mut cx, any_window, &output_dir, "18-review-gutter-menu")?;
         cx.simulate_click(any_window, point(px(1000.), px(600.)), Default::default());
         settle(&mut cx, 3);
-        cx.simulate_click(any_window, point(px(PULL_REQUEST_X), px(889.)), Default::default());
+        cx.simulate_click(
+            any_window,
+            point(px(PULL_REQUEST_X), px(889.)),
+            Default::default(),
+        );
         settle(&mut cx, 5);
-        save(&mut cx, any_window, &output_dir, "19-pull-request-menu-threads")?;
+        save(
+            &mut cx,
+            any_window,
+            &output_dir,
+            "19-pull-request-menu-threads",
+        )?;
         cx.simulate_click(any_window, point(px(1000.), px(600.)), Default::default());
         settle(&mut cx, 3);
         PULL_REQUEST_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -543,11 +546,13 @@ mod capture {
             let body: serde_json::Value = serde_json::from_str(&body)?;
             let query = body["query"].as_str().unwrap_or_default();
             let data = if query.contains("ReviewThreads") {
-                let comment = |id: &str, author: &str, body: &str| json!({
-                    "id": id, "author": { "login": author }, "body": body,
-                    "createdAt": "2026-10-31T07:15:00Z",
-                    "url": "https://github.com/trailmap-app/trailmap/pull/42#discussion_r1"
-                });
+                let comment = |id: &str, author: &str, body: &str| {
+                    json!({
+                        "id": id, "author": { "login": author }, "body": body,
+                        "createdAt": "2026-10-31T07:15:00Z",
+                        "url": "https://github.com/trailmap-app/trailmap/pull/42#discussion_r1"
+                    })
+                };
                 json!({ "repository": { "pullRequest": {
                     "id": "PR_42", "headRefOid": head,
                     "reviewThreads": { "pageInfo": null, "nodes": [
@@ -661,11 +666,7 @@ mod capture {
             );
             wait_real_time(cx, Duration::from_secs(1));
             save(cx, window, &output, "git-log")?;
-            right_click(
-                cx,
-                window,
-                point(px(COMMIT_ROW[0]), px(COMMIT_ROW[1])),
-            );
+            right_click(cx, window, point(px(COMMIT_ROW[0]), px(COMMIT_ROW[1])));
             save(cx, window, &output, "commit-menu")?;
             dismiss(cx);
             workspace
@@ -705,14 +706,49 @@ mod capture {
         };
         let steps = vec![
             step("workspace", 70, Some([760., 430.]), false, None, None),
-            step("workspace", 36, Some(CONFIGURATION_PICKER), true, None, None),
-            step("configurations", 60, Some(RUN_BUTTON), true, Some([940., 0., 480., 300.]), None),
+            step(
+                "workspace",
+                36,
+                Some(CONFIGURATION_PICKER),
+                true,
+                None,
+                None,
+            ),
+            step(
+                "configurations",
+                60,
+                Some(RUN_BUTTON),
+                true,
+                Some([940., 0., 480., 300.]),
+                None,
+            ),
             step("running", 85, Some(RUN_BUTTON), false, None, None),
             step("git-log", 70, Some(COMMIT_ROW), true, None, Some("⌘9")),
-            step("commit-menu", 85, Some(COMMIT_ROW), false, Some([450., 110., 880., 550.]), None),
-            step("review", 100, Some([900., 330.]), false, Some([240., 140., 880., 550.]), None),
+            step(
+                "commit-menu",
+                85,
+                Some(COMMIT_ROW),
+                false,
+                Some([450., 110., 880., 550.]),
+                None,
+            ),
+            step(
+                "review",
+                100,
+                Some([900., 330.]),
+                false,
+                Some([240., 140., 880., 550.]),
+                None,
+            ),
             step("review", 30, Some(PULL_REQUEST_BUTTON), true, None, None),
-            step("pull-request", 90, Some(PULL_REQUEST_BUTTON), false, Some([0., 400., 800., 500.]), None),
+            step(
+                "pull-request",
+                90,
+                Some(PULL_REQUEST_BUTTON),
+                false,
+                Some([0., 400., 800., 500.]),
+                None,
+            ),
             step("blame", 80, Some([560., 330.]), false, None, Some("⌥⌘G B")),
         ];
         let manifest = serde_json::json!({
