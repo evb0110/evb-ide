@@ -35,8 +35,9 @@ if [[ "$publish" == true ]]; then
     [[ -f "$output/verified-commit" && "$(cat "$output/verified-commit")" == "$commit" ]] || { echo 'Prepare and verify this exact commit first.' >&2; exit 1; }
     (cd "$output" && shasum -a 256 -c SHA256SUMS)
     xcrun stapler validate "$output/$image_name"
-    remote_commit="$(git ls-remote origin refs/heads/main | cut -f1)"
-    [[ "$remote_commit" == "$commit" ]] || { echo 'Push this commit to origin/main before publishing.' >&2; exit 1; }
+    git fetch --quiet origin main
+    remote_commit="$(git rev-parse FETCH_HEAD)"
+    git merge-base --is-ancestor "$commit" "$remote_commit" || { echo 'Push this commit to origin/main before publishing.' >&2; exit 1; }
     gh release create "$tag" --repo evb0110/evb-ide --target "$commit" --draft \
         --title "EVB IDE $version" --notes-file "$output/RELEASE-NOTES.md" \
         "$output/$image_name" "$output/$source_name" "$output/SHA256SUMS"
