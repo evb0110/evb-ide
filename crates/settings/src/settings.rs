@@ -261,6 +261,9 @@ mod evb_default_settings_tests {
         assert_eq!(merged["base_keymap"], "JetBrains");
         assert_eq!(merged["theme"]["light"], "IntelliJ Light");
         assert_eq!(merged["telemetry"]["metrics"], false);
+        assert_eq!(merged["default_open_behavior"], "new_window");
+        assert_eq!(merged["cli_default_open_behavior"], "new_window");
+        assert_eq!(merged["use_system_window_tabs"], true);
         // `disable_ai` merges with OR, so a default of true could never be undone.
         assert_eq!(merged["disable_ai"], false);
         // Keys the EVB layer does not mention keep their upstream values.

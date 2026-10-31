@@ -4090,6 +4090,19 @@ impl Workspace {
         let app_state = self.app_state.clone();
 
         cx.spawn(async move |_, cx| {
+            // Opening a project that is already open brings its window (its tab, with system
+            // window tabs) to the front instead of opening it a second time.
+            if open_mode == OpenMode::NewWindow
+                && let Some((window, workspace)) =
+                    cx.update(|cx| local_workspace_with_root_paths(&paths, cx))
+            {
+                window.update(cx, |multi_workspace, window, cx| {
+                    window.activate_window();
+                    multi_workspace.activate(workspace.clone(), None, window, cx);
+                })?;
+                return Ok(workspace);
+            }
+
             let OpenResult { workspace, .. } = cx
                 .update(|cx| {
                     open_paths(
@@ -10692,9 +10705,9 @@ pub struct OpenChannelNotesById {
 actions!(
     zed,
     [
-        /// Opens the Zed log file.
+        /// Opens the EVB IDE log file.
         OpenLog,
-        /// Reveals the Zed log file in the system file manager.
+        /// Reveals the EVB IDE log file in the system file manager.
         RevealLogInFileManager
     ]
 );
@@ -11153,6 +11166,26 @@ fn preferred_target_for_files(host: &ProjectHost<'_>, cx: &App) -> Option<Worksp
             .filter(|window| Some(*window) != active_window)
             .find_map(target_for_window)
     }
+}
+
+fn local_workspace_with_root_paths(
+    paths: &[PathBuf],
+    cx: &App,
+) -> Option<(WindowHandle<MultiWorkspace>, Entity<Workspace>)> {
+    if paths.is_empty() {
+        return None;
+    }
+    let path_list = PathList::new(paths);
+    cx.windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<MultiWorkspace>())
+        .find_map(|window| {
+            let workspace = window
+                .read(cx)
+                .ok()?
+                .workspace_for_paths(&path_list, None, cx)?;
+            Some((window, workspace))
+        })
 }
 
 pub fn find_existing_workspace(

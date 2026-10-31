@@ -2092,6 +2092,9 @@ impl Window {
                         window.bounds_changed(cx);
                         window.refresh();
 
+                        if active && let Some(tabs) = window.platform_window.tabbed_windows() {
+                            SystemWindowTabController::sync_tabs(cx, tabs);
+                        }
                         SystemWindowTabController::update_last_active(cx, window.handle.id);
                     })
                     .log_err();

@@ -852,14 +852,14 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let items = [
         format!(
             "Add to existing EVB IDE window ({})",
-            blue.apply_to("zed --existing")
+            blue.apply_to("evb --existing")
         ),
-        format!("Open a new window ({})", blue.apply_to("zed --classic")),
+        format!("Open a new window ({})", blue.apply_to("evb --classic")),
     ];
 
     let prompt = format!(
         "Configure default behavior for {}\n{}",
-        blue.apply_to("zed <path>"),
+        blue.apply_to("evb <path>"),
         console::style("You can change this later in EVB IDE settings"),
     );
 

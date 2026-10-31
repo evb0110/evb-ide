@@ -379,7 +379,7 @@ fn main() {
         }
     };
     if failed_single_instance_check {
-        println!("zed is already running");
+        println!("EVB IDE is already running");
         return;
     }
 

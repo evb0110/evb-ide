@@ -46,6 +46,11 @@
       <code>.zed/tasks.json</code> tasks. Install your project's dependencies using its usual package manager first.
       Language extensions and servers may download on first use.
     </p>
+    <p>
+      Open more projects the same way, or from <strong>File › Open Recent</strong>. Each project gets its own window. On
+      macOS, project windows are tabs of one window, like WebStorm. Opening a project that is already open switches to
+      it.
+    </p>
     <table>
       <thead>
         <tr>

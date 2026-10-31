@@ -723,9 +723,59 @@ impl SystemWindowTabController {
                 tabs.push(tab);
             }
         } else {
-            let new_group_id = controller.tab_groups.len();
+            let new_group_id = controller.next_tab_group_id();
             controller.tab_groups.insert(new_group_id, tabs);
         }
+    }
+
+    /// Makes `tabs`, the platform's current tabs of one window, a tab group of their own.
+    ///
+    /// The platform can group windows without telling the controller, for example when it adds
+    /// a window that opened in the background to an existing window's tabs.
+    pub fn sync_tabs(cx: &mut App, tabs: Vec<SystemWindowTab>) {
+        let controller = cx.global_mut::<SystemWindowTabController>();
+        let Some(first_tab) = tabs.first() else {
+            return;
+        };
+        let tab_ids: Vec<_> = tabs.iter().map(|tab| tab.id).collect();
+        let known_tab_ids: Option<Vec<_>> = controller
+            .tabs(first_tab.id)
+            .map(|known_tabs| known_tabs.iter().map(|tab| tab.id).collect());
+        if known_tab_ids.as_ref() == Some(&tab_ids) {
+            return;
+        }
+
+        let mut known_tabs = Vec::new();
+        controller.tab_groups.retain(|_, group| {
+            group.retain(|tab| {
+                let is_synced = tab_ids.contains(&tab.id);
+                if is_synced {
+                    known_tabs.push(tab.clone());
+                }
+                !is_synced
+            });
+            !group.is_empty()
+        });
+        // Keep the activation times the controller already tracks.
+        let tabs = tabs
+            .into_iter()
+            .map(|tab| {
+                known_tabs
+                    .iter()
+                    .find(|known_tab| known_tab.id == tab.id)
+                    .map(|known_tab| SystemWindowTab {
+                        last_active_at: known_tab.last_active_at,
+                        ..tab.clone()
+                    })
+                    .unwrap_or(tab)
+            })
+            .collect();
+        let new_group_id = controller.next_tab_group_id();
+        controller.tab_groups.insert(new_group_id, tabs);
+    }
+
+    fn next_tab_group_id(&self) -> usize {
+        self.tab_groups.keys().max().map_or(0, |id| id + 1)
     }
 
     /// Remove a tab from a tab group.
@@ -749,7 +799,7 @@ impl SystemWindowTabController {
         let controller = cx.global_mut::<SystemWindowTabController>();
 
         if let Some(tab) = removed_tab {
-            let new_group_id = controller.tab_groups.keys().max().map_or(0, |k| k + 1);
+            let new_group_id = controller.next_tab_group_id();
             controller.tab_groups.insert(new_group_id, vec![tab]);
         }
     }
@@ -3727,6 +3777,55 @@ mod test {
             self.0.set(self.0.get() + 1);
             Empty
         }
+    }
+
+    #[gpui::test]
+    fn system_window_tab_groups_follow_the_platform(cx: &mut TestAppContext) {
+        use crate::{AnyWindowHandle, SystemWindowTab, SystemWindowTabController};
+
+        struct TabView;
+        impl Render for TabView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                Empty
+            }
+        }
+
+        let [first, second, third, fourth]: [AnyWindowHandle; 4] =
+            std::array::from_fn(|_| cx.add_window(|_, _| TabView).into());
+        let tab = |handle: AnyWindowHandle| SystemWindowTab::new("tab".into(), handle);
+        let tab_ids = |handle: AnyWindowHandle, cx: &mut TestAppContext| {
+            cx.read(|cx| {
+                cx.global::<SystemWindowTabController>()
+                    .tabs(handle.window_id())
+                    .map(|tabs| tabs.iter().map(|tab| tab.id).collect::<Vec<_>>())
+            })
+        };
+
+        cx.update(|cx| {
+            for handle in [first, second, third] {
+                SystemWindowTabController::add_tab(cx, handle.window_id(), vec![tab(handle)]);
+            }
+            // The platform put the second window into the first window's tabs.
+            SystemWindowTabController::sync_tabs(cx, vec![tab(first), tab(second)]);
+        });
+        let grouped = Some(vec![first.window_id(), second.window_id()]);
+        assert_eq!(tab_ids(first, cx), grouped);
+        assert_eq!(tab_ids(second, cx), grouped);
+        assert_eq!(tab_ids(third, cx), Some(vec![third.window_id()]));
+
+        // Syncing a group the controller already knows changes nothing.
+        cx.update(|cx| SystemWindowTabController::sync_tabs(cx, vec![tab(first), tab(second)]));
+        assert_eq!(tab_ids(first, cx), grouped);
+
+        // A new group must not replace an existing one.
+        cx.update(|cx| {
+            SystemWindowTabController::move_tab_to_new_window(cx, second.window_id());
+            SystemWindowTabController::add_tab(cx, fourth.window_id(), vec![tab(fourth)]);
+        });
+        assert_eq!(tab_ids(first, cx), Some(vec![first.window_id()]));
+        assert_eq!(tab_ids(second, cx), Some(vec![second.window_id()]));
+        assert_eq!(tab_ids(third, cx), Some(vec![third.window_id()]));
+        assert_eq!(tab_ids(fourth, cx), Some(vec![fourth.window_id()]));
     }
 
     #[gpui::test]

@@ -56,11 +56,11 @@ pub struct WorkspaceSettingsContent {
     /// The default behavior when opening paths from the CLI without
     /// an explicit `-e` or `-n` flag.
     ///
-    /// Default: existing_window
+    /// Default: new_window
     pub cli_default_open_behavior: Option<CliDefaultOpenBehavior>,
     /// The default behavior when opening projects from the UI.
     ///
-    /// Default: existing_window
+    /// Default: new_window
     pub default_open_behavior: Option<DefaultOpenBehavior>,
     /// Whether to attempt to restore previous file's state when opening it again.
     /// The state is stored per pane.
@@ -129,9 +129,9 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: false
     pub close_on_file_delete: Option<bool>,
-    /// Whether to allow windows to tab together based on the user's tabbing preference (macOS only).
+    /// Whether project windows open as tabs of one window, like browser tabs (macOS only).
     ///
-    /// Default: false
+    /// Default: true
     pub use_system_window_tabs: Option<bool>,
     /// Which fullscreen mode the `zed::ToggleFullScreen` action enters (macOS only).
     ///

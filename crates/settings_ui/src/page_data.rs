@@ -105,7 +105,7 @@ fn developer_page(cx: &App) -> SettingsPage {
     items.push(SettingsPageItem::SectionHeader("Instrumentation"));
     items.push(SettingsPageItem::SettingItem(SettingItem {
         title: "Performance Profiler",
-        description: "Collect timing data for foreground and background executor tasks so they can be inspected via `zed: open performance profiler`. May lead to increased memory usage.",
+        description: "Collect timing data for foreground and background executor tasks so they can be inspected via `evb ide: open performance profiler`. May lead to increased memory usage.",
         field: Box::new(SettingField {
             organization_override: None,
             json_path: Some("instrumentation.performance_profiler.enabled"),
@@ -267,7 +267,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "CLI Default Open Behavior",
-                description: "How `zed <path>` opens directories when no flag is specified.",
+                description: "How `evb <path>` opens directories when no flag is specified.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("cli_default_open_behavior"),
@@ -289,7 +289,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Reveal If Open",
-                description: "when enabled, zed will prefer already-open buffers.",
+                description: "When enabled, EVB IDE will prefer already-open buffers.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("reveal_if_open"),
@@ -5298,7 +5298,7 @@ fn window_and_layout_page() -> SettingsPage {
             // todo(settings_ui): Should we filter by platform.as_ref()?
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use System Window Tabs",
-                description: "(macOS only) whether to allow Windows to tab together.",
+                description: "(macOS only) Open project windows as tabs of one window.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("use_system_window_tabs"),

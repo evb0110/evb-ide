@@ -47,6 +47,12 @@
     "diagnostics": false,
     "metrics": false,
   },
+  // Like WebStorm, every project opens in its own window, and on macOS those windows are tabs of
+  // one window. Opening a project that is already open brings its tab to the front. (With the
+  // agent off there is no projects sidebar, so "existing_window" would replace the open project.)
+  "default_open_behavior": "new_window",
+  "cli_default_open_behavior": "new_window",
+  "use_system_window_tabs": true,
   // AI features are off by default. These are ordinary settings, so user
   // settings can turn them back on ("disable_ai" cannot be used here: once a
   // lower layer sets it to true, no higher layer can set it back to false).

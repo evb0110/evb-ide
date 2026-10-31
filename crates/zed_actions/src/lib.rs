@@ -65,7 +65,7 @@ actions!(
         OpenServerSettings,
         /// Quits the application.
         Quit,
-        /// Shows information about Zed.
+        /// Shows information about EVB IDE.
         About,
         /// Opens the documentation website.
         OpenDocs,
@@ -807,7 +807,7 @@ pub mod outline {
 actions!(
     zed_predict_onboarding,
     [
-        /// Opens the Zed Predict onboarding modal.
+        /// Opens the edit prediction onboarding modal.
         OpenZedPredictOnboarding
     ]
 );

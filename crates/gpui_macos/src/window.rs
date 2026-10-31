@@ -91,13 +91,6 @@ const NSNormalWindowLevel: NSInteger = 0;
 const NSFloatingWindowLevel: NSInteger = 3;
 #[allow(non_upper_case_globals)]
 const NSPopUpWindowLevel: NSInteger = 101;
-#[derive(PartialEq)]
-pub enum UserTabbingPreference {
-    Never,
-    Always,
-    InFullScreen,
-}
-
 #[ctor(unsafe)]
 unsafe fn build_classes() {
     unsafe {
@@ -573,6 +566,28 @@ struct SimpleFullscreenAppState {
 }
 
 static SIMPLE_FULLSCREEN_APP_STATE: Mutex<Option<SimpleFullscreenAppState>> = Mutex::new(None);
+
+const NS_WINDOW_TABBING_MODE_AUTOMATIC: NSInteger = 0;
+const NS_WINDOW_TABBING_MODE_PREFERRED: NSInteger = 1;
+
+/// Windows with a tabbing identifier always open as tabs of the key window, whatever the user's
+/// "Prefer tabs when opening documents" choice in System Settings (by default, full screen only).
+unsafe fn set_native_window_tabbing(
+    native_window: *mut AnyObject,
+    tabbing_identifier: Option<&str>,
+) {
+    unsafe {
+        if let Some(tabbing_identifier) = tabbing_identifier {
+            let tabbing_id = ns_string(tabbing_identifier);
+            let _: () = msg_send![native_window, setTabbingIdentifier: tabbing_id];
+            let _: () = msg_send![native_window, setTabbingMode: NS_WINDOW_TABBING_MODE_PREFERRED];
+        } else {
+            let _: () =
+                msg_send![native_window, setTabbingIdentifier: ptr::null_mut::<AnyObject>()];
+            let _: () = msg_send![native_window, setTabbingMode: NS_WINDOW_TABBING_MODE_AUTOMATIC];
+        }
+    }
+}
 
 unsafe fn push_simple_fullscreen_presentation_options() {
     let mut app_state = SIMPLE_FULLSCREEN_APP_STATE.lock();
@@ -1243,12 +1258,7 @@ impl MacWindow {
                         add_mouse_tracking_area(tracking_view);
                     }
 
-                    if let Some(tabbing_identifier) = tabbing_identifier {
-                        let tabbing_id = ns_string(tabbing_identifier.as_str());
-                        let _: () = msg_send![native_window, setTabbingIdentifier: tabbing_id];
-                    } else {
-                        let _: () = msg_send![native_window, setTabbingIdentifier:ptr::null_mut::<AnyObject>()];
-                    }
+                    set_native_window_tabbing(native_window, tabbing_identifier.as_deref());
                 }
                 // `AnchoredPopup` is rejected in `MacPlatform::open_window`, grouped here only
                 // for exhaustiveness.
@@ -1280,18 +1290,24 @@ impl MacWindow {
                 }
             }
 
-            if allows_automatic_window_tabbing
+            if let Some(tabbing_identifier) = tabbing_identifier.as_deref()
                 && !main_window.is_null()
                 && main_window != native_window
             {
                 let main_window_is_fullscreen = (&*main_window.cast::<NSWindow>())
                     .styleMask()
                     .contains(NSWindowStyleMask::FullScreen);
-                let user_tabbing_preference = Self::get_user_tabbing_preference()
-                    .unwrap_or(UserTabbingPreference::InFullScreen);
-                let should_add_as_tab = user_tabbing_preference == UserTabbingPreference::Always
-                    || user_tabbing_preference == UserTabbingPreference::InFullScreen
-                        && main_window_is_fullscreen;
+                // Join the main window's tabs only when it is the same kind of window: a project
+                // window must not become a tab of, say, the settings window.
+                let main_window_tabbing_identifier: *mut AnyObject =
+                    msg_send![main_window, tabbingIdentifier];
+                let should_add_as_tab = !main_window_tabbing_identifier.is_null() && {
+                    let same_identifier: Bool = msg_send![
+                        main_window_tabbing_identifier,
+                        isEqualToString: ns_string(tabbing_identifier)
+                    ];
+                    same_identifier == Bool::YES
+                };
 
                 if should_add_as_tab {
                     let main_window_can_tab: Bool =
@@ -1366,33 +1382,6 @@ impl MacWindow {
             }
 
             window_handles
-        }
-    }
-
-    pub fn get_user_tabbing_preference() -> Option<UserTabbingPreference> {
-        unsafe {
-            let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
-            let domain = ns_string("NSGlobalDomain");
-            let key = ns_string("AppleWindowTabbingMode");
-
-            let dict: *mut AnyObject = msg_send![defaults, persistentDomainForName: domain];
-            let value: *mut AnyObject = if !dict.is_null() {
-                msg_send![dict, objectForKey: key]
-            } else {
-                ptr::null_mut::<AnyObject>()
-            };
-
-            let value_str = if !value.is_null() {
-                CStr::from_ptr(msg_send![value, UTF8String]).to_string_lossy()
-            } else {
-                "".into()
-            };
-
-            match value_str.as_ref() {
-                "manual" => Some(UserTabbingPreference::Never),
-                "always" => Some(UserTabbingPreference::Always),
-                _ => Some(UserTabbingPreference::InFullScreen),
-            }
         }
     }
 }
@@ -1531,13 +1520,7 @@ impl PlatformWindow for MacWindow {
                 let () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: Bool::NO];
             }
 
-            if let Some(tabbing_identifier) = tabbing_identifier {
-                let tabbing_id = ns_string(tabbing_identifier.as_str());
-                let _: () = msg_send![native_window, setTabbingIdentifier: tabbing_id];
-            } else {
-                let _: () =
-                    msg_send![native_window, setTabbingIdentifier:ptr::null_mut::<AnyObject>()];
-            }
+            set_native_window_tabbing(native_window, tabbing_identifier.as_deref());
         }
     }
 

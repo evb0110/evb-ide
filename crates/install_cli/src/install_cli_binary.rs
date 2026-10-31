@@ -12,7 +12,7 @@ use workspace::{Toast, Workspace};
 actions!(
     cli,
     [
-        /// Installs the Zed CLI tool to the system PATH.
+        /// Installs the EVB IDE CLI tool to the system PATH.
         InstallCliBinary,
     ]
 );

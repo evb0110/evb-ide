@@ -317,6 +317,53 @@ async fn test_open_new_window_does_not_open_sidebar_on_existing_window(cx: &mut 
 }
 
 #[gpui::test]
+async fn test_opening_an_open_project_in_new_window_activates_its_window(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let app_state = cx.update(AppState::test);
+    let fs = app_state.fs.as_fake();
+    for root in [
+        path!("/project_a"),
+        path!("/project_b"),
+        path!("/project_c"),
+    ] {
+        fs.insert_tree(root, json!({ "file.txt": "" })).await;
+    }
+
+    let project_a = Project::test(app_state.fs.clone(), [path!("/project_a").as_ref()], cx).await;
+    let window_a = cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    let project_b = Project::test(app_state.fs.clone(), [path!("/project_b").as_ref()], cx).await;
+    let window_b = cx.add_window(|window, cx| MultiWorkspace::test_new(project_b, window, cx));
+    cx.run_until_parked();
+
+    let workspace_a = window_a
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    let workspace_b = window_b
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    let open_from_window_b = |path: &str, cx: &mut TestAppContext| {
+        let paths = vec![PathBuf::from(path)];
+        window_b
+            .update(cx, |_, window, cx| {
+                workspace_b.update(cx, |workspace, cx| {
+                    workspace.open_workspace_for_paths(OpenMode::NewWindow, paths, window, cx)
+                })
+            })
+            .unwrap()
+    };
+
+    let opened = open_from_window_b(path!("/project_a"), cx).await.unwrap();
+    assert_eq!(opened, workspace_a);
+    assert_eq!(cx.update(|cx| cx.windows().len()), 2);
+
+    let opened = open_from_window_b(path!("/project_c"), cx).await.unwrap();
+    assert_ne!(opened, workspace_a);
+    assert_ne!(opened, workspace_b);
+    assert_eq!(cx.update(|cx| cx.windows().len()), 3);
+}
+
+#[gpui::test]
 async fn test_open_directory_in_existing_window_opens_sidebar(cx: &mut TestAppContext) {
     init_test(cx);
 

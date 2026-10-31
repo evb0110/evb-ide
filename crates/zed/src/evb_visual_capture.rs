@@ -213,8 +213,9 @@ mod capture {
     use anyhow::{Context as _, Result};
     use assets::Assets;
     use gpui::{
-        AnyWindowHandle, AppContext as _, Bounds, Entity, MouseButton, UpdateGlobal as _,
-        VisualTestAppContext, WindowBounds, WindowHandle, WindowOptions, point, px, size,
+        AnyWindowHandle, AppContext as _, Bounds, Entity, MouseButton, SystemWindowTab,
+        SystemWindowTabController, UpdateGlobal as _, VisualTestAppContext, WindowBounds,
+        WindowHandle, WindowOptions, point, px, size,
     };
     use project::Project;
     use settings::SettingsStore;
@@ -484,6 +485,38 @@ mod capture {
         cx.dispatch_action(any_window, zed_actions::git::CreatePullRequest);
         wait_real_time(&mut cx, Duration::from_secs(2));
         save(&mut cx, any_window, &output_dir, "16-create-pull-request")?;
+        workspace
+            .update_in_window(any_window, &mut cx, |workspace, window, cx| {
+                workspace.hide_modal(window, cx);
+            })
+            .log_err();
+        settle(&mut cx, 3);
+
+        // Capture windows are never shown, so macOS does not group them: group them the way
+        // AppKit reports a second project opened as a tab.
+        let second_project_path = project_path.with_file_name("trailmap-admin");
+        std::fs::create_dir_all(&second_project_path)?;
+        std::fs::write(second_project_path.join("README.md"), "# Trailmap Admin\n")?;
+        let second_project = create_project(&second_project_path, &app_state, &mut cx)?;
+        let second_window: AnyWindowHandle =
+            open_window(second_project, &app_state, &mut cx)?.into();
+        settle(&mut cx, 5);
+        cx.update(|cx| {
+            let tabs = [any_window, second_window]
+                .into_iter()
+                .filter_map(|handle| {
+                    handle
+                        .update(cx, |_, window, _| {
+                            SystemWindowTab::new(window.window_title().into(), handle)
+                        })
+                        .log_err()
+                })
+                .collect();
+            SystemWindowTabController::sync_tabs(cx, tabs);
+            SystemWindowTabController::set_visible(cx, true);
+        });
+        settle(&mut cx, 5);
+        save(&mut cx, any_window, &output_dir, "20-project-tabs")?;
 
         println!("Captures written to {}", output_dir.display());
         Ok(())
