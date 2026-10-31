@@ -54,7 +54,7 @@ source, exclude Git metadata and private environment files, and deploy.
 
 The site adds no analytics. Appearance preferences use local storage. See the
 privacy page for hosting and outbound GitHub links. Font licenses are shipped
-in `public/fonts`; application credits are on the license page.
+in `app/assets/fonts`; application credits are on the license page.
 
 Site code is GPL-3.0-or-later, with third-party packages and fonts retaining
 their own licenses. See the root license texts and NOTICE.md.

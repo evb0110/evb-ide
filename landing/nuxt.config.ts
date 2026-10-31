@@ -45,6 +45,8 @@ export default defineNuxtConfig({
           "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
       },
     },
+    // Not fingerprinted, so cached for a day rather than for good.
+    "/films/**": { headers: { "cache-control": "public, max-age=86400, stale-while-revalidate=604800" } },
     "/docs": { prerender: true },
     "/license": { prerender: true },
     "/privacy": { prerender: true },

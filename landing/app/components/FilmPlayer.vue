@@ -89,6 +89,16 @@ const time = ref(0);
 const duration = ref(0);
 
 const still = computed(() => reducedMotion.value === "reduce");
+
+// The poster is the film's first paint; fetch the one for the visitor's color scheme early.
+useHead({
+  link: (["light", "dark"] as const).map((scheme) => ({
+    rel: "preload",
+    as: "image",
+    href: `${FILM_BASE}/${scheme}-poster.jpg`,
+    media: `(prefers-color-scheme: ${scheme})`,
+  })),
+});
 const posterStyle = computed(() => {
   const kind = still.value ? "still" : "poster";
   return {

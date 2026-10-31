@@ -2,7 +2,7 @@
   <div class="home">
     <section class="hero" aria-labelledby="home-title">
       <div class="hero-intro">
-        <h1 id="home-title" class="hero-title">A JetBrains-style IDE built on Zed</h1>
+        <h1 id="home-title" class="hero-title">A JetBrains‑style IDE built on Zed</h1>
         <p class="hero-lede">
           EVB IDE is the Zed editor with the JetBrains keymap, IntelliJ themes, run configurations for your project's
           scripts, a Git Log tool window and GitHub pull request review. It is free and open source under the GPL.
@@ -125,8 +125,9 @@ const platforms = computed(() =>
     release.value?.installers.some((installer) => installer.platform === platform),
   ),
 );
-/** The visitor's system, known only in the browser. */
-const detectedPlatform = ref<TPlatform | null>(null);
+/** The visitor's system from the User-Agent, read on the server so the page renders with it. */
+const userAgent = import.meta.server ? useRequestHeaders(["user-agent"])["user-agent"] : navigator.userAgent;
+const detectedPlatform = useState<TPlatform | null>("detected-platform", () => platformOf(userAgent ?? ""));
 const chosenPlatform = ref<TPlatform | null>(null);
 const selectedPlatform = computed<TPlatform>(() => {
   for (const platform of [chosenPlatform.value, detectedPlatform.value]) {
@@ -163,16 +164,16 @@ function installerMeta(installer: IInstaller) {
   return `${installer.architecture === "x64" ? "Intel and AMD" : "ARM"} · ${installer.format}`;
 }
 
-onMounted(() => {
-  const agent = navigator.userAgent.toLowerCase();
+function platformOf(userAgent: string): TPlatform | null {
+  const agent = userAgent.toLowerCase();
   if (agent.includes("windows")) {
-    detectedPlatform.value = "windows";
-  } else if (agent.includes("linux") && !agent.includes("android")) {
-    detectedPlatform.value = "linux";
-  } else if (agent.includes("mac")) {
-    detectedPlatform.value = "macos";
+    return "windows";
   }
-});
+  if (agent.includes("linux") && !agent.includes("android")) {
+    return "linux";
+  }
+  return agent.includes("mac") ? "macos" : null;
+}
 const colorMode = useColorMode();
 const filmTheme = computed(() => (colorMode.value === "dark" ? "dark" : "light"));
 
@@ -252,7 +253,8 @@ function formatSize(size: number) {
 
 .hero-title {
   font-size: clamp(36px, 4.2vw, 52px);
-  font-weight: 500;
+  font-weight: 400;
+  text-wrap: balance;
   line-height: 1.08;
   letter-spacing: -1.6px;
 }

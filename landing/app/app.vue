@@ -4,7 +4,7 @@
       <a class="skip-link" href="#main">Skip to content</a>
       <header class="site-header">
         <NuxtLink to="/" class="brand" aria-label="EVB IDE home">
-          <img src="/icon.png" width="40" height="40" alt="" />
+          <BrandMark class="brand-mark" />
           <span><strong>EVB</strong> IDE<span class="brand-period">.</span></span>
         </NuxtLink>
         <nav aria-label="Main navigation" class="site-nav">
@@ -45,7 +45,12 @@
 </template>
 
 <script setup lang="ts">
+import interFont from "~/assets/fonts/inter-latin-wght-normal.woff2?url";
 import { repositoryUrl } from "~~/shared/releases";
+
+useHead({
+  link: [{ rel: "preload", href: interFont, as: "font", type: "font/woff2", crossorigin: "anonymous" }],
+});
 
 const year = new Date().getFullYear();
 const config = useRuntimeConfig();
