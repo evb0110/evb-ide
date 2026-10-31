@@ -1,0 +1,102 @@
+name: EVB Release
+
+# Builds, signs and notarizes the macOS release on a GitHub runner with script/evb-release, so
+# releases need no local release build. A v* tag publishes the release; a manual run builds and
+# uploads the artifacts, and publishes only when asked.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the GitHub release after the build
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: evb-release
+  cancel-in-progress: false
+
+jobs:
+  macos-arm64:
+    runs-on: macos-15
+    timeout-minutes: 360
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Publishing checks that the commit is on origin/main.
+          fetch-depth: 0
+
+      - name: Check the tag matches EVB_VERSION
+        if: github.ref_type == 'tag'
+        run: test "v$(tr -d '\n' < EVB_VERSION)" = "$GITHUB_REF_NAME"
+
+      - name: Free disk space
+        run: |
+          df -h /
+          # A release build needs about 40 GB: keep only the selected Xcode.
+          selected="$(cd "$(xcode-select -p)/../.." && pwd -P)"
+          for app in /Applications/Xcode*.app; do
+            [[ "$(cd "$app" && pwd -P)" == "$selected" ]] || sudo rm -rf "$app"
+          done
+          sudo rm -rf "$HOME/Library/Android" /usr/local/share/dotnet "$HOME/.dotnet" \
+            /Library/Developer/CoreSimulator/Volumes "$HOME/Library/Developer/CoreSimulator" \
+            "$RUNNER_TOOL_CACHE/CodeQL" "$RUNNER_TOOL_CACHE/PyPy" "$RUNNER_TOOL_CACHE/Ruby" || true
+          df -h /
+
+      - name: Install build tools
+        run: |
+          xcodebuild -version
+          if ! xcrun --find metal > /dev/null 2>&1 || ! xcrun metal --version > /dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          command -v cmake > /dev/null || brew install cmake
+          rustup show active-toolchain || rustup toolchain install
+
+      - name: Set up signing
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: script/evb-ci-macos-signing
+
+      - name: Build, sign and notarize
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: script/evb-release
+
+      - name: Upload the release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: evb-ide-macos-arm64
+          path: |
+            .devkit/releases/*/*.dmg
+            .devkit/releases/*/*-source.tar.gz
+            .devkit/releases/*/SHA256SUMS
+            .devkit/releases/*/RELEASE-NOTES.md
+            .devkit/releases/*/system-specs.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish
+        if: github.ref_type == 'tag' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: script/evb-release --publish
+
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          if [[ -n "${EVB_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$EVB_SIGNING_KEYCHAIN" || true
+          fi
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
