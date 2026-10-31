@@ -1081,7 +1081,9 @@ debug = "limited"
 [profile.dev.build-override]
 codegen-units = 16
 split-debuginfo = "unpacked"
-debug = "limited"
+# EVB IDE: build scripts and proc macros are rarely debugged, and their debug
+# info is a large share of target/debug.
+debug = false
 
 # "debug" is a reserved profile name.
 [profile.dbg]
@@ -1092,6 +1094,9 @@ debug = "full"
 debug = "full"
 
 [profile.dev.package]
+# EVB IDE: third-party crates without debug info keep target/debug about half as
+# large. Workspace crates keep it, so backtraces through our code have lines.
+"*" = { debug = false }
 # proc-macros start
 gpui_macros = { opt-level = 3 }
 derive_refineable = { opt-level = 3 }
