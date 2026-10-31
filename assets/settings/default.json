@@ -2039,6 +2039,8 @@
     "cursor_position_button": true,
     // Whether to show active line endings button in the status bar.
     "line_endings_button": false,
+    // Whether to show the GitHub pull request of the current branch in the status bar.
+    "pull_request_button": true,
     // Control when to show the active encoding in the status bar.
     "active_encoding_button": "non_utf8",
     // Whether to show an indicator while multi-stroke input is pending.

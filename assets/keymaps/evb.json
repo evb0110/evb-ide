@@ -33,6 +33,19 @@
     },
   },
   {
+    // Enter adds a line in the description; cmd-enter creates the pull request.
+    "context": "CreatePullRequestModal > Editor",
+    "bindings": {
+      "cmd-enter": "menu::Confirm",
+    },
+  },
+  {
+    "context": "CreatePullRequestModal > Editor && mode == auto_height",
+    "bindings": {
+      "enter": "editor::Newline",
+    },
+  },
+  {
     // Enter adds a line in the commit message; cmd-enter saves it.
     "context": "CommitMessageModal > Editor",
     "bindings": {

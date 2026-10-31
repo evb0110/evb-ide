@@ -5892,6 +5892,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "evb_github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-lock",
+ "collections",
+ "futures 0.3.34",
+ "gpui",
+ "http_client",
+ "log",
+ "parking_lot",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "util",
+]
+
+[[package]]
 name = "evb_run"
 version = "0.1.0"
 dependencies = [
@@ -7071,6 +7089,7 @@ dependencies = [
  "ctor",
  "db",
  "editor",
+ "evb_github",
  "file_icons",
  "fs",
  "futures 0.3.34",
@@ -7078,8 +7097,10 @@ dependencies = [
  "fuzzy",
  "fuzzy_nucleo",
  "git",
+ "git_hosting_providers",
  "git_ui_core",
  "gpui",
+ "http_client",
  "indoc",
  "itertools 0.14.0",
  "language",
@@ -22457,6 +22478,7 @@ dependencies = [
  "encoding_selector",
  "env_logger 0.11.8",
  "etw_tracing",
+ "evb_github",
  "evb_run",
  "extension",
  "extension_host",

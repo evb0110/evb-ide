@@ -222,6 +222,7 @@ pub struct StatusBarSettings {
     pub active_language_button: bool,
     pub cursor_position_button: bool,
     pub line_endings_button: bool,
+    pub pull_request_button: bool,
     pub active_encoding_button: EncodingDisplayOptions,
     pub pending_keystrokes_indicator: bool,
 }
@@ -235,6 +236,7 @@ impl Settings for StatusBarSettings {
             active_language_button: status_bar.active_language_button.unwrap(),
             cursor_position_button: status_bar.cursor_position_button.unwrap(),
             line_endings_button: status_bar.line_endings_button.unwrap(),
+            pull_request_button: status_bar.pull_request_button.unwrap(),
             active_encoding_button: status_bar.active_encoding_button.unwrap(),
             pending_keystrokes_indicator: status_bar.pending_keystrokes_indicator.unwrap(),
         }

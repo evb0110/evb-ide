@@ -166,6 +166,8 @@ actions!(
         ActivateHistoryTab,
         /// Commits, then pushes the current branch if the commit succeeds.
         CommitAndPush,
+        /// Commits, pushes the current branch, then opens the form for its pull request.
+        CommitPushAndCreatePullRequest,
     ]
 );
 
@@ -1199,6 +1201,7 @@ pub struct GitPanel {
     /// The repository a running Commit and Push committed to, pushed once the
     /// commit succeeds.
     push_after_commit: Option<RepositoryId>,
+    pull_request_after_push: Option<RepositoryId>,
     pending_remote_operation: Option<RemoteOperationKind>,
     amend_pending: bool,
     original_commit_message: Option<String>,
@@ -1536,6 +1539,7 @@ impl GitPanel {
                 diff_stat_total: DiffStat::default(),
                 pending_commit: None,
                 push_after_commit: None,
+                pull_request_after_push: None,
                 pending_remote_operation: None,
                 amend_pending,
                 original_commit_message,
@@ -3942,6 +3946,32 @@ impl GitPanel {
         }
     }
 
+    fn on_commit_push_and_create_pull_request(
+        &mut self,
+        _: &CommitPushAndCreatePullRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_commit_and_push(&CommitAndPush, window, cx);
+        self.pull_request_after_push = self.push_after_commit;
+    }
+
+    /// Whether to offer "Commit, Push and Create Pull Request…": a GitHub branch other than the
+    /// default one, with no open pull request.
+    fn can_create_pull_request(&self, cx: &App) -> bool {
+        let Some(repository) = self.active_repository.as_ref() else {
+            return false;
+        };
+        let repository = repository.read(cx);
+        let Some(branch) = repository.branch.as_ref() else {
+            return false;
+        };
+        crate::pull_requests::known_branch(repository, cx).is_some_and(|known| {
+            known.open_pull_request.is_none()
+                && known.default_branch.as_deref() != Some(branch.name())
+        })
+    }
+
     fn on_amend(&mut self, _: &Amend, window: &mut Window, cx: &mut Context<Self>) {
         if self.amend(&self.commit_editor.focus_handle(cx), window, cx) {
             telemetry::event!("Git Amended", source = "Git Panel");
@@ -4156,6 +4186,7 @@ impl GitPanel {
                             if active_repository_id == Some(repository_id) {
                                 this.push(false, false, window, cx);
                             } else {
+                                this.pull_request_after_push = None;
                                 this.show_error_toast(
                                     "push",
                                     anyhow::anyhow!(
@@ -4168,6 +4199,7 @@ impl GitPanel {
                     }
                     Err(e) => {
                         this.push_after_commit = None;
+                        this.pull_request_after_push = None;
                         this.show_error_toast("commit", e, cx)
                     }
                 }
@@ -4989,12 +5021,15 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Only the push right after "Commit, Push and Create Pull Request…" opens the form.
+        let pull_request_after_push = self.pull_request_after_push.take();
         if !self.can_push_and_pull(cx) {
             return;
         }
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
+        let create_pull_request = pull_request_after_push == Some(repo.read(cx).id);
         let Some(branch) = repo.read(cx).branch.clone() else {
             return;
         };
@@ -5069,11 +5104,19 @@ impl GitPanel {
             let remote_output = push.await?;
 
             let action = RemoteAction::Push(branch.name().to_owned().into(), remote);
-            this.update(cx, |this, cx| match remote_output {
-                Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
-                Err(e) => {
-                    log::error!("Error while pushing {:?}", e);
-                    this.show_error_toast(action.name(), e, cx)
+            this.update_in(cx, |this, window, cx| {
+                match remote_output {
+                    Ok(_) if create_pull_request => {
+                        window.dispatch_action(
+                            Box::new(zed_actions::git::CreatePullRequest),
+                            cx,
+                        );
+                    }
+                    Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+                    Err(e) => {
+                        log::error!("Error while pushing {:?}", e);
+                        this.show_error_toast(action.name(), e, cx)
+                    }
                 }
             })?;
 
@@ -6713,6 +6756,7 @@ impl GitPanel {
                 let amend = self.amend_pending();
                 let signoff = self.signoff_enabled;
                 let skip_hooks = self.skip_hooks_enabled;
+                let can_create_pull_request = self.can_create_pull_request(cx);
 
                 move |window, cx| {
                     Some(ContextMenu::build(window, cx, |context_menu, _, _| {
@@ -6721,6 +6765,12 @@ impl GitPanel {
                                 el.context(keybinding_target)
                             })
                             .action("Commit and Push…", Box::new(CommitAndPush))
+                            .when(can_create_pull_request, |menu| {
+                                menu.action(
+                                    "Commit, Push and Create Pull Request…",
+                                    Box::new(CommitPushAndCreatePullRequest),
+                                )
+                            })
                             .separator()
                             .when(has_previous_commit, |this| {
                                 this.toggleable_entry(
@@ -9627,6 +9677,7 @@ impl Render for GitPanel {
                     .on_action(cx.listener(Self::stage_range))
                     .on_action(cx.listener(GitPanel::on_commit))
                     .on_action(cx.listener(GitPanel::on_commit_and_push))
+                    .on_action(cx.listener(GitPanel::on_commit_push_and_create_pull_request))
                     .on_action(cx.listener(GitPanel::toggle_skip_hooks))
                     .on_action(cx.listener(GitPanel::on_amend))
                     .on_action(cx.listener(GitPanel::toggle_signoff_enabled))

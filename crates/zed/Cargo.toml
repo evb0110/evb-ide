@@ -209,6 +209,7 @@ svg_preview.workspace = true
 sysinfo.workspace = true
 tab_switcher.workspace = true
 tasks_ui.workspace = true
+evb_github.workspace = true
 evb_run.workspace = true
 telemetry.workspace = true
 telemetry_events.workspace = true

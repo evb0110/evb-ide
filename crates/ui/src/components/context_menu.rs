@@ -125,6 +125,13 @@ impl ContextMenuEntry {
         }
     }
 
+    fn has_leading_icon(&self) -> bool {
+        self.icon_position == IconPosition::Start
+            && (self.icon.is_some()
+                || self.custom_icon_path.is_some()
+                || self.custom_icon_svg.is_some())
+    }
+
     pub fn toggleable(mut self, toggle_position: IconPosition, toggled: bool) -> Self {
         self.toggle = Some((toggle_position, toggled));
         self
@@ -1779,15 +1786,14 @@ impl ContextMenu {
         )
     }
 
-    fn has_leading_toggle(&self) -> bool {
-        self.items.iter().any(|item| {
-            matches!(
-                item,
-                ContextMenuItem::Entry(ContextMenuEntry {
-                    toggle: Some((IconPosition::Start, _)),
-                    ..
-                })
-            )
+    /// Whether an entry starts with a checkmark or an icon, which plain entries then align with.
+    fn has_leading_icon(&self) -> bool {
+        self.items.iter().any(|item| match item {
+            ContextMenuItem::Entry(entry) => match entry.toggle {
+                Some((position, _)) => position == IconPosition::Start,
+                None => entry.has_leading_icon(),
+            },
+            _ => false,
         })
     }
 
@@ -2033,12 +2039,10 @@ impl ContextMenu {
                         ))
                     })
                     .when(
-                        toggle.is_none()
-                            && (icon.is_none() || *icon_position != IconPosition::Start)
-                            && self.has_leading_toggle(),
+                        toggle.is_none() && !entry.has_leading_icon() && self.has_leading_icon(),
                         |list_item| {
-                            // Like native menus, plain items share the checkmark column so
-                            // their labels line up with the toggles.
+                            // Like native menus, plain items share the icon column so their
+                            // labels line up with the entries that have checkmarks or icons.
                             list_item.start_slot(
                                 div()
                                     .flex_none()

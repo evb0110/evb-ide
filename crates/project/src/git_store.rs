@@ -7121,7 +7121,37 @@ impl Repository {
         env: HashMap<String, String>,
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<Result<String>> {
-        let receiver = self.send_job(
+        let receiver = self.git_command_job(status, args, env);
+
+        let scan_updates_tx =
+            self.git_store()
+                .and_then(|git_store| match &git_store.read(cx).state {
+                    GitStoreState::Local { downstream, .. } => Some(
+                        downstream
+                            .as_ref()
+                            .map(|downstream| downstream.updates_tx.clone()),
+                    ),
+                    _ => None,
+                });
+        if let Some(updates_tx) = scan_updates_tx {
+            self.schedule_scan(updates_tx, cx);
+        }
+
+        receiver
+    }
+
+    /// Runs a git command that changes nothing, so no rescan follows it.
+    pub fn read_git_command(&mut self, args: Vec<String>) -> oneshot::Receiver<Result<String>> {
+        self.git_command_job(None, args, HashMap::default())
+    }
+
+    fn git_command_job(
+        &mut self,
+        status: Option<SharedString>,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    ) -> oneshot::Receiver<Result<String>> {
+        self.send_job(
             "run_git_command",
             status,
             move |git_repo, _| async move {
@@ -7145,23 +7175,7 @@ impl Repository {
                     }
                 }
             },
-        );
-
-        let scan_updates_tx =
-            self.git_store()
-                .and_then(|git_store| match &git_store.read(cx).state {
-                    GitStoreState::Local { downstream, .. } => Some(
-                        downstream
-                            .as_ref()
-                            .map(|downstream| downstream.updates_tx.clone()),
-                    ),
-                    _ => None,
-                });
-        if let Some(updates_tx) = scan_updates_tx {
-            self.schedule_scan(updates_tx, cx);
-        }
-
-        receiver
+        )
     }
 
     pub fn show(&mut self, commit: String) -> oneshot::Receiver<Result<CommitDetails>> {

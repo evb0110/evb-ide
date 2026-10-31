@@ -69,6 +69,7 @@ members = [
     "crates/env_var",
     "crates/etw_tracing",
     "crates/eval_cli",
+    "crates/evb_github",
     "crates/evb_run",
     "crates/eval_utils",
     "crates/explorer_command_injector",
@@ -487,6 +488,7 @@ tab_switcher = { path = "crates/tab_switcher" }
 tabular_data_preview = { path = "crates/tabular_data_preview"}
 task = { path = "crates/task" }
 tasks_ui = { path = "crates/tasks_ui" }
+evb_github = { path = "crates/evb_github" }
 evb_run = { path = "crates/evb_run" }
 telemetry = { path = "crates/telemetry" }
 telemetry_events = { path = "crates/telemetry_events" }

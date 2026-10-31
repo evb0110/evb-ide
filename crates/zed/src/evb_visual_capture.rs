@@ -174,6 +174,15 @@ const { pending, refresh } = await useFetch('/api/trip')
     git(&["branch", "codex/editor-perf", "HEAD~2"])?;
     git(&["update-ref", "refs/remotes/origin/master", "HEAD~1"])?;
     git(&["update-ref", "refs/remotes/origin/chore/deps-vitest", "HEAD~2"])?;
+    // A GitHub remote that master tracks, for the pull request indicator.
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/trailmap-app/trailmap.git",
+    ])?;
+    git(&["config", "branch.master.remote", "origin"])?;
+    git(&["config", "branch.master.merge", "refs/heads/master"])?;
 
     // Leave an uncommitted change for the Commit panel.
     let api = path.join("server/api/trip.get.ts");
@@ -232,6 +241,17 @@ mod capture {
             search::init(cx);
             language_model::init(cx);
             git_ui::init(cx);
+            git::GitHostingProviderRegistry::default_global(cx).register_hosting_provider(
+                Arc::new(git_hosting_providers::Github::public_instance()),
+            );
+            git_ui::pull_requests::set_github_client(
+                evb_github::GitHubClient::new(
+                    fake_github(),
+                    Arc::new(FixedToken),
+                    cx.background_executor().clone(),
+                ),
+                cx,
+            );
             tasks_ui::init(cx);
             evb_run::init(cx);
             project::debugger::breakpoint_store::BreakpointStore::init(
@@ -298,6 +318,14 @@ mod capture {
             .context("reading the workspace")?;
 
         load_panels(&workspace, any_window, &mut cx)?;
+        workspace
+            .update_in_window(any_window, &mut cx, |workspace, window, cx| {
+                let indicator = cx.new(|cx| git_ui::PullRequestIndicator::new(workspace, cx));
+                workspace.status_bar().update(cx, |status_bar, cx| {
+                    status_bar.add_left_item(indicator, window, cx)
+                });
+            })
+            .log_err();
         open_file(
             &workspace,
             any_window,
@@ -404,9 +432,90 @@ mod capture {
         save(&mut cx, any_window, &output_dir, "12-blame-closed")?;
         right_click(&mut cx, any_window, point(px(402.), px(200.)));
         save(&mut cx, any_window, &output_dir, "13-gutter-menu")?;
+        // An empty part of the editor, to close the menu.
+        cx.simulate_click(any_window, point(px(1000.), px(420.)), Default::default());
+        settle(&mut cx, 3);
+
+        save(&mut cx, any_window, &output_dir, "14-pull-request-status")?;
+        // The indicator in the status bar of the fixed 1440x900 window.
+        cx.simulate_click(any_window, point(px(PULL_REQUEST_X), px(889.)), Default::default());
+        settle(&mut cx, 5);
+        save(&mut cx, any_window, &output_dir, "15-pull-request-menu")?;
+        cx.simulate_click(any_window, point(px(1000.), px(420.)), Default::default());
+        settle(&mut cx, 3);
+        PULL_REQUEST_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
+        cx.dispatch_action(any_window, zed_actions::git::CreatePullRequest);
+        wait_real_time(&mut cx, Duration::from_secs(2));
+        save(&mut cx, any_window, &output_dir, "16-create-pull-request")?;
 
         println!("Captures written to {}", output_dir.display());
         Ok(())
+    }
+
+    const PULL_REQUEST_X: f32 = 80.;
+    static PULL_REQUEST_OPEN: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(true);
+
+    struct FixedToken;
+
+    impl evb_github::CredentialSource for FixedToken {
+        fn token(
+            &self,
+            _host: &str,
+        ) -> futures::future::BoxFuture<'static, Result<String, evb_github::GitHubError>> {
+            Box::pin(futures::future::ready(Ok("fixture".to_string())))
+        }
+
+        fn invalidate(&self, _host: &str) {}
+    }
+
+    /// GitHub for the fixture: master has pull request #128 with a check still running, until
+    /// `PULL_REQUEST_OPEN` is cleared.
+    fn fake_github() -> Arc<dyn http_client::HttpClient> {
+        use futures::AsyncReadExt as _;
+        use serde_json::json;
+        http_client::FakeHttpClient::create(|mut request| async move {
+            let mut body = String::new();
+            request.body_mut().read_to_string(&mut body).await?;
+            let body: serde_json::Value = serde_json::from_str(&body)?;
+            let query = body["query"].as_str().unwrap_or_default();
+            let data = if query.contains("PullRequestStatus") {
+                json!({ "repository": { "pullRequest": {
+                    "mergeable": "MERGEABLE",
+                    "reviewDecision": "APPROVED",
+                    "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "contexts": { "nodes": [
+                        { "name": "typecheck", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/trailmap-app/trailmap/actions/runs/1", "isRequired": true },
+                        { "name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/trailmap-app/trailmap/actions/runs/2", "isRequired": true },
+                        { "name": "e2e", "status": "IN_PROGRESS", "conclusion": null, "detailsUrl": "https://github.com/trailmap-app/trailmap/actions/runs/3" },
+                        { "context": "deploy/preview", "state": "SUCCESS", "targetUrl": "https://preview.example.com" }
+                    ] } } } }] }
+                } } })
+            } else {
+                let nodes = if PULL_REQUEST_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
+                    json!([{
+                        "number": 128,
+                        "title": "Return 404 for trips the viewer cannot see",
+                        "url": "https://github.com/trailmap-app/trailmap/pull/128",
+                        "state": "OPEN",
+                        "isDraft": false,
+                        "baseRefName": "main",
+                        "headRefOid": "abc",
+                        "updatedAt": "2026-10-31T10:00:00Z",
+                        "isCrossRepository": false,
+                        "headRepositoryOwner": { "login": "evb0110" }
+                    }])
+                } else {
+                    json!([])
+                };
+                json!({ "repository": {
+                    "defaultBranchRef": { "name": "main" },
+                    "pullRequests": { "nodes": nodes }
+                } })
+            };
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(http_client::AsyncBody::from(json!({ "data": data }).to_string()))?)
+        })
     }
 
     trait UpdateInWindow {

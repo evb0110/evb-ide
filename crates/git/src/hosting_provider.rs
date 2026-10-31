@@ -93,6 +93,11 @@ pub trait GitHostingProvider {
     /// Returns a permalink to a file and/or selection on this hosting provider.
     fn build_permalink(&self, remote: ParsedGitRemote, params: BuildPermalinkParams) -> Url;
 
+    /// Whether this is GitHub or a GitHub Enterprise server, whose API can be used.
+    fn is_github(&self) -> bool {
+        false
+    }
+
     /// Returns a URL to create a pull request on this hosting provider.
     fn build_create_pull_request_url(
         &self,

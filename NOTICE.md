@@ -34,6 +34,12 @@ The application's Help → View Dependency Licenses displays the generated
 third-party notices. Release bundles also carry license texts and source
 directions in Contents/Resources/licenses.
 
+## Source code from other projects
+
+- The GitHub pull request client in crates/evb_github follows T3 Code's GitHub
+  source control provider, Copyright 2026 T3 Tools Inc., under the MIT License.
+  See crates/evb_github/LICENSE-T3CODE.
+
 ## Names and hosted services
 
 Zed and its logos are trademarks of Zed Industries, Inc. JetBrains, IntelliJ,

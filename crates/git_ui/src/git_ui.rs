@@ -54,6 +54,7 @@ mod git_runtime_diagnostics;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
+pub mod pull_requests;
 pub(crate) mod remote_output;
 pub mod repository_selector;
 pub mod solo_diff_view;
@@ -64,6 +65,7 @@ pub mod unstaged_diff;
 
 pub use blame_ui::GitBlameStatus;
 pub use conflict_view::MergeConflictIndicator;
+pub use pull_requests::PullRequestIndicator;
 
 pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
@@ -192,13 +194,10 @@ pub fn init(cx: &mut App) {
         if !project.is_via_collab() {
             workspace.register_action(
                 |workspace, _: &zed_actions::git::CreatePullRequest, window, cx| {
-                    if let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) {
-                        panel.update(cx, |panel, cx| {
-                            panel.create_pull_request(window, cx);
-                        });
-                    }
+                    pull_requests::create_pull_request(workspace, window, cx);
                 },
             );
+            pull_requests::register(workspace);
             workspace.register_action(|workspace, _: &git::Fetch, window, cx| {
                 let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
                     return;

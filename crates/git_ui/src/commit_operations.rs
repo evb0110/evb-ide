@@ -124,7 +124,7 @@ async fn parent_count(
     Ok(parents.split_whitespace().count().saturating_sub(1))
 }
 
-fn args<const N: usize>(args: [&str; N]) -> Vec<String> {
+pub(crate) fn args<const N: usize>(args: [&str; N]) -> Vec<String> {
     args.into_iter().map(str::to_string).collect()
 }
 
@@ -1517,7 +1517,7 @@ impl Render for CommitMessageModal {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use fs::RealFs;
     use gpui::{TestAppContext, VisualTestContext};
@@ -1530,7 +1530,7 @@ mod tests {
     use util::test::TempTree;
     use workspace::WorkspaceSettings;
 
-    fn init_test(cx: &mut TestAppContext) {
+    pub(crate) fn init_test(cx: &mut TestAppContext) {
         zlog::init_test();
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
@@ -1545,7 +1545,7 @@ mod tests {
     }
 
     #[allow(clippy::disallowed_methods)]
-    fn try_run_git(directory: &Path, arguments: &[&str]) -> Result<String, String> {
+    pub(crate) fn try_run_git(directory: &Path, arguments: &[&str]) -> Result<String, String> {
         let output = std::process::Command::new("git")
             .current_dir(directory)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -1560,12 +1560,12 @@ mod tests {
     }
 
     #[track_caller]
-    fn run_git(directory: &Path, arguments: &[&str]) -> String {
+    pub(crate) fn run_git(directory: &Path, arguments: &[&str]) -> String {
         try_run_git(directory, arguments)
             .unwrap_or_else(|error| panic!("git {arguments:?} failed: {error}"))
     }
 
-    fn commit_file(directory: &Path, file: &str, contents: &str, message: &str) -> String {
+    pub(crate) fn commit_file(directory: &Path, file: &str, contents: &str, message: &str) -> String {
         std::fs::write(directory.join(file), contents).expect("writing a fixture file");
         run_git(directory, &["add", file]);
         run_git(directory, &["commit", "-q", "-m", message]);
@@ -1582,7 +1582,7 @@ mod tests {
     /// Creates `main` with commits A, B and C (one file each). The repository's
     /// own config pins the identity and turns signing off, since operations run
     /// with the user's global git config.
-    fn create_repository(root: &Path) -> Vec<String> {
+    pub(crate) fn create_repository(root: &Path) -> Vec<String> {
         run_git(root, &["init", "-q", "-b", "main"]);
         for (key, value) in [
             ("user.name", "Test"),
@@ -1599,7 +1599,7 @@ mod tests {
             .collect()
     }
 
-    async fn open(
+    pub(crate) async fn open(
         root: &Path,
         cx: &mut TestAppContext,
     ) -> (VisualTestContext, Entity<Repository>, WeakEntity<Workspace>) {
@@ -1615,7 +1615,7 @@ mod tests {
 
     /// Pumps the app until `condition` returns a value; git runs in real processes.
     #[track_caller]
-    fn wait_for<T>(cx: &mut VisualTestContext, mut condition: impl FnMut(&App) -> Option<T>) -> T {
+    pub(crate) fn wait_for<T>(cx: &mut VisualTestContext, mut condition: impl FnMut(&App) -> Option<T>) -> T {
         for _ in 0..3000 {
             cx.run_until_parked();
             if let Some(value) = cx.update(|_, cx| condition(cx)) {
