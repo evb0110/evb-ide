@@ -62,6 +62,7 @@ cp "target/release/cli" "$app_path/Contents/MacOS/cli"
 licenses_dir="$app_path/Contents/Resources/licenses"
 mkdir -p "$licenses_dir"
 cp LICENSE-GPL LICENSE-APACHE NOTICE.md assets/licenses.md "$licenses_dir/"
+cp NATIVE-SOURCES.md assets/WEBRTC-LICENSE.md "$licenses_dir/"
 cat > "$licenses_dir/SOURCE.txt" <<EOF
 EVB IDE $version, built from commit $commit_sha.
 Corresponding source, dependency sources, and build instructions:

@@ -55,6 +55,7 @@ fi
 mkdir -p "$output"
 
 script/evb-install -n
+[[ "$(git rev-parse HEAD)" == "$commit" && -z "$(git status --porcelain)" ]] || { echo 'Source changed during the build; rebuild from a clean, unchanged commit.' >&2; exit 1; }
 codesign --verify --deep --strict "$app_path"
 codesign -dv "$app_path" 2>&1 | grep -q '^Authority=Developer ID Application:'
 ditto -c -k --keepParent "$app_path" "$output/notarize.zip"
@@ -79,11 +80,15 @@ rm -rf "$image_root"
 
 source_root="$output/EVB-IDE-$version-source"
 mkdir -p "$source_root"
-git archive HEAD | tar -x -C "$source_root"
+git archive "$commit" | tar -x -C "$source_root"
 (cd "$source_root" && cargo vendor --locked --versioned-dirs vendor) > "$output/vendor-config.toml"
 cat "$output/vendor-config.toml" >> "$source_root/.cargo/config.toml"
 printf '%s\n' "$commit" > "$source_root/SOURCE_COMMIT"
 cp assets/licenses.md "$source_root/assets/licenses.md"
+mkdir -p "$source_root/native"
+curl --fail --location --proto '=https' --tlsv1.2 \
+    'https://github.com/zed-industries/livekit-rust-sdks/archive/55ea4a4e0736d5301170594db0b901d5db060a0d.tar.gz' \
+    --output "$source_root/native/livekit-webrtc-build-source.tar.gz"
 cat > "$source_root/REBUILD.md" <<EOF
 # Rebuild EVB IDE $version
 
@@ -98,7 +103,8 @@ Install the prerequisites in EVB.md: Xcode with its Metal toolchain, CMake,
 and rustup. From this directory, run script/evb-install -n. That produces a
 local ad-hoc-signed app; your own signing identity is needed for public
 Developer ID signing. Third-party build scripts may fetch platform toolchains
-or native components as described in their sources.
+or native components as described in their sources. See NATIVE-SOURCES.md
+for native dependency sources and WebRTC rebuild instructions.
 
 The landing page builds separately using Node 24.21.0 and its pnpm lockfile.
 No signing credentials or private keys are part of this source archive.
@@ -127,5 +133,6 @@ Release Notes:
 
 - Added the first public EVB IDE release for macOS.
 EOF
+[[ "$(git rev-parse HEAD)" == "$commit" && -z "$(git status --porcelain)" ]] || { echo 'Source changed during preparation; do not publish these artifacts.' >&2; exit 1; }
 printf '%s\n' "$commit" > "$output/verified-commit"
 echo "Prepared $tag at $output. Verify app startup, then run script/evb-release --publish."

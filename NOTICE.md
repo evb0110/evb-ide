@@ -27,6 +27,8 @@ applicable license terms.
   under assets/fonts. The generated dependency notices include those texts.
 - The EVB IDE app icon is an original EVB IDE asset, distributed under the
   fork's GPL-3.0-or-later license.
+- The native WebRTC distribution retains its combined license notices in
+  assets/WEBRTC-LICENSE.md. See NATIVE-SOURCES.md for its sources and build scripts.
 
 The application's Help → View Dependency Licenses displays the generated
 third-party notices. Release bundles also carry license texts and source

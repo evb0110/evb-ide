@@ -7,7 +7,8 @@ OUTPUT_FILE="${1:-$(pwd)/assets/licenses.md}"
 TEMPLATE_FILE="script/licenses/template.md.hbs"
 
 fail_on_stderr() {
-    local tmpfile=$(mktemp)
+    local tmpfile
+    tmpfile=$(mktemp)
     "$@" 2> >(tee "$tmpfile" >&2)
     local rc=$?
     [ -s "$tmpfile" ] && rc=1
@@ -32,6 +33,9 @@ echo -n "" >"$OUTPUT_FILE"
 
     echo -e "\n# ###### JETBRAINS ICON LICENSE ######\n"
     cat extensions/evb-jetbrains-icons/LICENSE
+
+    echo -e "\n# ###### NATIVE WEBRTC LICENSES ######\n"
+    cat assets/WEBRTC-LICENSE.md
 
     echo -e "\n# ###### FONT LICENSES ######\n"
     for font_license in assets/fonts/*/OFL.txt assets/fonts/*/license.txt; do
