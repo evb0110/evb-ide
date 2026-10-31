@@ -89,6 +89,9 @@ mkdir -p "$source_root/native"
 curl --fail --location --proto '=https' --tlsv1.2 \
     'https://github.com/zed-industries/livekit-rust-sdks/archive/55ea4a4e0736d5301170594db0b901d5db060a0d.tar.gz' \
     --output "$source_root/native/livekit-webrtc-build-source.tar.gz"
+curl --fail --location --proto '=https' --tlsv1.2 \
+    'https://github.com/webrtc-sdk/webrtc/archive/0001d84a16a3502e45b86a065253df4c511026ae.tar.gz' \
+    --output "$source_root/native/webrtc-source.tar.gz"
 cat > "$source_root/REBUILD.md" <<EOF
 # Rebuild EVB IDE $version
 
