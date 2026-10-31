@@ -1,0 +1,68 @@
+// EVB IDE key bindings on Linux and Windows, loaded after the base keymap so they win over it.
+// They follow WebStorm's Linux and Windows keymap; keymaps/evb.json has the macOS ones.
+// User keymaps still override these.
+[
+  {
+    "context": "Workspace",
+    "bindings": {
+      "shift-f10": "evb_run::Run",
+      "shift-f9": "evb_run::Debug",
+      "ctrl-f2": "evb_run::Stop",
+      "alt-shift-f10": "evb_run::ChooseConfiguration",
+      "ctrl-j": "workspace::ToggleBottomDock",
+    },
+  },
+  {
+    // WebStorm's Git tool window; the JetBrains keymap leaves alt-9 unbound.
+    "context": "Pane || Workspace",
+    "bindings": {
+      "alt-9": "git_log_panel::ToggleFocus",
+    },
+  },
+  {
+    "context": "Editor && mode == full",
+    "bindings": {
+      "shift-f10": "evb_run::Run",
+      "shift-f9": "evb_run::Debug",
+      "ctrl-f2": "evb_run::Stop",
+      // JetBrains inserts a live template on ctrl-j; EVB IDE toggles the bottom dock there,
+      // as cmd-j does on macOS. Hover stays on ctrl-q (Quick Documentation).
+      "ctrl-j": "workspace::ToggleBottomDock",
+    },
+  },
+  {
+    // Enter adds a line in a review comment; ctrl-enter sends it.
+    "context": "ReviewTextModal > Editor",
+    "bindings": {
+      "enter": "editor::Newline",
+      "ctrl-enter": "menu::Confirm",
+    },
+  },
+  {
+    // Enter adds a line in the description; ctrl-enter creates the pull request.
+    "context": "CreatePullRequestModal > Editor",
+    "bindings": {
+      "ctrl-enter": "menu::Confirm",
+    },
+  },
+  {
+    "context": "CreatePullRequestModal > Editor && mode == auto_height",
+    "bindings": {
+      "enter": "editor::Newline",
+    },
+  },
+  {
+    // Enter adds a line in the commit message; ctrl-enter saves it.
+    "context": "CommitMessageModal > Editor",
+    "bindings": {
+      "enter": "editor::Newline",
+      "ctrl-enter": "menu::Confirm",
+    },
+  },
+  {
+    "context": "GitPanel || CommitEditor > Editor",
+    "bindings": {
+      "ctrl-alt-k": "git_panel::CommitAndPush",
+    },
+  },
+]

@@ -6327,6 +6327,16 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_evb_keymaps_load_on_every_platform(cx: &mut App) {
+        // Each platform loads one of these; both must name only real actions.
+        for path in ["keymaps/evb.json", "keymaps/linux/evb.json"] {
+            let bindings = KeymapFile::load_asset(path, Some(KeybindSource::Base), cx)
+                .unwrap_or_else(|error| panic!("{error:#}"));
+            assert!(!bindings.is_empty(), "{path} has no bindings");
+        }
+    }
+
+    #[gpui::test]
     fn test_bundled_settings_and_themes(cx: &mut App) {
         cx.text_system()
             .add_fonts(vec![

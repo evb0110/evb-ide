@@ -18,6 +18,17 @@
       Published Mac builds require macOS 12 or later. Downloads include license notices; each release links its
       corresponding source and SHA-256 checksums. Only architectures with a published build are offered.
     </p>
+    <h2>Install on Linux</h2>
+    <ol>
+      <li><NuxtLink to="/#download">Download the Linux archive</NuxtLink> (x64).</li>
+      <li>Extract it and run <code>./evb-ide/install.sh</code>.</li>
+      <li>Run <code>evb-ide</code>, or open EVB IDE from your applications menu.</li>
+    </ol>
+    <p>
+      The installer copies EVB IDE to <code>~/.local/evb-ide</code>, links the <code>evb-ide</code> command into
+      <code>~/.local/bin</code> and adds a menu entry, all for your user. The build needs glibc 2.35 or later (Ubuntu
+      22.04, Debian 12, Fedora 36 or newer) and a GPU with Vulkan support.
+    </p>
     <h2>Your first project</h2>
     <p>
       Open a folder containing your project. The run picker discovers package.json scripts, Composer scripts, and
@@ -28,37 +39,45 @@
       <thead>
         <tr>
           <th>Action</th>
-          <th>macOS shortcut</th>
+          <th>macOS</th>
+          <th>Linux</th>
         </tr>
       </thead>
       <tbody>
         <tr>
           <td>Run selected configuration</td>
           <td><kbd>⌃ R</kbd></td>
+          <td><kbd>Shift F10</kbd></td>
         </tr>
         <tr>
           <td>Debug a Node.js configuration</td>
           <td><kbd>⌃ D</kbd></td>
+          <td><kbd>Shift F9</kbd></td>
         </tr>
         <tr>
           <td>Stop</td>
           <td><kbd>⌘ F2</kbd></td>
+          <td><kbd>Ctrl F2</kbd></td>
         </tr>
         <tr>
           <td>Choose run configuration</td>
           <td><kbd>⌃ ⌥ R</kbd></td>
+          <td><kbd>Alt Shift F10</kbd></td>
         </tr>
         <tr>
           <td>Commit and Push</td>
           <td><kbd>⌥ ⌘ K</kbd></td>
+          <td><kbd>Ctrl Alt K</kbd></td>
         </tr>
         <tr>
           <td>Git Log</td>
           <td><kbd>⌘ 9</kbd></td>
+          <td><kbd>Alt 9</kbd></td>
         </tr>
         <tr>
           <td>Toggle bottom dock</td>
           <td><kbd>⌘ J</kbd></td>
+          <td><kbd>Ctrl J</kbd></td>
         </tr>
       </tbody>
     </table>
@@ -79,25 +98,27 @@
     <h2>Updates</h2>
     <p>
       Download the next version from <a :href="`${repositoryUrl}/releases`">GitHub Releases</a>, quit EVB IDE, and
-      replace it in Applications. Your settings and application data remain in their own folders. Automatic upstream Zed
+      replace it in Applications, or run the new archive's <code>install.sh</code> on Linux. Your settings and application data remain in their own folders. Automatic upstream Zed
       updates are disabled.
     </p>
     <h2>Build from source</h2>
     <p>
-      The supported packaging script currently builds macOS. You need Xcode and its Metal toolchain, Rust through
-      rustup, CMake, and the prerequisites in the <a :href="`${repositoryUrl}/blob/main/EVB.md`">development guide</a>.
+      On macOS you need Xcode and its Metal toolchain, Rust through rustup, CMake, and the prerequisites in the
+      <a :href="`${repositoryUrl}/blob/main/EVB.md`">development guide</a>. On Linux, <code>script/linux</code> installs
+      the libraries and clang; the build needs clang 17 or newer.
     </p>
     <pre><code>git clone https://github.com/evb0110/evb-ide.git
 cd evb-ide
-script/evb-install -n</code></pre>
+script/evb-install -n       # macOS: target/evb-bundle/EVB IDE.app
+script/evb-bundle-linux     # Linux: target/evb-bundle/EVB-IDE-VERSION-linux-x64.tar.gz</code></pre>
     <p>
-      This produces <code>target/evb-bundle/EVB IDE.app</code> with an ad-hoc signature for local development. Public
-      releases use Developer ID signing and Apple notarization. Each release provides an archive with dependency sources
-      and instructions for rebuilding that version.
+      The macOS app gets an ad-hoc signature for local development; public releases use Developer ID signing and Apple
+      notarization. Each release provides an archive with dependency sources and instructions for rebuilding that
+      version.
     </p>
     <h2>Need help?</h2>
     <p>
-      <a :href="`${repositoryUrl}/issues`">Open an issue</a> with your EVB IDE version, macOS version, and steps to
+      <a :href="`${repositoryUrl}/issues`">Open an issue</a> with your EVB IDE version, operating system, and steps to
       reproduce. EVB IDE is an independent community project; please report fork-specific issues here.
     </p>
   </article>

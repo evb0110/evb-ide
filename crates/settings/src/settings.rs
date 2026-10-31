@@ -196,7 +196,12 @@ pub fn default_keymap() -> Cow<'static, str> {
 pub const VIM_KEYMAP_PATH: &str = "keymaps/vim.json";
 
 /// EVB IDE bindings, layered over the base keymap.
+#[cfg(target_os = "macos")]
 pub const EVB_KEYMAP_PATH: &str = "keymaps/evb.json";
+
+/// EVB IDE bindings, layered over the base keymap, with WebStorm's Linux and Windows keys.
+#[cfg(not(target_os = "macos"))]
+pub const EVB_KEYMAP_PATH: &str = "keymaps/linux/evb.json";
 
 pub fn vim_keymap() -> Cow<'static, str> {
     asset_str::<SettingsAssets>(VIM_KEYMAP_PATH)
