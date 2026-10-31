@@ -58,7 +58,8 @@ mkdir -p "$output"
 script/evb-install -n
 [[ "$(git rev-parse HEAD)" == "$commit" && -z "$(git status --porcelain)" ]] || { echo 'Source changed during the build; rebuild from a clean, unchanged commit.' >&2; exit 1; }
 codesign --verify --deep --strict "$app_path"
-codesign -dv "$app_path" 2>&1 | grep -q '^Authority=Developer ID Application:'
+signature_details="$(codesign -dv --verbose=4 "$app_path" 2>&1)"
+grep -q '^Authority=Developer ID Application:' <<< "$signature_details"
 ditto -c -k --keepParent "$app_path" "$output/notarize.zip"
 notarize "$output/notarize.zip"
 xcrun stapler staple "$app_path"
