@@ -5781,19 +5781,22 @@ pub mod test {
         let list_state =
             settings_window.read_with(cx, |settings_window, _| settings_window.list_state.clone());
         let first_setting_height = list_state.bounds_for_item(2).unwrap().size.height;
+        // A header this close to the top selects its section (within 1.5 rem). The window's rem
+        // follows the UI font size, which the defaults may change.
+        let header_top = cx.update(|window, _| window.rem_size() * 1.5 - px(2.));
         assert!(first_setting_height > list_state.viewport_bounds().size.height);
         settings_window.update(cx, |settings_window, cx| {
             assert_eq!(settings_window.bottom_spacer_height, px(0.));
             list_state.scroll_to(gpui::ListOffset {
                 item_ix: 2,
-                offset_in_item: first_setting_height - px(22.),
+                offset_in_item: first_setting_height - header_top,
             });
             cx.notify();
         });
         cx.run_until_parked();
         assert_eq!(
             list_state.bounds_for_item(3).unwrap().top() - list_state.viewport_bounds().top(),
-            px(22.)
+            header_top
         );
         settings_window.read_with(cx, |settings_window, _| {
             assert_eq!(settings_window.navbar_entry, 2);
@@ -5807,7 +5810,7 @@ pub mod test {
             if width == px(600.) {
                 assert!(header_bounds.top() > viewport.bottom());
             } else {
-                assert_eq!(header_bounds.top() - viewport.top(), px(22.));
+                assert_eq!(header_bounds.top() - viewport.top(), header_top);
             }
             settings_window.read_with(cx, |settings_window, _| {
                 assert_eq!(settings_window.bottom_spacer_height, px(0.));
