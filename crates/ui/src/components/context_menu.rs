@@ -1779,6 +1779,18 @@ impl ContextMenu {
         )
     }
 
+    fn has_leading_toggle(&self) -> bool {
+        self.items.iter().any(|item| {
+            matches!(
+                item,
+                ContextMenuItem::Entry(ContextMenuEntry {
+                    toggle: Some((IconPosition::Start, _)),
+                    ..
+                })
+            )
+        })
+    }
+
     fn render_menu_entry(
         &self,
         ix: usize,
@@ -2020,6 +2032,21 @@ impl ContextMenu {
                             },
                         ))
                     })
+                    .when(
+                        toggle.is_none()
+                            && (icon.is_none() || *icon_position != IconPosition::Start)
+                            && self.has_leading_toggle(),
+                        |list_item| {
+                            // Like native menus, plain items share the checkmark column so
+                            // their labels line up with the toggles.
+                            list_item.start_slot(
+                                div()
+                                    .flex_none()
+                                    .invisible()
+                                    .child(Icon::new(IconName::Check).size(*icon_size)),
+                            )
+                        },
+                    )
                     .when_some(*toggle, |list_item, (position, toggled)| {
                         let contents = div()
                             .flex_none()
