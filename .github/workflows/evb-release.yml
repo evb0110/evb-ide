@@ -1,7 +1,8 @@
 name: EVB Release
 
 # Builds the release on GitHub runners, so releases need no local release build: the macOS app
-# signed and notarized by script/evb-release, and the Linux archive by script/evb-bundle-linux.
+# signed and notarized by script/evb-release, the Linux archive by script/evb-bundle-linux and the
+# Windows archive by script/evb-bundle-windows.ps1.
 # A v* tag publishes the release; a manual run builds and uploads the artifacts, and publishes
 # only when asked.
 
@@ -137,9 +138,34 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      # D: has more room than C: on Windows runners.
+      CARGO_TARGET_DIR: D:\evb-target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the archive
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          script/evb-bundle-windows.ps1
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: evb-ide-windows-x64
+          path: target/evb-bundle/EVB-IDE-*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     if: github.ref_type == 'tag' || inputs.publish
-    needs: [macos-arm64, linux-x64]
+    needs: [macos-arm64, linux-x64, windows-x64]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -158,17 +184,26 @@ jobs:
           # Outside the checkout: script/evb-release needs a clean working tree.
           path: ${{ runner.temp }}/linux-artifact
 
-      - name: Add the Linux archive to the release
+      - uses: actions/download-artifact@v4
+        with:
+          name: evb-ide-windows-x64
+          path: ${{ runner.temp }}/windows-artifact
+
+      - name: Add the Linux and Windows archives to the release
         run: |
           version="$(tr -d '\n' < EVB_VERSION)"
           output=".devkit/releases/v$version"
-          mv "$RUNNER_TEMP"/linux-artifact/EVB-IDE-"$version"-linux-x64.tar.gz "$output/"
-          (cd "$output" && shasum -a 256 EVB-IDE-"$version"-linux-x64.tar.gz >> SHA256SUMS)
-          line="- Linux x64 (glibc 2.35 or later): extract the archive and run install.sh in it."
-          awk -v line="$line" '!done && /^- Open the DMG/ { print line; done = 1 } { print }' \
+          linux="EVB-IDE-$version-linux-x64.tar.gz"
+          windows="EVB-IDE-$version-windows-x64.zip"
+          mv "$RUNNER_TEMP/linux-artifact/$linux" "$RUNNER_TEMP/windows-artifact/$windows" "$output/"
+          (cd "$output" && shasum -a 256 "$linux" "$windows" >> SHA256SUMS)
+          linux_line="- Linux x64 (glibc 2.35 or later): extract the archive and run install.sh in it."
+          windows_line="- Windows 10 or later, x64: extract the archive and run evb-ide.exe. The Windows build is not code-signed, so SmartScreen may ask before it first runs."
+          awk -v linux="$linux_line" -v windows="$windows_line" \
+            '!done && /^- Open the DMG/ { print linux; print windows; done = 1 } { print }' \
             "$output/RELEASE-NOTES.md" > "$output/RELEASE-NOTES.new"
           mv "$output/RELEASE-NOTES.new" "$output/RELEASE-NOTES.md"
-          grep -qF "$line" "$output/RELEASE-NOTES.md"
+          grep -qF "Windows 10 or later" "$output/RELEASE-NOTES.md"
 
       - name: Publish
         env:
