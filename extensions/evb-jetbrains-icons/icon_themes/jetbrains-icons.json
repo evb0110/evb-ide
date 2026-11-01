@@ -8,40 +8,40 @@
       "appearance": "light",
       "directory_icons": {
         "collapsed": "./icons/folder.svg",
-        "expanded": "./icons/folder.svg"
+        "expanded": "./icons/folderOpen.svg"
       },
       "named_directory_icons": {
         "node_modules": {
           "collapsed": "./icons/libraryFolder.svg",
-          "expanded": "./icons/libraryFolder.svg"
+          "expanded": "./icons/libraryFolderOpen.svg"
         },
         ".nuxt": {
           "collapsed": "./icons/excludeRoot.svg",
-          "expanded": "./icons/excludeRoot.svg"
+          "expanded": "./icons/excludeRootOpen.svg"
         },
         ".output": {
           "collapsed": "./icons/excludeRoot.svg",
-          "expanded": "./icons/excludeRoot.svg"
+          "expanded": "./icons/excludeRootOpen.svg"
         },
         ".next": {
           "collapsed": "./icons/excludeRoot.svg",
-          "expanded": "./icons/excludeRoot.svg"
+          "expanded": "./icons/excludeRootOpen.svg"
         },
         "dist": {
           "collapsed": "./icons/excludeRoot.svg",
-          "expanded": "./icons/excludeRoot.svg"
+          "expanded": "./icons/excludeRootOpen.svg"
         },
         "coverage": {
           "collapsed": "./icons/excludeRoot.svg",
-          "expanded": "./icons/excludeRoot.svg"
+          "expanded": "./icons/excludeRootOpen.svg"
         },
         "target": {
           "collapsed": "./icons/excludeRoot.svg",
-          "expanded": "./icons/excludeRoot.svg"
+          "expanded": "./icons/excludeRootOpen.svg"
         },
         ".github": {
           "collapsed": "./icons/folderGithub.svg",
-          "expanded": "./icons/folderGithub.svg"
+          "expanded": "./icons/folderGithubOpen.svg"
         }
       },
       "file_stems": {
@@ -221,40 +221,40 @@
       "appearance": "dark",
       "directory_icons": {
         "collapsed": "./icons/folder_dark.svg",
-        "expanded": "./icons/folder_dark.svg"
+        "expanded": "./icons/folderOpen_dark.svg"
       },
       "named_directory_icons": {
         "node_modules": {
           "collapsed": "./icons/libraryFolder_dark.svg",
-          "expanded": "./icons/libraryFolder_dark.svg"
+          "expanded": "./icons/libraryFolderOpen_dark.svg"
         },
         ".nuxt": {
           "collapsed": "./icons/excludeRoot_dark.svg",
-          "expanded": "./icons/excludeRoot_dark.svg"
+          "expanded": "./icons/excludeRootOpen_dark.svg"
         },
         ".output": {
           "collapsed": "./icons/excludeRoot_dark.svg",
-          "expanded": "./icons/excludeRoot_dark.svg"
+          "expanded": "./icons/excludeRootOpen_dark.svg"
         },
         ".next": {
           "collapsed": "./icons/excludeRoot_dark.svg",
-          "expanded": "./icons/excludeRoot_dark.svg"
+          "expanded": "./icons/excludeRootOpen_dark.svg"
         },
         "dist": {
           "collapsed": "./icons/excludeRoot_dark.svg",
-          "expanded": "./icons/excludeRoot_dark.svg"
+          "expanded": "./icons/excludeRootOpen_dark.svg"
         },
         "coverage": {
           "collapsed": "./icons/excludeRoot_dark.svg",
-          "expanded": "./icons/excludeRoot_dark.svg"
+          "expanded": "./icons/excludeRootOpen_dark.svg"
         },
         "target": {
           "collapsed": "./icons/excludeRoot_dark.svg",
-          "expanded": "./icons/excludeRoot_dark.svg"
+          "expanded": "./icons/excludeRootOpen_dark.svg"
         },
         ".github": {
           "collapsed": "./icons/folderGithub_dark.svg",
-          "expanded": "./icons/folderGithub_dark.svg"
+          "expanded": "./icons/folderGithubOpen_dark.svg"
         }
       },
       "file_stems": {

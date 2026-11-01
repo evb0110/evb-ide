@@ -1,6 +1,6 @@
 id = "evb-jetbrains-icons"
 name = "JetBrains Icons"
-version = "0.1.0"
+version = "0.1.1"
 schema_version = 1
 authors = ["EVB IDE"]
 description = "JetBrains New UI file and folder icons from intellij-community (Apache-2.0)."
