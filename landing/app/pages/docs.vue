@@ -62,38 +62,38 @@
       <tbody>
         <tr>
           <td>Run selected configuration</td>
-          <td><kbd>⌃ R</kbd></td>
-          <td><kbd>Shift F10</kbd></td>
+          <td data-label="macOS"><kbd>⌃ R</kbd></td>
+          <td data-label="macOS"><kbd>Shift F10</kbd></td>
         </tr>
         <tr>
           <td>Debug a Node.js configuration</td>
-          <td><kbd>⌃ D</kbd></td>
-          <td><kbd>Shift F9</kbd></td>
+          <td data-label="macOS"><kbd>⌃ D</kbd></td>
+          <td data-label="macOS"><kbd>Shift F9</kbd></td>
         </tr>
         <tr>
           <td>Stop</td>
-          <td><kbd>⌘ F2</kbd></td>
-          <td><kbd>Ctrl F2</kbd></td>
+          <td data-label="macOS"><kbd>⌘ F2</kbd></td>
+          <td data-label="macOS"><kbd>Ctrl F2</kbd></td>
         </tr>
         <tr>
           <td>Choose run configuration</td>
-          <td><kbd>⌃ ⌥ R</kbd></td>
-          <td><kbd>Alt Shift F10</kbd></td>
+          <td data-label="macOS"><kbd>⌃ ⌥ R</kbd></td>
+          <td data-label="macOS"><kbd>Alt Shift F10</kbd></td>
         </tr>
         <tr>
           <td>Commit and Push</td>
-          <td><kbd>⌥ ⌘ K</kbd></td>
-          <td><kbd>Ctrl Alt K</kbd></td>
+          <td data-label="macOS"><kbd>⌥ ⌘ K</kbd></td>
+          <td data-label="macOS"><kbd>Ctrl Alt K</kbd></td>
         </tr>
         <tr>
           <td>Git Log</td>
-          <td><kbd>⌘ 9</kbd></td>
-          <td><kbd>Alt 9</kbd></td>
+          <td data-label="macOS"><kbd>⌘ 9</kbd></td>
+          <td data-label="macOS"><kbd>Alt 9</kbd></td>
         </tr>
         <tr>
           <td>Toggle bottom dock</td>
-          <td><kbd>⌘ J</kbd></td>
-          <td><kbd>Ctrl J</kbd></td>
+          <td data-label="macOS"><kbd>⌘ J</kbd></td>
+          <td data-label="macOS"><kbd>Ctrl J</kbd></td>
         </tr>
       </tbody>
     </table>

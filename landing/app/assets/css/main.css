@@ -172,6 +172,7 @@ kbd {
   font-family: var(--font-mono);
   font-size: 12px;
   box-shadow: 0 2px 0 var(--site-border);
+  white-space: nowrap;
 }
 .site-footer {
   display: flex;
@@ -315,6 +316,35 @@ kbd {
   }
   .reading-page {
     padding: 40px 0 60px;
+  }
+  .reading-page thead {
+    display: none;
+  }
+  .reading-page table,
+  .reading-page tbody {
+    display: block;
+  }
+  .reading-page tr {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 12px;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--site-border);
+  }
+  .reading-page td {
+    padding: 0;
+    border-bottom: 0;
+  }
+  .reading-page td:first-child {
+    grid-column: 1 / -1;
+    font-size: 14px;
+  }
+  .reading-page td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    color: var(--site-soft);
+    font-size: 11px;
   }
 }
 
