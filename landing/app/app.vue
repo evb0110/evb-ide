@@ -22,23 +22,25 @@
       </header>
       <main id="main"><NuxtPage /></main>
       <footer class="site-footer">
-        <div>
-          <NuxtLink to="/" class="footer-brand">EVB IDE</NuxtLink>
+        <div class="footer-main">
+          <NuxtLink to="/" class="footer-brand"><strong>EVB</strong> IDE</NuxtLink>
+          <nav aria-label="Footer navigation">
+            <NuxtLink to="/docs">Installation &amp; guide</NuxtLink>
+            <NuxtLink to="/license">License &amp; credits</NuxtLink>
+            <NuxtLink to="/privacy">Privacy</NuxtLink>
+            <a :href="`${repositoryUrl}/issues`">Report an issue</a>
+          </nav>
+        </div>
+        <div class="footer-legal">
           <p>
-            An independent fork of <a href="https://zed.dev">Zed</a>.<br />Not affiliated with Zed Industries or
+            © {{ year }} <a href="https://evb-stack.com/" class="copyright-author">Eugene Barsky</a> &amp;
+            contributors · GPL-3.0-or-later
+          </p>
+          <p>
+            An independent fork of <a href="https://zed.dev">Zed</a>. Not affiliated with Zed Industries or
             JetBrains.
           </p>
         </div>
-        <nav aria-label="Footer navigation">
-          <NuxtLink to="/docs">Installation &amp; guide</NuxtLink>
-          <NuxtLink to="/license">License &amp; credits</NuxtLink>
-          <NuxtLink to="/privacy">Privacy</NuxtLink>
-          <a :href="`${repositoryUrl}/issues`">Report an issue</a>
-        </nav>
-        <p class="copyright">
-          © {{ year }} <a href="https://evb-stack.com/" class="copyright-author">Eugene Barsky</a> &amp;
-          contributors<br />GPL-3.0-or-later
-        </p>
       </footer>
     </div>
   </UApp>
