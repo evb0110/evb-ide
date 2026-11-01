@@ -1,0 +1,12 @@
+<!-- Copyright 2000-2023 JetBrains s.r.o. and contributors. Use of this source code is governed by the Apache 2.0 license. -->
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs><clipPath id="folder"><path d="M0 0H16V9H14V7H10V8H7V16H0Z"/></clipPath></defs>
+<g clip-path="url(#folder)">
+<path d="M8.10584 4.34613L8.25344 4.5H8.46667H13C13.8284 4.5 14.5 5.17157 14.5 6V12.1333C14.5 12.9529 13.932 13.5 13.3667 13.5H2.63333C2.06804 13.5 1.5 12.9529 1.5 12.1333V3.86667C1.5 3.04707 2.06804 2.5 2.63333 2.5H6.1217C6.25792 2.5 6.38824 2.55557 6.48253 2.65387L8.10584 4.34613Z" fill="#EBECF0" stroke="#6C707E"/>
+<path d="M2.75 13.5L4.5 7.5H14.25C14.75 7.5 15.05 7.9 14.9 8.4L13.55 12.7C13.4 13.2 13 13.5 12.45 13.5H2.75Z" fill="#EBECF0" stroke="#6C707E" stroke-linejoin="round"/>
+</g>
+<path d="M11 9H12V14H11V9Z" fill="#EDF3FF"/>
+<path d="M9 10H10V14H9V10Z" fill="#EDF3FF"/>
+<path d="M14 11H13V14H14V11Z" fill="#EDF3FF"/>
+<path fill-rule="evenodd" clip-rule="evenodd" d="M10 9C10 8.44772 10.4477 8 11 8H12C12.5523 8 13 8.44772 13 9V10H14C14.5523 10 15 10.4477 15 11V14C15 14.5523 14.5523 15 14 15H9C8.44772 15 8 14.5523 8 14V10C8 9.44772 8.44772 9 9 9L10 9ZM11 9H12V14H11V9ZM10 10H9L9 14H10V10ZM13 14H14V11H13V14Z" fill="#3574F0"/>
+</svg>
