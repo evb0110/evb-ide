@@ -34,10 +34,10 @@
           <NuxtLink to="/license">License &amp; credits</NuxtLink>
           <NuxtLink to="/privacy">Privacy</NuxtLink>
           <a :href="`${repositoryUrl}/issues`">Report an issue</a>
-          <a href="https://evb-viewer.com">EVB Viewer ↗</a>
         </nav>
         <p class="copyright">
-          © {{ year }} Eugene Barsky &amp; contributors<br />GPL-3.0-or-later
+          © {{ year }} <a href="https://evb-stack.com/" class="copyright-author">Eugene Barsky</a> &amp;
+          contributors<br />GPL-3.0-or-later
         </p>
       </footer>
     </div>
