@@ -113,7 +113,7 @@
     </p>
     <h2>Updates</h2>
     <p>
-      Download the next version from <a :href="`${repositoryUrl}/releases`">GitHub Releases</a>, quit EVB IDE, and
+      Download the next version from <a target="_blank" :href="`${repositoryUrl}/releases`">GitHub Releases</a>, quit EVB IDE, and
       replace it in Applications, run the new archive's <code>install.sh</code> on Linux, or replace the extracted folder on
       Windows. Your settings and application data remain in their own folders. Automatic upstream Zed
       updates are disabled.
@@ -121,7 +121,7 @@
     <h2>Build from source</h2>
     <p>
       On macOS you need Xcode and its Metal toolchain, Rust through rustup, CMake, and the prerequisites in the
-      <a :href="`${repositoryUrl}/blob/main/EVB.md`">development guide</a>. On Linux, <code>script/linux</code> installs
+      <a target="_blank" :href="`${repositoryUrl}/blob/main/EVB.md`">development guide</a>. On Linux, <code>script/linux</code> installs
       the libraries and clang; the build needs clang 17 or newer. On Windows you need Visual Studio's C++ build tools,
       Rust through rustup and CMake.
     </p>
@@ -137,7 +137,7 @@ script/evb-bundle-windows.ps1   # Windows: target/evb-bundle/EVB-IDE-VERSION-win
     </p>
     <h2>Need help?</h2>
     <p>
-      <a :href="`${repositoryUrl}/issues`">Open an issue</a> with your EVB IDE version, operating system, and steps to
+      <a target="_blank" :href="`${repositoryUrl}/issues`">Open an issue</a> with your EVB IDE version, operating system, and steps to
       reproduce. EVB IDE is an independent community project; please report fork-specific issues here.
     </p>
   </article>

@@ -50,21 +50,29 @@
             </a>
             <p class="installer-note">{{ platformNotes[selectedPlatform] }}</p>
             <p class="installer-links">
-              <a :href="release.url">Release notes</a>
+              <a target="_blank" :href="release.url">Release notes</a>
               <a :href="release.sourceUrl">Source</a>
               <a :href="release.checksumsUrl">SHA-256 checksums</a>
             </p>
           </template>
           <template v-else-if="error">
             <p class="installer-note">The latest release could not be loaded.</p>
-            <UButton :to="`${repositoryUrl}/releases`" icon="i-lucide-github" color="neutral" variant="outline">
+            <UButton
+              :to="`${repositoryUrl}/releases`"
+              target="_blank"
+              icon="i-lucide-github"
+              color="neutral"
+              variant="outline"
+            >
               Releases on GitHub
             </UButton>
           </template>
           <p v-else-if="status === 'pending'" class="installer-note">Loading the latest release…</p>
           <template v-else>
             <p class="installer-note">No release is published yet.</p>
-            <UButton :to="`${repositoryUrl}/releases`" color="neutral" variant="outline">Release status</UButton>
+            <UButton :to="`${repositoryUrl}/releases`" target="_blank" color="neutral" variant="outline">
+              Release status
+            </UButton>
           </template>
         </div>
       </div>

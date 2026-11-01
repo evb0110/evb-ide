@@ -13,6 +13,7 @@
           <UColorModeButton color="neutral" variant="ghost" />
           <UButton
             :to="repositoryUrl"
+            target="_blank"
             icon="i-lucide-github"
             color="neutral"
             variant="ghost"
@@ -28,13 +29,13 @@
             <NuxtLink to="/docs">Installation &amp; guide</NuxtLink>
             <NuxtLink to="/license">License &amp; credits</NuxtLink>
             <NuxtLink to="/privacy">Privacy</NuxtLink>
-            <a :href="`${repositoryUrl}/issues`">Report an issue</a>
+            <a target="_blank" :href="`${repositoryUrl}/issues`">Report an issue</a>
           </nav>
         </div>
         <div class="footer-legal">
           <p>
-            © {{ year }} <a href="https://evb-stack.com/">Eugene Barsky</a> · Based on
-            <a href="https://zed.dev">Zed</a> © Zed Industries · GPL-3.0-or-later
+            © {{ year }} <a target="_blank" href="https://evb-stack.com/">Eugene Barsky</a> · Based on
+            <a target="_blank" href="https://zed.dev">Zed</a> © Zed Industries · GPL-3.0-or-later
           </p>
           <p>An independent fork, not affiliated with Zed Industries or JetBrains.</p>
         </div>
