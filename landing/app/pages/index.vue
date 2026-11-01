@@ -48,7 +48,12 @@
               </span>
               <span class="installer-icon"><UIcon name="i-lucide-download" /></span>
             </a>
-            <p class="installer-note">{{ platformNotes[selectedPlatform] }}</p>
+            <p class="installer-note">
+              <span class="installer-requirement">{{ platformNote.requirement }}</span>
+              <span
+                >{{ platformNote.action }} <code v-if="platformNote.file">{{ platformNote.file }}</code></span
+              >
+            </p>
             <p class="installer-links">
               <a target="_blank" :href="release.url">Release notes</a>
               <a :href="release.sourceUrl">Source</a>
@@ -119,6 +124,12 @@ interface IFeature {
   text: string;
 }
 
+interface IPlatformNote {
+  requirement: string;
+  action: string;
+  file?: string;
+}
+
 interface IQuestion {
   title: string;
   text: string;
@@ -127,11 +138,16 @@ interface IQuestion {
 const { data, error, status } = await useFetch("/api/releases/latest");
 const release = computed(() => data.value?.release);
 const platformLabels: Record<TPlatform, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
-const platformNotes: Record<TPlatform, string> = {
-  macos: "macOS 12 or later. Open the disk image and drag EVB IDE into Applications.",
-  linux: "Extract the archive and run install.sh in it to add EVB IDE for your user.",
-  windows: "Windows 10 or later. Extract the archive and run evb-ide.exe.",
+const platformNotes: Record<TPlatform, IPlatformNote> = {
+  macos: { requirement: "macOS 12 or later", action: "Drag EVB IDE from the disk image to Applications" },
+  linux: {
+    requirement: "glibc 2.35 or later, such as Ubuntu 22.04",
+    action: "Extract the archive and run",
+    file: "install.sh",
+  },
+  windows: { requirement: "Windows 10 or later", action: "Extract the archive and run", file: "evb-ide.exe" },
 };
+const platformNote = computed(() => platformNotes[selectedPlatform.value]);
 const platforms = computed(() =>
   (["macos", "linux", "windows"] as TPlatform[]).filter((platform) =>
     release.value?.installers.some((installer) => installer.platform === platform),
@@ -403,10 +419,24 @@ function formatSize(size: number) {
 }
 
 .installer-note {
+  display: grid;
+  gap: 2px;
   margin: 12px 0 10px;
   color: var(--site-muted);
   font-size: 13px;
   line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.installer-requirement {
+  color: var(--site-soft);
+  font-weight: 550;
+}
+
+.installer-note code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .installer-links {
