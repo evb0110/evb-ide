@@ -65,9 +65,15 @@ https://github.com/evb0110/evb-ide/releases and the landing page is at
 https://evb-ide.vercel.app. Releases ship macOS (Apple Silicon), Linux x64 and Windows x64.
 
 Releases build on GitHub Actions (`.github/workflows/evb-release.yml`), so they
-need no local release build. Bump `EVB_VERSION`, write the user-facing notes
-in `release-notes/vVERSION.md`, push to `origin/main` with a green EVB CI run,
-then push the tag `vVERSION`. The workflow signs and notarizes the macOS app
+need no local release build. Every release bumps the patch number in
+`EVB_VERSION` (0.3.0 to 0.3.1); a published version is never rebuilt, and the
+workflow refuses to publish a version that is not newer than the latest release.
+Write the user-facing notes in `release-notes/vVERSION.md`, push to `origin/main`
+with a green EVB CI run, then publish with
+`gh workflow run evb-release.yml --ref main -f publish=true`, which creates the
+tag `vVERSION` on GitHub. Pushing a local tag also works, but upstream's old Zed
+tags (`v0.3.1` onward) share the names, so a local tag may already exist with
+other history. The workflow signs and notarizes the macOS app
 with the repository secrets (`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY`,
 `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`; see `script/evb-ci-macos-signing`),
 builds the Linux archive with `script/evb-bundle-linux` on Ubuntu 22.04 and the

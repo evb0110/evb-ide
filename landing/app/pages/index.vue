@@ -10,6 +10,10 @@
 
         <div id="download" class="installer-card" aria-live="polite">
           <template v-if="release">
+            <p class="installer-version">
+              <span class="installer-version-name">EVB IDE {{ release.tag.slice(1) }}</span>
+              <time :datetime="release.publishedAt">{{ formatDate(release.publishedAt) }}</time>
+            </p>
             <div v-if="platforms.length > 1" class="installer-tabs" role="tablist" aria-label="Operating system">
               <button
                 v-for="platform in platforms"
@@ -44,7 +48,7 @@
               </span>
               <span class="installer-icon"><UIcon name="i-lucide-download" /></span>
             </a>
-            <p class="installer-note">{{ release.tag }} · {{ platformNotes[selectedPlatform] }}</p>
+            <p class="installer-note">{{ platformNotes[selectedPlatform] }}</p>
             <p class="installer-links">
               <a :href="release.url">Release notes</a>
               <a :href="release.sourceUrl">Source</a>
@@ -237,6 +241,12 @@ const questions: IQuestion[] = [
   },
 ];
 
+const releaseDate = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" });
+
+function formatDate(date: string) {
+  return releaseDate.format(new Date(date));
+}
+
 function formatSize(size: number) {
   return `${Math.round(size / 1024 / 1024)} MB`;
 }
@@ -272,6 +282,22 @@ function formatSize(size: number) {
   border: 1px solid var(--site-border);
   border-radius: 12px;
   background: var(--site-surface);
+}
+
+.installer-version {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 2px 2px 12px;
+  color: var(--site-muted);
+  font-size: 13px;
+}
+
+.installer-version-name {
+  color: var(--site-ink);
+  font-size: 15px;
+  font-weight: 650;
 }
 
 .installer-platform {

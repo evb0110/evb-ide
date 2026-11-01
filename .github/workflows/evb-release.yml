@@ -40,6 +40,19 @@ jobs:
         if: github.ref_type == 'tag'
         run: test "v$(tr -d '\n' < EVB_VERSION)" = "$GITHUB_REF_NAME"
 
+      # Every release bumps EVB_VERSION, so a published version is never rebuilt with other content.
+      - name: Check EVB_VERSION is newer than the latest release
+        if: github.ref_type == 'tag' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(tr -d '\n' < EVB_VERSION)"
+          latest="$(gh release view --repo evb0110/evb-ide --json tagName --jq '.tagName | ltrimstr("v")')"
+          if [[ "$version" == "$latest" || "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n 1)" != "$version" ]]; then
+            echo "EVB_VERSION $version must be newer than the latest release $latest: bump the patch number." >&2
+            exit 1
+          fi
+
       - name: Free disk space
         run: |
           df -h /
