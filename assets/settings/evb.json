@@ -63,7 +63,6 @@
   "edit_predictions": {
     "provider": "none",
   },
-  "auto_update": false,
   "show_call_status_icon": false,
   // "scss" also highlights Vue <style lang="scss"> blocks, which the Vue extension hands to it.
   "auto_install_extensions": {

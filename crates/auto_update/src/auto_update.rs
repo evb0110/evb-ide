@@ -29,10 +29,16 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use util::command::new_command;
+use util::{ResultExt as _, command::new_command};
 use workspace::Workspace;
 
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
+
+/// EVB IDE releases are numbered by EVB_VERSION; `AppVersion` holds the upstream crate version.
+const EVB_VERSION: &str = include_str!("../../../EVB_VERSION");
+const EVB_RELEASES_API_URL: &str = "https://api.github.com/repos/evb0110/evb-ide/releases";
+const EVB_RELEASES_URL: &str = "https://github.com/evb0110/evb-ide/releases";
+const EVB_CHECKSUMS_ASSET: &str = "SHA256SUMS";
 
 #[derive(Debug)]
 struct MissingDependencyError(String);
@@ -195,6 +201,151 @@ pub struct ReleaseAsset {
     pub url: String,
 }
 
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    #[serde(default)]
+    body: Option<String>,
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+/// The installer for this system in the latest EVB IDE release, with the checksum list that
+/// covers it.
+struct EvbRelease {
+    asset: ReleaseAsset,
+    asset_name: String,
+    checksums_url: String,
+}
+
+pub struct EvbReleaseNotes {
+    pub title: String,
+    pub notes: String,
+}
+
+pub fn evb_version() -> Result<Version> {
+    EVB_VERSION
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid EVB_VERSION {EVB_VERSION:?}"))
+}
+
+fn evb_release_asset_name(version: &str) -> Result<String> {
+    let (os, extension) = match OS {
+        "macos" => ("macos", "dmg"),
+        "linux" => ("linux", "tar.gz"),
+        "windows" => ("windows", "zip"),
+        unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
+    };
+    let architecture = match ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        unsupported_architecture => anyhow::bail!("not supported: {unsupported_architecture}"),
+    };
+    Ok(format!("EVB-IDE-{version}-{os}-{architecture}.{extension}"))
+}
+
+async fn fetch_github_release(client: &HttpClientWithUrl, url: &str) -> Result<GitHubRelease> {
+    let mut response = client.get(url, Default::default(), true).await?;
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "failed to fetch release {url}: {} {:?}",
+        response.status(),
+        String::from_utf8_lossy(&body),
+    );
+    serde_json::from_slice(&body).with_context(|| format!("error deserializing release {url}"))
+}
+
+fn evb_release_for_this_system(release: GitHubRelease) -> Result<EvbRelease> {
+    let version = release
+        .tag_name
+        .strip_prefix('v')
+        .with_context(|| format!("unexpected release tag {}", release.tag_name))?
+        .to_string();
+    let asset_name = evb_release_asset_name(&version)?;
+    let asset_url = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == asset_name)
+        .with_context(|| {
+            format!("EVB IDE {version} has no download for this system ({asset_name})")
+        })?
+        .browser_download_url
+        .clone();
+    let checksums_url = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == EVB_CHECKSUMS_ASSET)
+        .with_context(|| format!("EVB IDE {version} has no {EVB_CHECKSUMS_ASSET}"))?
+        .browser_download_url
+        .clone();
+    Ok(EvbRelease {
+        asset: ReleaseAsset {
+            version,
+            url: asset_url,
+        },
+        asset_name,
+        checksums_url,
+    })
+}
+
+/// Fetches the release notes of an EVB IDE version from its GitHub release.
+pub async fn fetch_evb_release_notes(
+    client: &HttpClientWithUrl,
+    version: &Version,
+) -> Result<EvbReleaseNotes> {
+    let release =
+        fetch_github_release(client, &format!("{EVB_RELEASES_API_URL}/tags/v{version}")).await?;
+    Ok(EvbReleaseNotes {
+        title: format!("EVB IDE {version}"),
+        notes: release.body.unwrap_or_default(),
+    })
+}
+
+fn expected_checksum(checksums: &str, asset_name: &str) -> Result<String> {
+    checksums
+        .lines()
+        .find_map(|line| {
+            let (checksum, name) = line.split_once(char::is_whitespace)?;
+            (name.trim_start().trim_start_matches('*') == asset_name)
+                .then(|| checksum.to_ascii_lowercase())
+        })
+        .with_context(|| format!("{EVB_CHECKSUMS_ASSET} does not list {asset_name}"))
+}
+
+async fn fetch_expected_checksum(
+    client: &HttpClientWithUrl,
+    release: &EvbRelease,
+) -> Result<String> {
+    let mut response = client
+        .get(&release.checksums_url, Default::default(), true)
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "failed to download {EVB_CHECKSUMS_ASSET}: {:?}",
+        response.status()
+    );
+    let mut checksums = String::new();
+    response.body_mut().read_to_string(&mut checksums).await?;
+    expected_checksum(&checksums, &release.asset_name)
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    use sha2::Digest as _;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 struct MacOsUnmounter<'a> {
     mount_path: PathBuf,
     background_executor: &'a BackgroundExecutor,
@@ -274,7 +425,9 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
     })
     .detach();
 
-    let version = release_channel::AppVersion::global(cx);
+    let version = evb_version()
+        .log_err()
+        .unwrap_or_else(|| release_channel::AppVersion::global(cx));
     let auto_updater = cx.new(|cx| {
         let updater = AutoUpdater::new(version, client, cx);
 
@@ -343,24 +496,11 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
 }
 
 pub fn release_notes_url(cx: &mut App) -> Option<String> {
-    let release_channel = ReleaseChannel::try_global(cx)?;
-    let url = match release_channel {
-        ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            let auto_updater = AutoUpdater::get(cx)?;
-            let auto_updater = auto_updater.read(cx);
-            let mut current_version = auto_updater.current_version.clone();
-            current_version.pre = semver::Prerelease::EMPTY;
-            current_version.build = semver::BuildMetadata::EMPTY;
-            let release_channel = release_channel.dev_name();
-            let path = format!("/releases/{release_channel}/{current_version}");
-            auto_updater.client.http_client().build_url(&path)
-        }
-        ReleaseChannel::Nightly => {
-            "https://github.com/zed-industries/zed/commits/nightly/".to_string()
-        }
-        ReleaseChannel::Dev => "https://github.com/zed-industries/zed/commits/main/".to_string(),
-    };
-    Some(url)
+    let auto_updater = AutoUpdater::get(cx)?;
+    let mut current_version = auto_updater.read(cx).current_version.clone();
+    current_version.pre = semver::Prerelease::EMPTY;
+    current_version.build = semver::BuildMetadata::EMPTY;
+    Some(format!("{EVB_RELEASES_URL}/tag/v{current_version}"))
 }
 
 pub fn view_release_notes(_: &ViewReleaseNotes, cx: &mut App) -> Option<()> {
@@ -756,8 +896,10 @@ impl AutoUpdater {
             cx.notify();
         });
 
-        let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
+        let fetched_release = evb_release_for_this_system(
+            fetch_github_release(&client, &format!("{EVB_RELEASES_API_URL}/latest")).await?,
+        )?;
+        let fetched_release_data = fetched_release.asset.clone();
         let fetched_version = fetched_release_data.clone().version;
         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
         let newer_version = Self::check_if_fetched_version_is_newer(
@@ -796,6 +938,7 @@ impl AutoUpdater {
             .await
             .context("Failed to create installer dir")?;
         let target_path = Self::target_path(&installer_dir).await?;
+        let expected_checksum = fetch_expected_checksum(&client, &fetched_release).await?;
         let progress_entity = this.clone();
         let mut progress_cx = cx.clone();
         download_release(
@@ -817,6 +960,17 @@ impl AutoUpdater {
         )
         .await
         .with_context(|| format!("Failed to download update to {}", target_path.display()))?;
+        let downloaded_checksum = cx
+            .background_spawn({
+                let target_path = target_path.clone();
+                async move { file_sha256(&target_path) }
+            })
+            .await?;
+        anyhow::ensure!(
+            downloaded_checksum == expected_checksum,
+            "The downloaded {} does not match its {EVB_CHECKSUMS_ASSET} entry",
+            fetched_release.asset_name
+        );
 
         this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Installing {
@@ -838,12 +992,10 @@ impl AutoUpdater {
         let install_result = {
             let running_app_path = cx.update(|cx| cx.app_path())?;
             let background_executor = cx.background_executor().clone();
-            let channel = cx.update(|cx| ReleaseChannel::global(cx).dev_name());
             cx.background_spawn(Self::install_release(
                 installer_dir,
                 target_path.clone(),
                 running_app_path,
-                channel,
                 background_executor,
             ))
             .await
@@ -922,9 +1074,9 @@ impl AutoUpdater {
 
     async fn target_path(installer_dir: &InstallerDir) -> Result<PathBuf> {
         let filename = match OS {
-            "macos" => anyhow::Ok("Zed.dmg"),
-            "linux" => Ok("zed.tar.gz"),
-            "windows" => Ok("Zed.exe"),
+            "macos" => anyhow::Ok("EVB-IDE.dmg"),
+            "linux" => Ok("evb-ide.tar.gz"),
+            "windows" => Ok("EVB-IDE.zip"),
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }?;
 
@@ -936,7 +1088,6 @@ impl AutoUpdater {
         installer_dir: InstallerDir,
         target_path: PathBuf,
         running_app_path: PathBuf,
-        channel: &str,
         background_executor: BackgroundExecutor,
     ) -> Result<Option<PathBuf>> {
         match OS {
@@ -950,9 +1101,22 @@ impl AutoUpdater {
                 .await
             }
             "linux" => {
-                install_release_linux(&installer_dir, &target_path, channel, running_app_path).await
+                let home_dir = PathBuf::from(env::var("HOME").context("no HOME env var set")?);
+                install_release_linux(
+                    installer_dir.path(),
+                    &target_path,
+                    running_app_path,
+                    home_dir,
+                )
+                .await
             }
-            "windows" => install_release_windows(&target_path).await,
+            "windows" => {
+                let app_dir = std::env::current_exe()?
+                    .parent()
+                    .context("No parent dir for evb-ide.exe")?
+                    .to_owned();
+                install_release_windows(installer_dir.path(), &target_path, &app_dir).await
+            }
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }
     }
@@ -1127,14 +1291,12 @@ async fn download_release(
 }
 
 async fn install_release_linux(
-    temp_dir: &InstallerDir,
+    temp_dir: &Path,
     downloaded_tar_gz: &Path,
-    channel: &str,
     running_app_path: PathBuf,
+    home_dir: PathBuf,
 ) -> Result<Option<PathBuf>> {
-    let home_dir = PathBuf::from(env::var("HOME").context("no HOME env var set")?);
-
-    let extracted = temp_dir.path().join("zed");
+    let extracted = temp_dir.join("extracted");
     fs::create_dir_all(&extracted)
         .await
         .context("failed to create directory into which to extract update")?;
@@ -1157,21 +1319,15 @@ async fn install_release_linux(
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let suffix = if channel != "stable" {
-        format!("-{}", channel)
-    } else {
-        String::default()
-    };
-    let app_folder_name = format!("zed{}.app", suffix);
-
-    let from = extracted.join(&app_folder_name);
+    // The archive holds an evb-ide folder, which its install.sh copies to ~/.local/evb-ide.
+    let from = extracted.join("evb-ide");
     let mut to = home_dir.join(".local");
 
-    let expected_suffix = format!("{}/libexec/zed-editor", app_folder_name);
+    let expected_suffix = "evb-ide/libexec/evb-ide-editor";
 
     if let Some(prefix) = running_app_path
         .to_str()
-        .and_then(|str| str.strip_suffix(&expected_suffix))
+        .and_then(|str| str.strip_suffix(expected_suffix))
     {
         to = PathBuf::from(prefix);
     }
@@ -1185,7 +1341,7 @@ async fn install_release_linux(
 
     anyhow::ensure!(
         output.status.success(),
-        "failed to copy Zed update from {:?} to {:?}: {:?}",
+        "failed to copy the EVB IDE update from {:?} to {:?}: {:?}",
         from,
         to,
         String::from_utf8_lossy(&output.stderr)
@@ -1204,15 +1360,15 @@ async fn install_release_macos(
         .file_name()
         .with_context(|| format!("invalid running app path {running_app_path:?}"))?;
 
-    let mount_path = temp_dir.path().join("Zed");
+    // The volume is named after the version, so mount it at a fixed path.
+    let mount_path = temp_dir.path().join("mount");
     let mut mounted_app_path: OsString = mount_path.join(running_app_filename).into();
 
     mounted_app_path.push("/");
     let mut cmd = new_command("hdiutil");
-    cmd.args(["attach", "-nobrowse"])
-        .arg(&downloaded_dmg)
-        .arg("-mountroot")
-        .arg(temp_dir.path());
+    cmd.args(["attach", "-nobrowse", "-noautoopen", "-mountpoint"])
+        .arg(&mount_path)
+        .arg(&downloaded_dmg);
     let output = cmd
         .output()
         .await
@@ -1310,26 +1466,34 @@ async fn cleanup_windows() -> Result<()> {
     Ok(())
 }
 
-async fn install_release_windows(downloaded_installer: &Path) -> Result<Option<PathBuf>> {
-    let mut cmd = new_command(downloaded_installer);
-    cmd.arg("/verysilent")
-        .arg("/update=true")
-        .arg("/MERGETASKS=!desktopicon");
-    let output = cmd.output().await?;
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to start installer: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+async fn install_release_windows(
+    installer_dir: &Path,
+    downloaded_zip: &Path,
+    app_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let extracted = installer_dir.join("extracted");
+    smol::fs::create_dir_all(&extracted).await?;
+    let archive = File::open(downloaded_zip).await?;
+    util::archive::extract_zip(&extracted, archive)
+        .await
+        .with_context(|| format!("failed to extract {downloaded_zip:?}"))?;
+
+    // The archive holds an "EVB IDE" folder. The update helper moves its files from install\
+    // into place once EVB IDE exits, because Windows cannot replace a running executable.
+    let install_dir = app_dir.join("install");
+    if smol::fs::metadata(&install_dir).await.is_ok() {
+        smol::fs::remove_dir_all(&install_dir).await?;
+    }
+    smol::fs::rename(extracted.join("EVB IDE"), &install_dir)
+        .await
+        .context("failed to stage the update")?;
+    // finalize_auto_update_on_quit runs the helper only when this file exists.
+    smol::fs::write(installer_dir.join("versions.txt"), "").await?;
+
     // We return the path to the update helper program, because it will
     // perform the final steps of the update process, copying the new binary,
     // deleting the old one, and launching the new binary.
-    let helper_path = std::env::current_exe()?
-        .parent()
-        .context("No parent dir for Zed.exe")?
-        .join("tools")
-        .join("auto_update_helper.exe");
-    Ok(Some(helper_path))
+    Ok(Some(app_dir.join("tools").join("auto_update_helper.exe")))
 }
 
 pub async fn finalize_auto_update_on_quit() {
@@ -1405,12 +1569,31 @@ mod tests {
         let release_available = Arc::new(AtomicBool::new(false));
 
         let (dmg_tx, dmg_rx) = oneshot::channel::<String>();
+        let installed_version = evb_version().unwrap();
+        let mut new_version = installed_version.clone();
+        new_version.patch += 1;
+        let update_contents = "<fake-zed-update>";
 
         cx.update(|cx| {
             settings::init(cx);
 
-            let current_version = semver::Version::new(0, 100, 0);
-            release_channel::init_test(current_version, ReleaseChannel::Stable, cx);
+            // The upstream crate version differs from EVB_VERSION, which releases follow.
+            release_channel::init_test(semver::Version::new(1, 0, 0), ReleaseChannel::Stable, cx);
+
+            let release_json = |version: &Version, download: &str| {
+                let asset_name = evb_release_asset_name(&version.to_string()).unwrap();
+                format!(
+                    r#"{{"tag_name":"v{version}","assets":[{{"name":"{asset_name}","browser_download_url":"https://test.example/{download}"}},{{"name":"SHA256SUMS","browser_download_url":"https://test.example/SHA256SUMS"}}]}}"#
+                )
+            };
+            let old_release = release_json(&installed_version, "old-download");
+            let new_release = release_json(&new_version, "new-download");
+            let checksums = {
+                use sha2::Digest as _;
+                let asset_name = evb_release_asset_name(&new_version.to_string()).unwrap();
+                let checksum = sha2::Sha256::digest(update_contents.as_bytes());
+                format!("{checksum:x}  {asset_name}\n")
+            };
 
             let clock = Arc::new(FakeSystemClock::new());
             let release_available = Arc::clone(&release_available);
@@ -1418,17 +1601,15 @@ mod tests {
             let fake_client_http = FakeHttpClient::create(move |req| {
                 let release_available = release_available.load(atomic::Ordering::Relaxed);
                 let dmg_rx = dmg_rx.clone();
+                let old_release = old_release.clone();
+                let new_release = new_release.clone();
+                let checksums = checksums.clone();
                 async move {
-                if req.uri().path() == "/releases/stable/latest/asset" {
-                    if release_available {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.1","url":"https://test.example/new-download"}"#.into()
-                        ).unwrap());
-                    } else {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.0","url":"https://test.example/old-download"}"#.into()
-                        ).unwrap());
-                    }
+                if req.uri().path() == "/repos/evb0110/evb-ide/releases/latest" {
+                    let release = if release_available { new_release } else { old_release };
+                    return Ok(Response::builder().status(200).body(release.into()).unwrap());
+                } else if req.uri().path() == "/SHA256SUMS" {
+                    return Ok(Response::builder().status(200).body(checksums.into()).unwrap());
                 } else if req.uri().path() == "/new-download" {
                     return Ok(Response::builder().status(200).body({
                         let dmg_rx = dmg_rx.lock().take().unwrap();
@@ -1448,7 +1629,7 @@ mod tests {
 
         auto_updater.read_with(cx, |updater, _| {
             assert_eq!(updater.status(), AutoUpdateStatus::Idle);
-            assert_eq!(updater.current_version(), semver::Version::new(0, 100, 0));
+            assert_eq!(updater.current_version(), installed_version);
         });
 
         release_available.store(true, atomic::Ordering::SeqCst);
@@ -1467,12 +1648,12 @@ mod tests {
         assert_eq!(
             status,
             AutoUpdateStatus::Downloading {
-                version: semver::Version::new(0, 100, 1),
+                version: new_version.clone(),
                 progress: None,
             }
         );
 
-        dmg_tx.send("<fake-zed-update>".to_owned()).unwrap();
+        dmg_tx.send(update_contents.to_owned()).unwrap();
 
         let tmp_dir = Arc::new(tempdir().unwrap());
 
@@ -1498,7 +1679,7 @@ mod tests {
         assert_eq!(
             status,
             AutoUpdateStatus::Updated {
-                version: semver::Version::new(0, 100, 1)
+                version: new_version
             }
         );
         let will_restart = cx.expect_restart();
@@ -1507,7 +1688,122 @@ mod tests {
         assert!(arguments.is_empty());
         let path = path.unwrap();
         assert_eq!(path, tmp_dir.path().join("zed"));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), update_contents);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_install_replaces_the_running_installation() {
+        let root = tempdir().unwrap();
+        let archive_root = root.path().join("archive");
+        std::fs::create_dir_all(archive_root.join("evb-ide/libexec")).unwrap();
+        // rsync skips files whose size and modification time match, so the contents differ in length.
+        std::fs::write(
+            archive_root.join("evb-ide/libexec/evb-ide-editor"),
+            "new editor",
+        )
+        .unwrap();
+        let archive = root.path().join("update.tar.gz");
+        let status = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&archive_root)
+            .arg("evb-ide")
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let installed = root.path().join("apps/evb-ide");
+        std::fs::create_dir_all(installed.join("libexec")).unwrap();
+        std::fs::write(installed.join("libexec/evb-ide-editor"), "old").unwrap();
+        std::fs::write(installed.join("stale-file"), "old").unwrap();
+        let staging = root.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let new_binary = smol::block_on(install_release_linux(
+            &staging,
+            &archive,
+            installed.join("libexec/evb-ide-editor"),
+            root.path().join("home"),
+        ))
+        .unwrap();
+
+        assert_eq!(new_binary, Some(installed.join("libexec/evb-ide-editor")));
+        assert_eq!(
+            std::fs::read_to_string(installed.join("libexec/evb-ide-editor")).unwrap(),
+            "new editor"
+        );
+        assert!(!installed.join("stale-file").exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_install_stages_the_update_for_the_helper() {
+        let root = tempdir().unwrap();
+        let archive_root = root.path().join("archive");
+        std::fs::create_dir_all(archive_root.join("EVB IDE/bin")).unwrap();
+        std::fs::write(archive_root.join("EVB IDE/evb-ide.exe"), "new").unwrap();
+        std::fs::write(archive_root.join("EVB IDE/bin/evb-ide.exe"), "new cli").unwrap();
+        let archive = root.path().join("update.zip");
+        let status = std::process::Command::new("tar")
+            .arg("-a")
+            .arg("-cf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&archive_root)
+            .arg("EVB IDE")
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let app_dir = root.path().join("app");
+        let updates_dir = app_dir.join("updates");
+        std::fs::create_dir_all(&updates_dir).unwrap();
+
+        let helper =
+            smol::block_on(install_release_windows(&updates_dir, &archive, &app_dir)).unwrap();
+
+        assert_eq!(
+            helper,
+            Some(app_dir.join("tools").join("auto_update_helper.exe"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(app_dir.join("install/evb-ide.exe")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app_dir.join("install/bin/evb-ide.exe")).unwrap(),
+            "new cli"
+        );
+        assert!(updates_dir.join("versions.txt").exists());
+    }
+
+    #[test]
+    fn test_evb_version_parses() {
+        assert!(evb_version().is_ok());
+    }
+
+    #[test]
+    fn test_expected_checksum_reads_the_asset_line() {
+        let checksums = "aaa  EVB-IDE-0.3.1-macos-arm64.dmg\nBBB *EVB-IDE-0.3.1-linux-x64.tar.gz\n";
+        assert_eq!(
+            expected_checksum(checksums, "EVB-IDE-0.3.1-linux-x64.tar.gz").unwrap(),
+            "bbb"
+        );
+        assert!(expected_checksum(checksums, "EVB-IDE-0.3.1-windows-x64.zip").is_err());
+    }
+
+    #[test]
+    fn test_release_without_an_installer_for_this_system_is_an_error() {
+        let release: GitHubRelease = serde_json::from_str(
+            r#"{"tag_name":"v9.9.9","assets":[{"name":"SHA256SUMS","browser_download_url":"https://test.example/SHA256SUMS"}]}"#,
+        )
+        .unwrap();
+        let error = evb_release_for_this_system(release)
+            .err()
+            .expect("a release without an installer for this system must be rejected");
+        assert!(error.to_string().contains("no download for this system"));
     }
 
     #[gpui::test]

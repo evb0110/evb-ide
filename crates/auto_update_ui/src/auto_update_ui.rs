@@ -1,4 +1,4 @@
-use auto_update::{AutoUpdater, release_notes_url};
+use auto_update::{AutoUpdater, fetch_evb_release_notes, release_notes_url};
 use db::kvp::Dismissable;
 use editor::{Editor, MultiBuffer};
 use gpui::{
@@ -7,11 +7,9 @@ use gpui::{
 };
 use markdown_preview::markdown_preview_view::{MarkdownPreviewMode, MarkdownPreviewView};
 use project::DisableAiSettings;
-use release_channel::{AppVersion, ReleaseChannel};
+use release_channel::ReleaseChannel;
 use semver::Version;
-use serde::Deserialize;
 use settings::Settings as _;
-use smol::io::AsyncReadExt;
 use ui::{AnnouncementToast, DeltaIllustration, ListBulletItem, prelude::*};
 use util::{ResultExt as _, maybe};
 use workspace::{
@@ -49,12 +47,6 @@ pub fn init(cx: &mut App) {
         }
     })
     .detach();
-}
-
-#[derive(Deserialize)]
-struct ReleaseNotesBody {
-    title: String,
-    release_notes: String,
 }
 
 fn notify_release_notes_failed_to_show(
@@ -103,14 +95,11 @@ fn view_release_notes_locally(
         return;
     }
 
-    let version = AppVersion::global(cx).to_string();
-
+    let Some(version) = AutoUpdater::get(cx).map(|updater| updater.read(cx).current_version())
+    else {
+        return;
+    };
     let client = client::Client::global(cx).http_client();
-    let url = client.build_url(&format!(
-        "/api/release_notes/v2/{}/{}",
-        release_channel.dev_name(),
-        version
-    ));
 
     let markdown = workspace
         .app_state()
@@ -119,21 +108,10 @@ fn view_release_notes_locally(
 
     cx.spawn_in(window, async move |workspace, cx| {
         let markdown = markdown.await.log_err();
-        let response = client.get(&url, Default::default(), true).await;
-        let Some(mut response) = response.log_err() else {
-            workspace
-                .update_in(cx, notify_release_notes_failed_to_show)
-                .log_err();
-            return;
-        };
-
-        let mut body = Vec::new();
-        response.body_mut().read_to_end(&mut body).await.ok();
-
-        let body: serde_json::Result<ReleaseNotesBody> = serde_json::from_slice(body.as_slice());
+        let release_notes = fetch_evb_release_notes(&client, &version).await;
 
         let res: Option<()> = maybe!(async {
-            let body = body.ok()?;
+            let release_notes = release_notes.log_err()?;
             let project = workspace
                 .read_with(cx, |workspace, _| workspace.project().clone())
                 .ok()?;
@@ -145,10 +123,11 @@ fn view_release_notes_locally(
             });
             let buffer = buffer.await.ok()?;
             buffer.update(cx, |buffer, cx| {
-                buffer.edit([(0..0, body.release_notes)], None, cx)
+                buffer.edit([(0..0, release_notes.notes)], None, cx)
             });
 
-            let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(body.title));
+            let buffer =
+                cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(release_notes.title));
 
             let ws_handle = workspace.clone();
             workspace

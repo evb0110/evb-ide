@@ -10,7 +10,7 @@ runs next to an installed Zed without sharing state.
 
 | Area | Change | Where |
 | --- | --- | --- |
-| Identity | App "EVB IDE", binary `evb-ide`, bundle id `dev.evb.EVB-IDE`, data in `~/.config/evb-ide` and `~/Library/Application Support/EVB-IDE`, CLI link `/usr/local/bin/evb`, no zed.dev auto-update | `crates/paths`, `crates/release_channel`, `crates/zed/Cargo.toml`, `crates/cli`, `crates/install_cli`, `.cargo/config.toml` |
+| Identity | App "EVB IDE", binary `evb-ide`, bundle id `dev.evb.EVB-IDE`, data in `~/.config/evb-ide` and `~/Library/Application Support/EVB-IDE`, CLI link `/usr/local/bin/evb`, updates from this repository's GitHub releases | `crates/paths`, `crates/release_channel`, `crates/zed/Cargo.toml`, `crates/cli`, `crates/install_cli`, `crates/auto_update`, `.cargo/config.toml` |
 | Defaults | JetBrains keymap, IntelliJ Light/Dark themes, JetBrains Mono 13 without ligatures, Inter 13 for the UI, Project and Commit panels on the left, telemetry, the agent panel, edit predictions and sign-in off, Vue/SCSS/PHP/Blade/Stylelint extensions installed automatically, Intelephense for PHP and Blade | `assets/settings/evb.json`, merged over `assets/settings/default.json` at startup |
 | Key bindings | macOS: Run ⌃R, Debug ⌃D, Stop ⌘F2, choose configuration ⌃⌥R, Commit and Push ⌥⌘K, Git Log ⌘9, toggle the bottom dock ⌘J (JetBrains' Hover moves to F1). Linux and Windows, following WebStorm there: Run Shift+F10, Debug Shift+F9, Stop Ctrl+F2, choose configuration Alt+Shift+F10, Commit and Push Ctrl+Alt+K, Git Log Alt+9, bottom dock Ctrl+J | `assets/keymaps/evb.json` (macOS) and `assets/keymaps/linux/evb.json`, loaded after the base keymap |
 | Run configurations | Title bar widget: configurations from `package.json` scripts (npm, pnpm, yarn or bun, from the lockfile), `composer.json` scripts and `.zed/tasks.json`; Run/Rerun, Debug (Node), Stop | `crates/evb_run` |
@@ -91,6 +91,13 @@ script/evb-release             # build, sign, notarize, package, vendor sources,
 # Verify the packaged app starts with an isolated fresh profile.
 script/evb-release --publish   # upload and publish that exact prepared revision
 ```
+
+The app updates itself from the latest GitHub release (`crates/auto_update`): it
+compares `EVB_VERSION` with the release tag, downloads the asset named
+`EVB-IDE-VERSION-OS-ARCH.EXT` for its system, checks it against `SHA256SUMS`, and
+installs it on restart. Keep those asset names when changing the release scripts.
+On Windows the zip carries `tools\auto_update_helper.exe`, which moves the staged
+files into place after the app exits.
 
 The release script does not install over your application. It requires a clean
 checkout and creates the DMG, corresponding source archive, checksums, and

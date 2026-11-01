@@ -1,8 +1,9 @@
 # Builds the EVB IDE portable archive for Windows x64:
 #   target\evb-bundle\EVB-IDE-<version>-windows-x64.zip
 # The archive holds an "EVB IDE" folder: evb-ide.exe, the command line tool as bin\evb-ide.exe,
-# the ConPTY terminal host the build downloads (conpty.dll, x64\OpenConsole.exe) and the
-# license notices. Based on upstream script/bundle-windows.ps1, without its installer.
+# the ConPTY terminal host the build downloads (conpty.dll, x64\OpenConsole.exe), the update
+# helper as tools\auto_update_helper.exe and the license notices. Based on upstream
+# script/bundle-windows.ps1, without its installer.
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
@@ -29,14 +30,17 @@ foreach ($embedding in 'crates/assets/src/assets.rs', 'crates/settings/src/setti
 }
 cargo --config .cargo/bundle-config.toml build --release --package zed --bin evb-ide
 cargo --config .cargo/bundle-config.toml build --release --package cli
+cargo --config .cargo/bundle-config.toml build --release --package auto_update_helper
 
 $release = Join-Path $targetDir 'release'
 $outDir = Join-Path $repoRoot 'target\evb-bundle'
 $appDir = Join-Path $outDir 'EVB IDE'
 if (Test-Path $appDir) { Remove-Item $appDir -Recurse -Force }
-New-Item -ItemType Directory -Force -Path "$appDir\bin", "$appDir\x64", "$appDir\licenses" | Out-Null
+New-Item -ItemType Directory -Force -Path "$appDir\bin", "$appDir\x64", "$appDir\tools", "$appDir\licenses" | Out-Null
 Copy-Item (Join-Path $release 'evb-ide.exe') "$appDir\evb-ide.exe"
 Copy-Item (Join-Path $release 'cli.exe') "$appDir\bin\evb-ide.exe"
+# In-app updates stage the new files in install\; this helper moves them into place after exit.
+Copy-Item (Join-Path $release 'auto-update-helper.exe') "$appDir\tools\auto_update_helper.exe"
 # The terminal uses this ConPTY instead of the one in Windows; Zed's build.rs downloads it.
 Copy-Item (Join-Path $release 'conpty.dll') "$appDir\conpty.dll"
 Copy-Item (Join-Path $release 'OpenConsole.exe') "$appDir\x64\OpenConsole.exe"
