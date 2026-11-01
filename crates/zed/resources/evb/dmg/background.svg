@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="450" viewBox="0 0 600 450">
+  <!-- script/evb-dmg places the 128 px icons at (160, 185) and (440, 185); the arrow sits between them. -->
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EEF1F7"/>
+      <stop offset="1" stop-color="#D9DEE8"/>
+    </linearGradient>
+    <linearGradient id="stripe" x1="250" y1="0" x2="326" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3574F0"/>
+      <stop offset="0.55" stop-color="#9B59FF"/>
+      <stop offset="1" stop-color="#FF7A45"/>
+    </linearGradient>
+  </defs>
+  <rect width="600" height="450" fill="url(#background)"/>
+  <text x="300" y="71" text-anchor="middle" font-family="Helvetica Neue, Helvetica, sans-serif" font-weight="600" font-size="26" fill="#1F2A44">EVB IDE</text>
+  <path d="M250 185 H322" stroke="url(#stripe)" stroke-width="11" stroke-linecap="round" fill="none"/>
+  <path d="M352 185 L326 168 V202 Z" fill="#FF7A45"/>
+  <text x="300" y="330" text-anchor="middle" font-family="Helvetica Neue, Helvetica, sans-serif" font-size="14" fill="#5A6478">Drag EVB IDE to Applications to install it.</text>
+</svg>

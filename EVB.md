@@ -88,7 +88,10 @@ script/evb-release --publish   # upload and publish that exact prepared revision
 
 The release script does not install over your application. It requires a clean
 checkout and creates the DMG, corresponding source archive, checksums, and
-release notes under `.devkit/releases/vVERSION`. The source archive includes
+release notes under `.devkit/releases/vVERSION`. The DMG's Finder layout comes
+from `crates/zed/resources/evb/dmg`: `settings.py` positions the icons for
+dmgbuild, and the background PNGs are rendered from `background.svg` with
+`rsvg-convert -w 600` and `-w 1200` (for `background@2x.png`). The source archive includes
 vendored Rust dependencies and can be built without a Git checkout. System
 toolchains and native components fetched by third-party build scripts retain
 their documented prerequisites. Public release assets must stay available

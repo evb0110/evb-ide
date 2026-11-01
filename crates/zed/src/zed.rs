@@ -1624,7 +1624,12 @@ fn open_about_window(cx: &mut App) {
                                         .size(LabelSize::XSmall),
                                 )
                                 .child(Label::new(commit).size(LabelSize::Small))
-                            }),
+                            })
+                            .child(
+                                Label::new("© 2026 Eugene Barsky. GPL-3.0-or-later.")
+                                    .color(Color::Muted)
+                                    .size(LabelSize::Small),
+                            ),
                     )
                     .child(
                         h_flex()
@@ -1699,7 +1704,7 @@ fn open_about_window(cx: &mut App) {
 
     let window_size = Size {
         width: px(440.),
-        height: px(300.),
+        height: px(324.),
     };
 
     cx.open_window(

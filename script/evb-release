@@ -92,16 +92,20 @@ spctl --assess --type execute --verbose=2 "$app_path"
 grep -q "EVB IDE: v$version" "$output/system-specs.txt"
 rm "$output/notarize.zip"
 
-image_root="$output/image-root"
-mkdir -p "$image_root"
-ditto "$app_path" "$image_root/EVB IDE.app"
-ln -s /Applications "$image_root/Applications"
-hdiutil create -volname "EVB IDE $version" -srcfolder "$image_root" -format UDZO "$output/$image_name"
+# dmgbuild writes the Finder layout (background, icon positions) into the image directly, without
+# scripting Finder, so it also works on headless CI runners.
+dmg_resources="$repo_root/crates/zed/resources/evb/dmg"
+dmgbuild_environment="$output/dmgbuild"
+python3 -m venv "$dmgbuild_environment"
+"$dmgbuild_environment/bin/pip" install --quiet --require-hashes --only-binary :all: -r "$dmg_resources/requirements.txt"
+"$dmgbuild_environment/bin/dmgbuild" -s "$dmg_resources/settings.py" \
+    -D application="$app_path" -D background="$dmg_resources/background.png" \
+    "EVB IDE $version" "$output/$image_name"
+rm -rf "$dmgbuild_environment"
 codesign --force --sign "$EVB_SIGNING_IDENTITY" --timestamp "$output/$image_name"
 notarize "$output/$image_name"
 retry_stapler staple "$output/$image_name"
 retry_stapler validate "$output/$image_name"
-rm -rf "$image_root"
 
 source_root="$output/EVB-IDE-$version-source"
 mkdir -p "$source_root"
