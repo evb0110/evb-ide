@@ -5,7 +5,7 @@
       <header class="site-header">
         <NuxtLink to="/" class="brand" aria-label="EVB IDE home">
           <BrandMark class="brand-mark" />
-          <span><strong>EVB</strong> IDE<span class="brand-period">.</span></span>
+          <span><strong>EVB</strong> IDE</span>
         </NuxtLink>
         <nav aria-label="Main navigation" class="site-nav">
           <NuxtLink to="/#features">Features</NuxtLink>

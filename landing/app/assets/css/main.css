@@ -152,9 +152,6 @@
 .brand strong {
   font-weight: 750;
 }
-.brand-period {
-  color: var(--site-accent);
-}
 .site-nav {
   display: flex;
   align-items: center;
