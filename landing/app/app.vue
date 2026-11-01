@@ -33,13 +33,10 @@
         </div>
         <div class="footer-legal">
           <p>
-            © {{ year }} <a href="https://evb-stack.com/" class="copyright-author">Eugene Barsky</a> &amp;
-            contributors · GPL-3.0-or-later
+            © {{ year }} <a href="https://evb-stack.com/">Eugene Barsky</a> · Based on
+            <a href="https://zed.dev">Zed</a> © Zed Industries · GPL-3.0-or-later
           </p>
-          <p>
-            An independent fork of <a href="https://zed.dev">Zed</a>. Not affiliated with Zed Industries or
-            JetBrains.
-          </p>
+          <p>An independent fork, not affiliated with Zed Industries or JetBrains.</p>
         </div>
       </footer>
     </div>
