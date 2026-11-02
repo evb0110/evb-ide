@@ -3243,6 +3243,8 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
     // This is only done on subsequent activations (not the first) to ensure the initial focus
     // path is properly established. Without this guard, the focus state would remain unset until
     // the first mouse click, causing keybindings to be non-functional.
+    // GPUI receives activation below, so this frame must bypass its inactive-window throttle
+    // and redraw any cached views before AppKit displays the destination window.
     if selector == sel!(windowDidBecomeKey:) && is_active {
         let window_state = unsafe { get_window_state(this) };
         let mut lock = window_state.lock();
@@ -3255,7 +3257,8 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
                 callback(RequestFrameOptions {
                     signal_at,
                     signal_source: FrameRequestSource::NativeCallback,
-                    ..Default::default()
+                    force_render: true,
+                    require_presentation: true,
                 });
 
                 let mut lock = window_state.lock();
