@@ -1,13 +1,13 @@
 mod decorated_icon;
 mod icon_decoration;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use decorated_icon::*;
 use gpui::{
-    AnimationElement, AnyElement, Hsla, ImgResourceLoader, IntoElement, Rems, Resource,
-    Transformation, img, svg,
+    AnimationElement, AnyElement, Hsla, ImageSource, ImgResourceLoader, IntoElement, Rems,
+    Resource, Transformation, img, svg,
 };
 pub use icon_decoration::*;
 pub use icons::*;
@@ -134,12 +134,12 @@ pub fn git_hosting_provider_icon(provider_name: &str) -> IconName {
 enum IconSource {
     /// An SVG embedded in the Zed binary.
     Embedded(SharedString),
-    /// An image file located at the specified path.
+    /// An image loaded from a file or bundled asset.
     ///
     /// Currently our SVG renderer is missing support for rendering polychrome SVGs.
     ///
     /// In order to support icon themes, we render the icons as images instead.
-    External(Arc<Path>),
+    Image(Resource),
     /// An SVG not embedded in the Zed binary.
     ExternalSvg(SharedString),
 }
@@ -151,6 +151,38 @@ pub struct Icon {
     group_hover_color: Option<Color>,
     size: Rems,
     transformation: Transformation,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_color_icons_use_embedded_image_resources() {
+        for path in [
+            "evb-jetbrains-icons/./icons/folderOpen.svg",
+            "evb-jetbrains-icons/./icons/folderOpen_dark.svg",
+            "evb-jetbrains-icons/./icons/libraryFolderOpen_dark.svg",
+        ] {
+            assert!(matches!(
+                Icon::from_path(path).source,
+                IconSource::Image(Resource::Embedded(actual)) if actual.as_ref() == path
+            ));
+        }
+    }
+
+    #[test]
+    fn other_icon_paths_keep_their_original_resource_types() {
+        assert!(matches!(
+            Icon::from_path("icons/file_icons/folder.svg").source,
+            IconSource::Embedded(_)
+        ));
+        let path = "/extensions/custom/icons/folder.svg";
+        assert!(matches!(
+            Icon::from_path(path).source,
+            IconSource::Image(Resource::Path(actual)) if actual.as_ref() == std::path::Path::new(path)
+        ));
+    }
 }
 
 impl Icon {
@@ -166,13 +198,16 @@ impl Icon {
 
     /// Create an icon from a path. Uses a heuristic to determine if it's embedded or external:
     /// - Paths starting with "icons/" are treated as embedded SVGs
+    /// - Paths starting with "evb-jetbrains-icons/" are treated as bundled color images
     /// - Other paths are treated as external raster images (from icon themes)
     pub fn from_path(path: impl Into<SharedString>) -> Self {
         let path = path.into();
         let source = if path.starts_with("icons/") {
             IconSource::Embedded(path)
+        } else if path.starts_with("evb-jetbrains-icons/") {
+            IconSource::Image(Resource::Embedded(path))
         } else {
-            IconSource::External(Arc::from(PathBuf::from(path.as_ref())))
+            IconSource::Image(Resource::Path(Arc::from(PathBuf::from(path.as_ref()))))
         };
         Self {
             source,
@@ -194,8 +229,8 @@ impl Icon {
     }
 
     pub fn preload(&self, cx: &mut App) {
-        if let IconSource::External(path) = &self.source {
-            drop(cx.fetch_asset::<ImgResourceLoader>(&Resource::Path(path.clone())));
+        if let IconSource::Image(resource) = &self.source {
+            drop(cx.fetch_asset::<ImgResourceLoader>(resource));
         }
     }
 
@@ -240,8 +275,8 @@ impl RenderOnce for Icon {
         let svg = match self.source {
             IconSource::Embedded(path) => svg().path(path),
             IconSource::ExternalSvg(path) => svg().external_path(path),
-            IconSource::External(path) => {
-                return img(path)
+            IconSource::Image(resource) => {
+                return img(ImageSource::Resource(resource))
                     .size(self.size)
                     .flex_none()
                     .text_color(color)

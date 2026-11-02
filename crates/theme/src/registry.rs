@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use gpui::{App, AssetSource, Global, SharedString};
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -62,6 +62,7 @@ impl Global for GlobalThemeRegistry {}
 struct ThemeRegistryState {
     themes: HashMap<SharedString, Arc<Theme>>,
     icon_themes: HashMap<SharedString, Arc<IconTheme>>,
+    bundled_icon_theme_names: HashSet<SharedString>,
     loaded_icon_theme: Option<LoadedIconTheme>,
     /// Whether the extensions have been loaded yet.
     extensions_loaded: bool,
@@ -77,6 +78,7 @@ struct LoadedIconTheme {
     path: PathBuf,
     icons_root_dir: PathBuf,
     contents: Vec<u8>,
+    bundled: bool,
 }
 
 impl ThemeRegistry {
@@ -113,6 +115,7 @@ impl ThemeRegistry {
             state: RwLock::new(ThemeRegistryState {
                 themes: HashMap::default(),
                 icon_themes: HashMap::default(),
+                bundled_icon_theme_names: HashSet::default(),
                 loaded_icon_theme: None,
                 extensions_loaded: false,
             }),
@@ -261,9 +264,21 @@ impl ThemeRegistry {
         if !icon_themes_to_remove.is_empty() {
             state.loaded_icon_theme = None;
         }
-        state
-            .icon_themes
-            .retain(|name, _| !icon_themes_to_remove.contains(name))
+        for name in icon_themes_to_remove {
+            if !state.bundled_icon_theme_names.contains(name) {
+                state.icon_themes.remove(name);
+            }
+        }
+    }
+
+    /// Bundle-provided themes must survive loading or removing an older installed extension.
+    pub fn load_bundled_icon_theme(
+        &self,
+        path: &Path,
+        icons_root_dir: &Path,
+        contents: Vec<u8>,
+    ) -> Result<()> {
+        self.load_icon_theme_inner(path, icons_root_dir, contents, true)
     }
 
     /// Loads the icon theme from the icon theme family and adds it to the registry.
@@ -276,6 +291,16 @@ impl ThemeRegistry {
         icons_root_dir: &Path,
         contents: Vec<u8>,
     ) -> Result<()> {
+        self.load_icon_theme_inner(path, icons_root_dir, contents, false)
+    }
+
+    fn load_icon_theme_inner(
+        &self,
+        path: &Path,
+        icons_root_dir: &Path,
+        contents: Vec<u8>,
+        bundled: bool,
+    ) -> Result<()> {
         if self
             .state
             .read()
@@ -285,6 +310,7 @@ impl ThemeRegistry {
                 loaded.path == path
                     && loaded.icons_root_dir == icons_root_dir
                     && loaded.contents == contents
+                    && loaded.bundled == bundled
             })
         {
             return Ok(());
@@ -303,6 +329,13 @@ impl ThemeRegistry {
 
         let mut state = self.state.write();
         for icon_theme in icon_theme_family.themes {
+            if !bundled
+                && state
+                    .bundled_icon_theme_names
+                    .contains(icon_theme.name.as_str())
+            {
+                continue;
+            }
             let mut file_stems = default_icon_theme.file_stems.clone();
             file_stems.extend(icon_theme.file_stems);
 
@@ -354,6 +387,11 @@ impl ThemeRegistry {
                     .collect(),
             };
 
+            if bundled {
+                state
+                    .bundled_icon_theme_names
+                    .insert(icon_theme.name.clone());
+            }
             state
                 .icon_themes
                 .insert(icon_theme.name.clone(), Arc::new(icon_theme));
@@ -362,6 +400,7 @@ impl ThemeRegistry {
             path: path.to_path_buf(),
             icons_root_dir: icons_root_dir.to_path_buf(),
             contents,
+            bundled,
         });
 
         Ok(())
@@ -371,5 +410,146 @@ impl ThemeRegistry {
 impl Default for ThemeRegistry {
     fn default() -> Self {
         Self::new(Box::new(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Context as _;
+
+    const BUNDLED_PATH: &str = "evb-jetbrains-icons/icon_themes/jetbrains-icons.json";
+    const BUNDLED_ROOT: &str = "evb-jetbrains-icons";
+    const BUNDLED_CONTENTS: &[u8] =
+        include_bytes!("../../../extensions/evb-jetbrains-icons/icon_themes/jetbrains-icons.json");
+
+    fn load_legacy_extension(registry: &ThemeRegistry) -> Result<()> {
+        let mut legacy = deserialize_icon_theme(BUNDLED_CONTENTS)?;
+        for theme in &mut legacy.themes {
+            theme.directory_icons.expanded = theme.directory_icons.collapsed.clone();
+            for icons in theme.named_directory_icons.values_mut() {
+                icons.expanded = icons.collapsed.clone();
+            }
+        }
+        registry.load_icon_theme(
+            Path::new("/extensions/installed/evb-jetbrains-icons/icon_themes/jetbrains-icons.json"),
+            Path::new("/extensions/installed/evb-jetbrains-icons"),
+            serde_json::to_vec(&legacy)?,
+        )
+    }
+
+    fn assert_bundled_folder_icons(registry: &ThemeRegistry) -> Result<()> {
+        let bundled = deserialize_icon_theme(BUNDLED_CONTENTS)?;
+        for expected in bundled.themes {
+            let actual = registry.get_icon_theme(&expected.name)?;
+            let assert_icons =
+                |actual: &DirectoryIcons, expected: &crate::DirectoryIconsContent| {
+                    let resolve = |path: &Option<SharedString>| {
+                        path.as_ref().map(|path| {
+                            Path::new(BUNDLED_ROOT)
+                                .join(path.as_ref())
+                                .to_string_lossy()
+                                .to_string()
+                        })
+                    };
+                    assert_eq!(
+                        actual.expanded.as_deref(),
+                        resolve(&expected.expanded).as_deref()
+                    );
+                    assert_eq!(
+                        actual.collapsed.as_deref(),
+                        resolve(&expected.collapsed).as_deref()
+                    );
+                    assert_ne!(actual.collapsed, actual.expanded);
+                };
+            assert_icons(&actual.directory_icons, &expected.directory_icons);
+            for (name, expected) in &expected.named_directory_icons {
+                assert_icons(
+                    actual
+                        .named_directory_icons
+                        .get(name)
+                        .context("named folder icon")?,
+                    expected,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_icon_themes_survive_legacy_extension_load_and_removal() -> Result<()> {
+        let registry = ThemeRegistry::default();
+        registry.load_bundled_icon_theme(
+            Path::new(BUNDLED_PATH),
+            Path::new(BUNDLED_ROOT),
+            BUNDLED_CONTENTS.to_vec(),
+        )?;
+        load_legacy_extension(&registry)?;
+        assert_bundled_folder_icons(&registry)?;
+        registry.set_extensions_loaded();
+        load_legacy_extension(&registry)?;
+        assert_bundled_folder_icons(&registry)?;
+        registry.remove_icon_themes(&[
+            "JetBrains Icons Light".into(),
+            "JetBrains Icons Dark".into(),
+        ]);
+        assert_bundled_folder_icons(&registry)
+    }
+
+    #[test]
+    fn bundled_icon_themes_replace_previously_loaded_extensions() -> Result<()> {
+        let registry = ThemeRegistry::default();
+        load_legacy_extension(&registry)?;
+        registry.load_bundled_icon_theme(
+            Path::new(BUNDLED_PATH),
+            Path::new(BUNDLED_ROOT),
+            BUNDLED_CONTENTS.to_vec(),
+        )?;
+        assert_bundled_folder_icons(&registry)
+    }
+
+    #[test]
+    fn cached_icon_theme_can_be_registered_as_bundled() -> Result<()> {
+        let registry = ThemeRegistry::default();
+        registry.load_icon_theme(
+            Path::new(BUNDLED_PATH),
+            Path::new(BUNDLED_ROOT),
+            BUNDLED_CONTENTS.to_vec(),
+        )?;
+        registry.load_bundled_icon_theme(
+            Path::new(BUNDLED_PATH),
+            Path::new(BUNDLED_ROOT),
+            BUNDLED_CONTENTS.to_vec(),
+        )?;
+        load_legacy_extension(&registry)?;
+        assert_bundled_folder_icons(&registry)
+    }
+
+    #[test]
+    fn extension_icon_themes_can_still_be_reloaded_and_removed() -> Result<()> {
+        let registry = ThemeRegistry::default();
+        let mut contents = deserialize_icon_theme(BUNDLED_CONTENTS)?;
+        for theme in &mut contents.themes {
+            theme.name = format!("Custom {}", theme.name);
+        }
+        let bytes = serde_json::to_vec(&contents)?;
+        registry.load_icon_theme(Path::new("custom.json"), Path::new("first"), bytes.clone())?;
+        registry.load_icon_theme(Path::new("custom.json"), Path::new("second"), bytes)?;
+        let theme = registry.get_icon_theme("Custom JetBrains Icons Dark")?;
+        assert!(
+            theme
+                .directory_icons
+                .expanded
+                .as_deref()
+                .context("expanded icon")?
+                .starts_with("second/")
+        );
+        registry.remove_icon_themes(&["Custom JetBrains Icons Dark".into()]);
+        assert!(
+            registry
+                .get_icon_theme("Custom JetBrains Icons Dark")
+                .is_err()
+        );
+        Ok(())
     }
 }
