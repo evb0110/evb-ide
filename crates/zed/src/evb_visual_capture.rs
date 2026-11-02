@@ -295,17 +295,36 @@ mod capture {
                 }
             }
         });
-        cx.update(|cx| {
-            let extension_root =
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions/evb-jetbrains-icons");
-            let icon_theme = extension_root.join("icon_themes/jetbrains-icons.json");
-            if let Some(bytes) = std::fs::read(&icon_theme).log_err() {
-                theme::ThemeRegistry::global(cx)
-                    .load_icon_theme(&icon_theme, &extension_root, bytes)
-                    .log_err();
-                theme_settings::reload_icon_theme(cx);
+        cx.update(|cx| -> Result<()> {
+            let registry = theme::ThemeRegistry::global(cx);
+            let icon_theme = Path::new("evb-jetbrains-icons/icon_themes/jetbrains-icons.json");
+            let contents = registry
+                .assets()
+                .load(icon_theme.to_str().context("bundled icon theme path")?)?
+                .context("bundled EVB icon theme is missing")?
+                .into_owned();
+            registry.load_bundled_icon_theme(
+                icon_theme,
+                Path::new("evb-jetbrains-icons"),
+                contents.clone(),
+            )?;
+
+            // Existing installations can still have the pre-bundling extension on disk.
+            let mut legacy = theme::deserialize_icon_theme(&contents)?;
+            for variant in &mut legacy.themes {
+                variant.directory_icons.expanded = variant.directory_icons.collapsed.clone();
+                for icons in variant.named_directory_icons.values_mut() {
+                    icons.expanded = icons.collapsed.clone();
+                }
             }
-        });
+            registry.load_icon_theme(
+                Path::new("legacy-extension/icon_themes/jetbrains-icons.json"),
+                Path::new("legacy-extension"),
+                serde_json::to_vec(&legacy)?,
+            )?;
+            theme_settings::reload_icon_theme(cx);
+            Ok(())
+        })?;
         cx.update(|cx| {
             use theme::ActiveTheme as _;
             app_state.languages.set_theme(cx.theme().clone());
@@ -346,6 +365,27 @@ mod capture {
             return film(&workspace, any_window, &mut cx, Path::new(&film_dir));
         }
         save(&mut cx, any_window, &output_dir, "01-workspace")?;
+
+        for (theme, appearance) in [("IntelliJ Light", "light"), ("IntelliJ Dark", "dark")] {
+            set_theme(&mut cx, theme);
+            cx.simulate_click(any_window, point(px(84.), px(67.)), Default::default());
+            settle(&mut cx, 5);
+            save(
+                &mut cx,
+                any_window,
+                &output_dir,
+                &format!("01-folder-expanded-{appearance}"),
+            )?;
+            cx.simulate_click(any_window, point(px(84.), px(67.)), Default::default());
+            settle(&mut cx, 5);
+            save(
+                &mut cx,
+                any_window,
+                &output_dir,
+                &format!("01-folder-collapsed-{appearance}"),
+            )?;
+        }
+        set_theme(&mut cx, "IntelliJ Light");
 
         cx.dispatch_action(any_window, evb_run::ChooseConfiguration);
         settle(&mut cx, 5);
@@ -847,6 +887,14 @@ mod capture {
                 store.update_user_settings(cx, |settings| {
                     settings.theme.theme = Some(settings::ThemeSelection::Static(
                         settings::ThemeName(name.into()),
+                    ));
+                    let icon_theme = if name == "IntelliJ Dark" {
+                        "JetBrains Icons Dark"
+                    } else {
+                        "JetBrains Icons Light"
+                    };
+                    settings.theme.icon_theme = Some(settings::IconThemeSelection::Static(
+                        settings::IconThemeName(icon_theme.into()),
                     ));
                 });
             });

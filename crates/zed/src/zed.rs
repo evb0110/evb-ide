@@ -2782,7 +2782,7 @@ pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut A
         .load(bundled_icon_theme)
         .and_then(|contents| contents.context("bundled EVB icon theme is missing"))
         .and_then(|contents| {
-            theme_registry.load_icon_theme(
+            theme_registry.load_bundled_icon_theme(
                 Path::new(bundled_icon_theme),
                 Path::new("evb-jetbrains-icons"),
                 contents.into_owned(),
