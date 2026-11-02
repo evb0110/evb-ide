@@ -788,6 +788,16 @@ impl BufferSerialization {
 pub trait Addon: 'static {
     fn extend_key_context(&self, _: &mut KeyContext, _: &App) {}
 
+    fn definitions(
+        &self,
+        _: &Entity<Buffer>,
+        _: text::Anchor,
+        _: GotoDefinitionKind,
+        _: &mut App,
+    ) -> Option<Task<Result<Option<Vec<LocationLink>>>>> {
+        None
+    }
+
     fn render_buffer_header_controls(
         &self,
         _: &ExcerptBoundaryInfo,
@@ -3313,6 +3323,23 @@ impl Editor {
 
     pub fn semantics_provider(&self) -> Option<Rc<dyn SemanticsProvider>> {
         self.semantics_provider.clone()
+    }
+
+    pub(crate) fn definitions(
+        &self,
+        buffer: &Entity<Buffer>,
+        position: text::Anchor,
+        kind: GotoDefinitionKind,
+        cx: &mut App,
+    ) -> Option<Task<Result<Option<Vec<LocationLink>>>>> {
+        for addon in self.addons.values() {
+            if let Some(definitions) = addon.definitions(buffer, position, kind, cx) {
+                return Some(definitions);
+            }
+        }
+        self.semantics_provider
+            .as_ref()?
+            .definitions(buffer, position, kind, cx)
     }
 
     pub fn set_semantics_provider(&mut self, provider: Option<Rc<dyn SemanticsProvider>>) {

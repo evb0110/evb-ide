@@ -59,6 +59,12 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
+    cx.observe_new(|editor: &mut Editor, _window, _cx| {
+        if let Some(project) = editor.project().map(Entity::downgrade) {
+            editor.register_addon(HistoricalNavigation { project });
+        }
+    })
+    .detach();
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(|workspace, _: &ApplyCurrentStash, window, cx| {
             CommitView::apply_stash(workspace, window, cx);
@@ -68,6 +74,16 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, _: &PopCurrentStash, window, cx| {
             CommitView::pop_stash(workspace, window, cx);
+        });
+        workspace.register_action(|workspace, _: &OpenFileAtHead, window, cx| {
+            let target = workspace
+                .active_item_as::<Editor>(cx)
+                .and_then(|editor| historical_working_copy(editor.read(cx), cx));
+            if let Some(path) = target {
+                workspace
+                    .open_path_preview(path, None, false, false, true, window, cx)
+                    .detach_and_log_err(cx);
+            }
         });
     })
     .detach();
@@ -92,6 +108,7 @@ pub struct CommitView {
 
 pub(crate) struct GitBlob {
     pub(crate) path: RepoPath,
+    pub(crate) repository: Option<WeakEntity<Repository>>,
     pub(crate) worktree_id: WorktreeId,
     pub(crate) is_deleted: bool,
     pub(crate) is_binary: bool,
@@ -165,7 +182,7 @@ impl Addon for CommitDiffAddon {
         menu.when_some(file_to_open, |menu, file| {
             let commit_view = self.commit_view.clone();
             menu.entry(
-                "Open File in Project",
+                "Open Working Copy",
                 Some(Box::new(OpenFileAtHead)),
                 move |window, cx| {
                     commit_view
@@ -178,6 +195,129 @@ impl Addon for CommitDiffAddon {
 }
 
 const FILE_NAMESPACE_SORT_PREFIX: u64 = 1;
+
+struct HistoricalNavigation {
+    project: WeakEntity<Project>,
+}
+
+impl Addon for HistoricalNavigation {
+    fn to_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn definitions(
+        &self,
+        buffer: &Entity<Buffer>,
+        position: language::Anchor,
+        kind: editor::GotoDefinitionKind,
+        cx: &mut App,
+    ) -> Option<Task<Result<Option<Vec<project::LocationLink>>>>> {
+        let historical = buffer.read(cx).snapshot();
+        let file = historical.file()?;
+        let any_file: &dyn Any = file.as_ref();
+        let repository = any_file
+            .downcast_ref::<GitBlob>()?
+            .repository
+            .as_ref()?
+            .upgrade()?;
+        let project = self.project.upgrade()?;
+        let path = working_copy_path(repository.read(cx), project.read(cx), file.as_ref(), cx);
+        Some(cx.spawn(async move |cx| {
+            let Some(path) = path else {
+                return Ok(None);
+            };
+            let current = project
+                .update(cx, |project, cx| project.open_buffer(path, cx))
+                .await?;
+            let current_snapshot = current.read_with(cx, |buffer, _| buffer.snapshot());
+            let diff = cx.new(|cx| BufferDiff::new(&current_snapshot.text, None, None, cx));
+            diff.update(cx, |diff, cx| {
+                diff.set_base_text(
+                    Some(Arc::from(historical.text())),
+                    current_snapshot.text.clone(),
+                    cx,
+                )
+            })
+            .await;
+            let definitions = cx.update(|cx| {
+                if &current.read(cx).version() != current_snapshot.version() {
+                    return None;
+                }
+                let source_point = language::ToPoint::to_point(&position, &historical);
+                let point = diff
+                    .read(cx)
+                    .snapshot(cx)
+                    .base_text_point_to_buffer_point(source_point, &current_snapshot.text);
+                let source_line = historical
+                    .text_for_range(
+                        language::Point::new(source_point.row, 0)
+                            ..language::Point::new(
+                                source_point.row,
+                                historical.line_len(source_point.row),
+                            ),
+                    )
+                    .collect::<String>();
+                let current_line = current_snapshot
+                    .text_for_range(
+                        language::Point::new(point.row, 0)
+                            ..language::Point::new(point.row, current_snapshot.line_len(point.row)),
+                    )
+                    .collect::<String>();
+                // Historical buffers must never replace the server's current document.
+                // Only query the working copy when the diff maps to the same code.
+                if source_line != current_line {
+                    return None;
+                }
+                editor::SemanticsProvider::definitions(
+                    &project.downgrade(),
+                    &current,
+                    current_snapshot.anchor_before(point),
+                    kind,
+                    cx,
+                )
+            });
+            let Some(definitions) = definitions else {
+                return Ok(None);
+            };
+            let mut links = definitions.await?.unwrap_or_default();
+            for link in &mut links {
+                link.origin = None;
+            }
+            Ok(Some(links))
+        }))
+    }
+}
+
+fn working_copy_path(
+    repository: &Repository,
+    project: &Project,
+    file: &dyn File,
+    cx: &App,
+) -> Option<ProjectPath> {
+    let path = repository.repo_path_to_project_path(&RepoPath::from_rel_path(file.path()), cx)?;
+    project.entry_for_path(&path, cx)?.is_file().then_some(path)
+}
+
+fn historical_working_copy(editor: &Editor, cx: &App) -> Option<ProjectPath> {
+    let buffer = editor.buffer().read(cx).as_singleton()?.read(cx);
+    let file = buffer.file()?;
+    if !matches!(file.disk_state(), DiskState::Historic { .. }) {
+        return None;
+    }
+    let any_file: &dyn Any = file.as_ref();
+    let repository = any_file
+        .downcast_ref::<GitBlob>()?
+        .repository
+        .as_ref()?
+        .upgrade()?;
+    let workspace = editor.workspace()?;
+    working_copy_path(
+        repository.read(cx),
+        workspace.read(cx).project().read(cx),
+        file.as_ref(),
+        cx,
+    )
+}
 
 impl CommitView {
     pub fn open(
@@ -389,6 +529,7 @@ impl CommitView {
 
                 let file = Arc::new(GitBlob {
                     path: file.path.clone(),
+                    repository: Some(repository_clone.downgrade()),
                     is_deleted,
                     is_binary,
                     worktree_id,
@@ -674,17 +815,19 @@ impl CommitView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let rel_path = file.path().clone();
-        let worktree_id = file.worktree_id(cx);
-        let repo_path = RepoPath::from_rel_path(&rel_path);
-        let project_path = self
-            .repository
-            .read(cx)
-            .repo_path_to_project_path(&repo_path, cx)
-            .unwrap_or(project::ProjectPath {
-                worktree_id,
-                path: rel_path,
-            });
+        let Some(project_path) = working_copy_path(
+            self.repository.read(cx),
+            self.project.read(cx),
+            file.as_ref(),
+            cx,
+        ) else {
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    workspace.show_error("This file does not exist in the working copy", cx);
+                })
+                .log_err();
+            return;
+        };
 
         self.workspace
             .update(cx, |workspace, cx| {
@@ -1411,11 +1554,15 @@ impl Render for CommitView {
 
 pub struct CommitViewToolbar {
     commit_view: Option<WeakEntity<CommitView>>,
+    historical_editor: Option<WeakEntity<Editor>>,
 }
 
 impl CommitViewToolbar {
     pub fn new() -> Self {
-        Self { commit_view: None }
+        Self {
+            commit_view: None,
+            historical_editor: None,
+        }
     }
 }
 
@@ -1423,8 +1570,39 @@ impl EventEmitter<ToolbarItemEvent> for CommitViewToolbar {}
 
 impl Render for CommitViewToolbar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(editor) = self
+            .historical_editor
+            .as_ref()
+            .and_then(|editor| editor.upgrade())
+        {
+            let available = historical_working_copy(editor.read(cx), cx).is_some();
+            return h_flex()
+                .debug_selector(|| "open-working-copy".to_string())
+                .child(
+                    Button::new("open-working-copy", "Open Working Copy")
+                        .disabled(!available)
+                        .tooltip(Tooltip::text(if available {
+                            "Open the current editable file in the project"
+                        } else {
+                            "This file does not exist in the working copy"
+                        }))
+                        .on_click(move |_, window, cx| {
+                            let target = historical_working_copy(editor.read(cx), cx);
+                            let workspace = editor.read(cx).workspace();
+                            if let Some((path, workspace)) = target.zip(workspace) {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace
+                                        .open_path_preview(
+                                            path, None, false, false, true, window, cx,
+                                        )
+                                        .detach_and_log_err(cx);
+                                });
+                            }
+                        }),
+                );
+        }
         let Some(commit_view) = self.commit_view.as_ref().and_then(|w| w.upgrade()) else {
-            return div();
+            return h_flex();
         };
 
         let commit_view_ref = commit_view.read(cx);
@@ -1452,6 +1630,17 @@ impl Render for CommitViewToolbar {
 
         h_flex()
             .gap_1()
+            .child(
+                Button::new("open-working-copy", "Open Working Copy")
+                    .tooltip(Tooltip::text(
+                        "Open the selected file's current editable working copy",
+                    ))
+                    .on_click(move |_, window, cx| {
+                        commit_view.update(cx, |view, cx| {
+                            view.open_file_at_head_action(&OpenFileAtHead, window, cx);
+                        });
+                    }),
+            )
             .when(additions > 0 || deletions > 0, |this| {
                 this.child(
                     h_flex()
@@ -1514,11 +1703,25 @@ impl ToolbarItemView for CommitViewToolbar {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> ToolbarItemLocation {
+        self.historical_editor = None;
         if let Some(entity) = active_pane_item.and_then(|i| i.act_as::<CommitView>(cx)) {
             self.commit_view = Some(entity.downgrade());
             return ToolbarItemLocation::PrimaryRight;
         }
         self.commit_view = None;
+        if let Some(editor) = active_pane_item.and_then(|item| item.downcast::<Editor>()) {
+            let is_historical = editor
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .as_singleton()
+                .and_then(|buffer| buffer.read(cx).file())
+                .is_some_and(|file| matches!(file.disk_state(), DiskState::Historic { .. }));
+            if is_historical {
+                self.historical_editor = Some(editor.downgrade());
+                return ToolbarItemLocation::PrimaryRight;
+            }
+        }
         ToolbarItemLocation::Hidden
     }
 
@@ -1548,6 +1751,282 @@ mod tests {
     use settings::SettingsStore;
 
     #[gpui::test]
+    async fn test_navigation_historical_go_symbols_in_diff_and_file(cx: &mut TestAppContext) {
+        use editor::test::editor_lsp_test_context::EditorLspTestContext;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let language = Language::new(
+            LanguageConfig {
+                name: "Go".into(),
+                matcher: Arc::new(LanguageMatcher {
+                    path_suffixes: vec!["go".into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None,
+        );
+        let mut cx = EditorLspTestContext::new(
+            language,
+            lsp::ServerCapabilities {
+                definition_provider: Some(lsp::OneOf::Left(true)),
+                ..Default::default()
+            },
+            cx,
+        )
+        .await;
+        cx.update(|_, cx| super::init(cx));
+        cx.set_state("// current only\npackage main\nfunc main() { ˇwork() }\nfunc work() {}\n");
+        let current_editor = cx.editor.clone();
+        let (project, repository) = cx.workspace.read_with(&**cx, |workspace, cx| {
+            let project = workspace.project().clone();
+            let repository = project
+                .read(cx)
+                .active_repository(cx)
+                .expect("fixture repository");
+            (project, repository)
+        });
+        let target = cx
+            .lsp_range("// current only\npackage main\nfunc main() { work() }\nfunc «work»() {}\n");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let _handler = cx.set_request_handler::<lsp::request::GotoDefinition, _, _>({
+            let requests = requests.clone();
+            move |uri, params, _| {
+                assert_eq!(params.text_document_position_params.position.line, 2);
+                requests.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    Ok(Some(lsp::GotoDefinitionResponse::Array(vec![
+                        lsp::Location { uri, range: target },
+                    ])))
+                }
+            }
+        });
+        let historical_text = "package main\nfunc main() { work() }\nfunc work() {}\n";
+        for multibuffer in [false, true] {
+            let path = RepoPath::new("dir/file.go").unwrap();
+            let worktree_id = repository.read_with(&**cx, |repository, cx| {
+                worktree_id_for_repo_path(repository, project.read(cx), &path, cx).unwrap()
+            });
+            let blob = Arc::new(GitBlob {
+                path,
+                repository: Some(repository.downgrade()),
+                worktree_id,
+                is_deleted: false,
+                is_binary: false,
+                display_name: "abc1234 - file.go".into(),
+            }) as Arc<dyn File>;
+            let languages = project.read_with(&**cx, |project, _| project.languages().clone());
+            let mut async_cx = cx.update(|window, cx| window.to_async(cx));
+            let buffer = build_buffer(historical_text.into(), blob, &languages, &mut async_cx)
+                .await
+                .unwrap();
+            let historical_editor = cx.update(|window, cx| {
+                let multi_buffer = cx.new(|cx| {
+                    if multibuffer {
+                        let mut multi_buffer = MultiBuffer::new(Capability::ReadOnly);
+                        multi_buffer.set_excerpts_for_path(
+                            PathKey::sorted(0),
+                            buffer.clone(),
+                            [language::Point::zero()..buffer.read(cx).max_point()],
+                            0,
+                            cx,
+                        );
+                        multi_buffer
+                    } else {
+                        MultiBuffer::singleton(buffer.clone(), cx)
+                    }
+                });
+                cx.new(|cx| {
+                    let mut editor =
+                        Editor::for_multibuffer(multi_buffer, Some(project.clone()), window, cx);
+                    editor.set_read_only(true);
+                    editor
+                })
+            });
+            cx.workspace
+                .clone()
+                .update_in(&mut **cx, |workspace, window, cx| {
+                    workspace.add_item_to_active_pane(
+                        Box::new(historical_editor.clone()),
+                        None,
+                        true,
+                        window,
+                        cx,
+                    );
+                });
+            cx.editor = historical_editor.clone();
+            cx.run_until_parked();
+            let count = requests.load(Ordering::SeqCst);
+            let position =
+                cx.pixel_position("package main\nfunc main() { woˇrk() }\nfunc work() {}\n");
+            let modifiers = cx.read(gpui::Modifiers::secondary_key);
+            cx.simulate_mouse_move(position, None, modifiers);
+            cx.run_until_parked();
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                count + 1,
+                "historical symbol must query the working-copy server"
+            );
+            cx.assert_editor_text_highlights(
+                editor::display_map::HighlightKey::HoveredLinkState,
+                "package main\nfunc main() { «work»() }\nfunc work() {}\n",
+            );
+            cx.simulate_click(position, modifiers);
+            cx.run_until_parked();
+            assert_eq!(
+                cx.workspace.read_with(&**cx, |workspace, cx| workspace
+                    .active_item_as::<Editor>(cx)),
+                Some(current_editor.clone())
+            );
+            cx.editor = current_editor.clone();
+            cx.assert_editor_state(
+                "// current only\npackage main\nfunc main() { work() }\nfunc «workˇ»() {}\n",
+            );
+            historical_editor.read_with(&**cx, |editor, cx| assert!(editor.read_only(cx)));
+            buffer.read_with(&**cx, |buffer, _| {
+                assert_eq!(buffer.text(), historical_text)
+            });
+            cx.workspace
+                .clone()
+                .update_in(&mut **cx, |workspace, window, cx| {
+                    workspace.activate_item(&historical_editor, true, true, window, cx);
+                });
+            cx.editor = historical_editor.clone();
+            cx.simulate_modifiers_change(gpui::Modifiers::none());
+            cx.dispatch_action(editor::actions::GoToDefinition::default());
+            cx.run_until_parked();
+            assert_eq!(
+                cx.workspace.read_with(&**cx, |workspace, cx| workspace
+                    .active_item_as::<Editor>(cx)),
+                Some(current_editor.clone())
+            );
+
+            cx.editor = current_editor.clone();
+            cx.set_state(
+                "// current only\npackage main\nfunc main() { ˇother() }\nfunc work() {}\n",
+            );
+            cx.workspace
+                .clone()
+                .update_in(&mut **cx, |workspace, window, cx| {
+                    workspace.activate_item(&historical_editor, true, true, window, cx);
+                });
+            cx.editor = historical_editor;
+            cx.run_until_parked();
+            let count = requests.load(Ordering::SeqCst);
+            let position =
+                cx.pixel_position("package main\nfunc main() { woˇrk() }\nfunc work() {}\n");
+            cx.simulate_mouse_move(position, None, modifiers);
+            cx.run_until_parked();
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                count,
+                "changed code must not query an unrelated current symbol"
+            );
+            cx.assert_editor_text_highlights(
+                editor::display_map::HighlightKey::HoveredLinkState,
+                historical_text,
+            );
+            cx.editor = current_editor.clone();
+            cx.set_state(
+                "// current only\npackage main\nfunc main() { ˇwork() }\nfunc work() {}\n",
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_navigation_open_historical_working_copy_in_nested_repository(
+        cx: &mut TestAppContext,
+    ) {
+        let app_state = cx.update(workspace::AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            workspace::init(app_state, cx);
+            super::init(cx);
+        });
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            std::path::Path::new("/workspace"),
+            serde_json::json!({
+                "nested": {".git": {}, "src": {"main.go": "package current\n"}},
+                "src": {"main.go": "wrong file\n"},
+            }),
+        )
+        .await;
+        let project = Project::test(fs, [std::path::Path::new("/workspace")], cx).await;
+        cx.run_until_parked();
+        let repository = project.read_with(cx, |project, cx| {
+            project.active_repository(cx).expect("repository")
+        });
+        let window = cx.add_window(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        let path = RepoPath::new("src/main.go").unwrap();
+        let worktree_id = repository.read_with(cx, |repository, cx| {
+            worktree_id_for_repo_path(repository, project.read(cx), &path, cx).unwrap()
+        });
+        let blob = Arc::new(GitBlob {
+            path,
+            repository: Some(repository.downgrade()),
+            worktree_id,
+            is_deleted: false,
+            is_binary: false,
+            display_name: "abc1234 - main.go".into(),
+        }) as Arc<dyn File>;
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+        let mut async_cx = cx.update(|window, cx| window.to_async(cx));
+        let buffer = build_buffer(
+            "package historical\n".into(),
+            blob,
+            &language_registry,
+            &mut async_cx,
+        )
+        .await
+        .unwrap();
+        let historical_editor = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.toolbar().update(cx, |toolbar, cx| {
+                    let controls = cx.new(|_| CommitViewToolbar::new());
+                    toolbar.add_item(controls, window, cx);
+                });
+            });
+            let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+            let editor = cx.new(|cx| {
+                let mut editor =
+                    Editor::for_multibuffer(multi_buffer, Some(project.clone()), window, cx);
+                editor.set_read_only(true);
+                editor
+            });
+            workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
+            editor
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let button = cx
+            .debug_bounds("open-working-copy")
+            .expect("working copy button must be visible");
+        cx.simulate_click(button.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            let editor = workspace
+                .active_item_as::<Editor>(cx)
+                .expect("working copy editor");
+            assert_ne!(editor, historical_editor);
+            assert!(!editor.read(cx).read_only(cx));
+            assert_eq!(
+                editor.read(cx).buffer().read(cx).snapshot(cx).text(),
+                "package current\n"
+            );
+            assert!(historical_editor.read(cx).read_only(cx));
+            assert_eq!(buffer.read(cx).text(), "package historical\n");
+        });
+    }
+
+    #[gpui::test]
     async fn test_build_buffer_resolves_injected_languages(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let store = SettingsStore::test(cx);
@@ -1571,6 +2050,7 @@ mod tests {
         .to_string();
         let blob = Arc::new(GitBlob {
             path: RepoPath::new("notes.md").unwrap(),
+            repository: None,
             worktree_id: WorktreeId::from_usize(0),
             is_deleted: false,
             is_binary: false,
@@ -1636,6 +2116,7 @@ mod tests {
             .map(|(path, display_name)| {
                 let blob = Arc::new(GitBlob {
                     path: RepoPath::new(path).expect("valid repository path"),
+                    repository: None,
                     worktree_id: WorktreeId::from_usize(0),
                     is_deleted: false,
                     is_binary: false,

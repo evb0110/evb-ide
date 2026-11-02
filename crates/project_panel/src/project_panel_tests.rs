@@ -7456,6 +7456,73 @@ async fn test_autoreveal_follows_multibuffer_selection(cx: &mut gpui::TestAppCon
 }
 
 #[gpui::test]
+async fn test_navigation_select_opened_file_button_with_panel_focused(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test_with_editor(cx);
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings
+                    .project_panel
+                    .get_or_insert_default()
+                    .auto_reveal_entries = Some(false);
+            });
+        });
+    });
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/workspace",
+        json!({"src": {"nested": {"main.go": "package main\n"}}}),
+    )
+    .await;
+    let project = Project::test(fs, ["/workspace".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, |workspace, window, cx| {
+        let panel = ProjectPanel::new(workspace, window, cx);
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.focus_panel::<ProjectPanel>(window, cx);
+        panel
+    });
+    let path = project.read_with(cx, |project, cx| {
+        project
+            .find_project_path("workspace/src/nested/main.go", cx)
+            .unwrap()
+    });
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            workspace.open_path(path, None, true, window, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    panel.update_in(cx, |panel, window, cx| {
+        panel.collapse_all_entries(&CollapseAllEntries, window, cx);
+        window.focus(&panel.focus_handle, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let button = cx
+        .debug_bounds("ICON-Crosshair")
+        .expect("Select Opened File must be visible");
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..20, cx),
+        &[
+            "v workspace",
+            "    v src",
+            "        v nested",
+            "              main.go  <== selected  <== marked",
+        ]
+    );
+}
+
+#[gpui::test]
 async fn test_reveal_in_project_panel_fallback(cx: &mut gpui::TestAppContext) {
     init_test_with_editor(cx);
     let fs = FakeFs::new(cx.background_executor.clone());

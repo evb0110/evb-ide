@@ -7249,6 +7249,20 @@ impl ProjectPanel {
         dispatch_context
     }
 
+    fn reveal_active_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let project_path = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).active_item(cx)?.project_path(cx));
+        if let Some(entry_id) = project_path
+            .and_then(|path| self.project.read(cx).entry_for_path(&path, cx))
+            .map(|entry| entry.id)
+        {
+            self.reveal_entry(self.project.clone(), entry_id, false, window, cx)
+                .log_err();
+        }
+    }
+
     fn reveal_entry(
         &mut self,
         project: Entity<Project>,
@@ -7633,7 +7647,7 @@ impl Render for ProjectPanel {
                     }
                 }));
             }
-            h_flex()
+            v_flex()
                 .id("project-panel")
                 .group("project-panel")
                 .when(panel_settings.drag_and_drop, |this| {
@@ -7726,6 +7740,23 @@ impl Render for ProjectPanel {
                         .on_action(cx.listener(Self::download_from_remote))
                 })
                 .track_focus(&self.focus_handle(cx))
+                .child(
+                    h_flex()
+                        .h_8()
+                        .px_2()
+                        .flex_none()
+                        .justify_between()
+                        .child(Label::new("Project").color(Color::Muted))
+                        .child(
+                            IconButton::new("select-opened-file", IconName::Crosshair)
+                                .aria_label("Select Opened File")
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Select Opened File"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.reveal_active_file(window, cx);
+                                })),
+                        ),
+                )
                 .child(
                     v_flex()
                         .child(
@@ -8116,7 +8147,9 @@ impl Render for ProjectPanel {
                                     ))
                                 }),
                         )
-                        .size_full(),
+                        .w_full()
+                        .flex_1()
+                        .min_h_0(),
                 )
                 .custom_scrollbars(
                     {
