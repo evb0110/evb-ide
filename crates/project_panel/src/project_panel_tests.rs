@@ -7462,14 +7462,12 @@ async fn test_navigation_select_opened_file_button_with_panel_focused(
     init_test_with_editor(cx);
     cx.update(|cx| {
         cx.update_global::<SettingsStore, _>(|store, cx| {
-            store.update_user_settings(cx, |settings| {
-                settings
-                    .project_panel
-                    .get_or_insert_default()
-                    .auto_reveal_entries = Some(false);
-            });
+            store
+                .set_default_settings(&settings::app_default_settings(), cx)
+                .expect("EVB defaults must be valid");
         });
     });
+    cx.read(|cx| assert!(!ProjectPanelSettings::get_global(cx).auto_reveal_entries));
     let fs = FakeFs::new(cx.background_executor.clone());
     fs.insert_tree(
         "/workspace",
@@ -7493,6 +7491,9 @@ async fn test_navigation_select_opened_file_button_with_panel_focused(
             .find_project_path("workspace/src/nested/main.go", cx)
             .unwrap()
     });
+    cx.run_until_parked();
+    let entries_before_open = visible_entries_as_strings(&panel, 0..20, cx);
+    assert_eq!(entries_before_open, &["v workspace", "    > src"]);
     workspace
         .update_in(cx, |workspace, window, cx| {
             workspace.open_path(path, None, true, window, cx)
@@ -7500,6 +7501,10 @@ async fn test_navigation_select_opened_file_button_with_panel_focused(
         .await
         .unwrap();
     cx.run_until_parked();
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..20, cx),
+        entries_before_open
+    );
     panel.update_in(cx, |panel, window, cx| {
         panel.collapse_all_entries(&CollapseAllEntries, window, cx);
         window.focus(&panel.focus_handle, cx);
@@ -7520,6 +7525,17 @@ async fn test_navigation_select_opened_file_button_with_panel_focused(
             "              main.go  <== selected  <== marked",
         ]
     );
+    cx.update(|_, cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings
+                    .project_panel
+                    .get_or_insert_default()
+                    .auto_reveal_entries = Some(true);
+            });
+        });
+        assert!(ProjectPanelSettings::get_global(cx).auto_reveal_entries);
+    });
 }
 
 #[gpui::test]

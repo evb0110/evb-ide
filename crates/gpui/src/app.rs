@@ -738,40 +738,38 @@ impl SystemWindowTabController {
             return;
         };
         let tab_ids: Vec<_> = tabs.iter().map(|tab| tab.id).collect();
-        let known_tab_ids: Option<Vec<_>> = controller
-            .tabs(first_tab.id)
-            .map(|known_tabs| known_tabs.iter().map(|tab| tab.id).collect());
-        if known_tab_ids.as_ref() == Some(&tab_ids) {
+        // In-app dragging changes our order, not AppKit's. Activation syncs membership;
+        // importing the platform's order again would undo the user's drag.
+        if controller.tabs(first_tab.id).is_some_and(|known_tabs| {
+            known_tabs.len() == tabs.len() && known_tabs.iter().all(|tab| tab_ids.contains(&tab.id))
+        }) {
             return;
         }
 
-        let mut known_tabs = Vec::new();
+        let mut synced_tabs: Vec<SystemWindowTab> = Vec::with_capacity(tabs.len());
+        for tab in &tabs {
+            if synced_tabs.iter().any(|synced_tab| synced_tab.id == tab.id) {
+                continue;
+            }
+            if let Some(known_tabs) = controller.tabs(tab.id) {
+                synced_tabs.extend(known_tabs.iter().filter_map(|known_tab| {
+                    tabs.iter()
+                        .find(|tab| tab.id == known_tab.id)
+                        .map(|tab| SystemWindowTab {
+                            last_active_at: known_tab.last_active_at,
+                            ..tab.clone()
+                        })
+                }));
+            } else {
+                synced_tabs.push(tab.clone());
+            }
+        }
         controller.tab_groups.retain(|_, group| {
-            group.retain(|tab| {
-                let is_synced = tab_ids.contains(&tab.id);
-                if is_synced {
-                    known_tabs.push(tab.clone());
-                }
-                !is_synced
-            });
+            group.retain(|tab| !tab_ids.contains(&tab.id));
             !group.is_empty()
         });
-        // Keep the activation times the controller already tracks.
-        let tabs = tabs
-            .into_iter()
-            .map(|tab| {
-                known_tabs
-                    .iter()
-                    .find(|known_tab| known_tab.id == tab.id)
-                    .map(|known_tab| SystemWindowTab {
-                        last_active_at: known_tab.last_active_at,
-                        ..tab.clone()
-                    })
-                    .unwrap_or(tab)
-            })
-            .collect();
         let new_group_id = controller.next_tab_group_id();
-        controller.tab_groups.insert(new_group_id, tabs);
+        controller.tab_groups.insert(new_group_id, synced_tabs);
     }
 
     fn next_tab_group_id(&self) -> usize {
@@ -3816,6 +3814,67 @@ mod test {
         // Syncing a group the controller already knows changes nothing.
         cx.update(|cx| SystemWindowTabController::sync_tabs(cx, vec![tab(first), tab(second)]));
         assert_eq!(tab_ids(first, cx), grouped);
+
+        cx.update(|cx| SystemWindowTabController::update_tab_position(cx, second.window_id(), 0));
+        let reordered = Some(vec![second.window_id(), first.window_id()]);
+        assert_eq!(tab_ids(first, cx), reordered);
+        let groups_before_activation = cx.read(|cx| {
+            cx.global::<SystemWindowTabController>()
+                .tab_groups()
+                .clone()
+        });
+        // Dragging reorders the in-app bar only. Activating another project still reports
+        // AppKit's original order, which must not undo the user's drag.
+        for _ in 0..3 {
+            cx.update(|cx| SystemWindowTabController::sync_tabs(cx, vec![tab(first), tab(second)]));
+            assert_eq!(tab_ids(first, cx), reordered);
+            assert_eq!(tab_ids(second, cx), reordered);
+        }
+        assert!(cx.read(|cx| {
+            cx.global::<SystemWindowTabController>().tab_groups() == &groups_before_activation
+        }));
+
+        // Opening and closing another project must retain the existing relative order.
+        cx.update(|cx| {
+            SystemWindowTabController::add_tab(
+                cx,
+                fourth.window_id(),
+                vec![tab(first), tab(second), tab(fourth)],
+            );
+            SystemWindowTabController::sync_tabs(cx, vec![tab(first), tab(second), tab(fourth)]);
+        });
+        assert_eq!(
+            tab_ids(fourth, cx),
+            Some(vec![
+                second.window_id(),
+                first.window_id(),
+                fourth.window_id()
+            ])
+        );
+        cx.update(|cx| {
+            assert!(SystemWindowTabController::remove_tab(cx, fourth.window_id()).is_some());
+            SystemWindowTabController::sync_tabs(cx, vec![tab(first), tab(second)]);
+        });
+        assert_eq!(tab_ids(first, cx), reordered);
+
+        // AppKit can group a background window after creation, without add_tab running again.
+        cx.update(|cx| {
+            SystemWindowTabController::sync_tabs(cx, vec![tab(fourth), tab(first), tab(second)]);
+        });
+        assert_eq!(
+            tab_ids(fourth, cx),
+            Some(vec![
+                fourth.window_id(),
+                second.window_id(),
+                first.window_id()
+            ])
+        );
+        cx.update(|cx| SystemWindowTabController::sync_tabs(cx, vec![tab(first), tab(second)]));
+        assert_eq!(tab_ids(first, cx), reordered);
+        assert_eq!(tab_ids(fourth, cx), Some(vec![fourth.window_id()]));
+        cx.update(|cx| {
+            assert!(SystemWindowTabController::remove_tab(cx, fourth.window_id()).is_some());
+        });
 
         // A new group must not replace an existing one.
         cx.update(|cx| {

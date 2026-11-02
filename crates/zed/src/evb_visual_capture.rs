@@ -372,6 +372,16 @@ mod capture {
             .log_err();
         open_file(&workspace, any_window, "server/api/trip.get.ts", &mut cx)?;
         settle(&mut cx, 20);
+        if std::env::var_os("EVB_PROJECT_TABS_CAPTURE").is_some() {
+            return capture_project_tabs(
+                &workspace,
+                any_window,
+                &project_path,
+                &app_state,
+                &mut cx,
+                &output_dir,
+            );
+        }
         if std::env::var_os("EVB_NAVIGATION_CAPTURE").is_some() {
             return capture_navigation(&workspace, any_window, &mut cx, &output_dir);
         }
@@ -678,6 +688,132 @@ mod capture {
             };
             Ok(respond(json!({ "data": data }))?)
         })
+    }
+
+    fn capture_project_tabs(
+        workspace: &Entity<Workspace>,
+        window: AnyWindowHandle,
+        project_path: &Path,
+        app_state: &Arc<AppState>,
+        cx: &mut VisualTestAppContext,
+        output: &Path,
+    ) -> Result<()> {
+        let panel = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.panel::<project_panel::ProjectPanel>(cx)
+            })
+            .context("fixture project panel")?;
+        let selected_path = |cx: &mut VisualTestAppContext| {
+            panel.read_with(cx, |panel, cx| panel.selected_entry_project_path(cx))
+        };
+        anyhow::ensure!(
+            selected_path(cx)
+                .is_none_or(|path| path.path.as_unix_str() != "server/api/trip.get.ts"),
+            "opening a file must not reveal it automatically"
+        );
+        for (theme, name) in [("IntelliJ Light", "light"), ("IntelliJ Dark", "dark")] {
+            set_theme(cx, theme);
+            cx.simulate_mouse_move(window, point(px(700.), px(400.)), None, Default::default());
+            save(cx, window, output, &format!("{name}-manual-reveal"))?;
+        }
+        cx.simulate_click(window, point(px(223.), px(48.)), Default::default());
+        anyhow::ensure!(
+            selected_path(cx)
+                .is_some_and(|path| path.path.as_unix_str() == "server/api/trip.get.ts"),
+            "crosshair must reveal the active file"
+        );
+        let selection = selected_path(cx);
+        open_file(workspace, window, "app/components/AppBar.vue", cx)?;
+        settle(cx, 5);
+        anyhow::ensure!(
+            selected_path(cx) == selection,
+            "opening another file must retain the tree selection"
+        );
+
+        let second_path = project_path.with_file_name("trailmap-admin");
+        std::fs::create_dir_all(&second_path)?;
+        std::fs::write(second_path.join("README.md"), "# Trailmap Admin\n")?;
+        let project = create_project(&second_path, app_state, cx)?;
+        let second: AnyWindowHandle = open_window(project, app_state, cx)?.into();
+        // Hidden windows are not grouped by AppKit. Replay its tab list at the same
+        // controller boundary used by activation, without bringing either window forward.
+        let platform_tabs = cx.update(|cx| -> Result<Vec<SystemWindowTab>> {
+            [window, second]
+                .into_iter()
+                .map(|handle| {
+                    handle.update(cx, |_, window, _| {
+                        SystemWindowTab::new(window.window_title().into(), handle)
+                    })
+                })
+                .collect()
+        })?;
+        cx.update(|cx| {
+            SystemWindowTabController::sync_tabs(cx, platform_tabs.clone());
+            SystemWindowTabController::set_visible(cx, true);
+        });
+        settle(cx, 5);
+        save(cx, window, output, "tabs-before-drag")?;
+        cx.simulate_mouse_down(
+            window,
+            point(px(1050.), px(46.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(
+            window,
+            point(px(1000.), px(46.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(
+            window,
+            point(px(350.), px(46.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            window,
+            point(px(350.), px(46.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        let expected = vec![second.window_id(), window.window_id()];
+        let tab_ids = |cx: &mut VisualTestAppContext| {
+            cx.read(|cx| {
+                cx.global::<SystemWindowTabController>()
+                    .tabs(window.window_id())
+                    .map(|tabs| tabs.iter().map(|tab| tab.id).collect::<Vec<_>>())
+            })
+        };
+        anyhow::ensure!(
+            tab_ids(cx).as_ref() == Some(&expected),
+            "drag must reorder the actual project tabs"
+        );
+        save(cx, window, output, "tabs-after-drag")?;
+        for _ in 0..3 {
+            cx.update(|cx| SystemWindowTabController::sync_tabs(cx, platform_tabs.clone()));
+            anyhow::ensure!(
+                tab_ids(cx).as_ref() == Some(&expected),
+                "activation sync must preserve the dragged order"
+            );
+        }
+        for (theme, name) in [
+            ("IntelliJ Light", "light"),
+            ("IntelliJ Dark", "dark"),
+            ("One Light", "one-light"),
+        ] {
+            set_theme(cx, theme);
+            cx.simulate_mouse_move(window, point(px(700.), px(400.)), None, Default::default());
+            save(cx, window, output, &format!("{name}-tabs-after-sync"))?;
+            save(
+                cx,
+                second,
+                output,
+                &format!("{name}-other-project-after-sync"),
+            )?;
+        }
+        println!("Project tab drag, activation sync and manual tree reveal verified");
+        Ok(())
     }
 
     /// A step of the landing page film: an app state, how long it shows, and the pointer.
