@@ -7751,6 +7751,7 @@ impl Render for ProjectPanel {
                             IconButton::new("select-opened-file", IconName::Crosshair)
                                 .aria_label("Select Opened File")
                                 .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
                                 .tooltip(Tooltip::text("Select Opened File"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.reveal_active_file(window, cx);

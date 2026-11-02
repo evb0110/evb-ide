@@ -345,7 +345,11 @@ impl SystemWindowTabs {
         div()
             .flex_1()
             .min_w(rem_size * 10)
-            .when(is_active, |this| this.bg(active_background_color))
+            .bg(if is_active {
+                active_background_color
+            } else {
+                inactive_background_color
+            })
             .border_t_1()
             .border_color(if is_active {
                 active_background_color
@@ -386,8 +390,8 @@ impl SystemWindowTabs {
 impl Render for SystemWindowTabs {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let use_system_window_tabs = WorkspaceSettings::get_global(cx).use_system_window_tabs;
-        let active_background_color = cx.theme().colors().title_bar_background;
-        let inactive_background_color = cx.theme().colors().tab_bar_background;
+        let active_background_color = cx.theme().colors().tab_active_background;
+        let inactive_background_color = cx.theme().colors().tab_inactive_background;
         let entity = cx.entity();
 
         let controller = cx.global::<SystemWindowTabController>();
@@ -427,7 +431,7 @@ impl Render for SystemWindowTabs {
         h_flex()
             .w_full()
             .h(Tab::container_height(cx))
-            .bg(inactive_background_color)
+            .bg(cx.theme().colors().tab_bar_background)
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
@@ -448,7 +452,7 @@ impl Render for SystemWindowTabs {
                     .id("window tabs")
                     .w_full()
                     .h(Tab::container_height(cx))
-                    .bg(inactive_background_color)
+                    .bg(cx.theme().colors().tab_bar_background)
                     .overflow_x_scroll()
                     .track_scroll(&self.tab_bar_scroll_handle)
                     .children(tab_items)
