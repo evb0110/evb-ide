@@ -44,7 +44,10 @@ pub struct SystemWindowTabs {
 }
 
 impl SystemWindowTabs {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<SystemWindowTabController>(|_, cx| cx.notify())
+            .detach();
+
         Self {
             tab_bar_scroll_handle: ScrollHandle::new(),
             measured_tab_width: px(0.),

@@ -753,6 +753,8 @@ mod capture {
         });
         settle(cx, 5);
         save(cx, window, output, "tabs-before-drag")?;
+        save(cx, second, output, "other-tabs-before-drag")?;
+        let before_drag = cx.capture_screenshot(second)?;
         cx.simulate_mouse_down(
             window,
             point(px(1050.), px(46.)),
@@ -788,6 +790,33 @@ mod capture {
         anyhow::ensure!(
             tab_ids(cx).as_ref() == Some(&expected),
             "drag must reorder the actual project tabs"
+        );
+        // Activation can present the destination's previous scene before its activation
+        // callback runs. Do not refresh it before checking the post-drop tab strip.
+        let before_refresh = cx.capture_screenshot(second)?;
+        before_refresh.save(output.join("other-tabs-after-drop.png"))?;
+        cx.update_window(second, |_, window, _| window.refresh())?;
+        cx.run_until_parked();
+        let after_refresh = cx.capture_screenshot(second)?;
+        after_refresh.save(output.join("other-tabs-after-refresh.png"))?;
+        let scale_factor = cx.update_window(second, |_, window, _| window.scale_factor())?;
+        let strip = |image: &image::RgbaImage| {
+            image::imageops::crop_imm(
+                image,
+                0,
+                (32. * scale_factor) as u32,
+                image.width(),
+                (32. * scale_factor) as u32,
+            )
+            .to_image()
+        };
+        anyhow::ensure!(
+            strip(&before_refresh) == strip(&after_refresh),
+            "destination tab strip still shows the pre-drag order until refreshed"
+        );
+        anyhow::ensure!(
+            strip(&before_refresh) != strip(&before_drag),
+            "destination tab strip must change to the dragged order"
         );
         save(cx, window, output, "tabs-after-drag")?;
         for _ in 0..3 {
