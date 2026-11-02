@@ -291,11 +291,7 @@ impl Editor {
             _ => true,
         });
         let definitions = (refresh && self.lsp_data_enabled() && point.as_valid().is_some())
-            .then(|| {
-                self.semantics_provider
-                    .as_ref()?
-                    .definitions(&buffer, anchor, kind, cx)
-            })
+            .then(|| self.definitions(&buffer, anchor, kind, cx))
             .flatten();
         if let Some(definitions) = definitions {
             let workspace = self.workspace().map(|workspace| workspace.downgrade());
@@ -536,7 +532,6 @@ pub fn show_link_definition(
         editor.hide_hovered_link(cx)
     }
     let project = editor.project.clone();
-    let provider = editor.semantics_provider.clone();
 
     // Record the requested position so a mouse move on the same point short-circuits
     // instead of re-querying, even when the server returns no `originSelectionRange`
@@ -611,9 +606,9 @@ pub fn show_link_definition(
                     // Always also collect LSP definitions so that cmd-click
                     // reveals every applicable target (e.g. a position that
                     // carries both a document link and a definition).
-                    if let Some(provider) = provider {
-                        let task = cx.update(|_, cx| {
-                            provider.definitions(&buffer, anchor, preferred_kind, cx)
+                    {
+                        let task = this.update(cx, |editor, cx| {
+                            editor.definitions(&buffer, anchor, preferred_kind, cx)
                         })?;
                         if let Some(task) = task
                             && let Some(definition_result) = task.await.ok().flatten()
@@ -1264,6 +1259,108 @@ mod tests {
             HoverLink::Url(url) => assert_eq!(url, target),
             other => panic!("expected Url variant, got {other:?}"),
         }
+    }
+
+    #[gpui::test]
+    async fn test_navigation_breadcrumb_path_reveals_directory(cx: &mut gpui::TestAppContext) {
+        init_test(cx, |_| {});
+        let mut cx = EditorLspTestContext::new_rust(Default::default(), cx).await;
+        let project = cx
+            .workspace
+            .read_with(&**cx, |workspace, _| workspace.project().clone());
+        let revealed = Arc::new(Mutex::new(None));
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&project, {
+                let revealed = revealed.clone();
+                move |_, event, _| {
+                    if let project::Event::RevealInProjectPanel(entry_id) = event {
+                        *revealed.lock() = Some(*entry_id);
+                    }
+                }
+            })
+        });
+        cx.workspace
+            .clone()
+            .update_in(&mut **cx, |workspace, window, cx| {
+                workspace.active_pane().update(cx, |pane, cx| {
+                    pane.toolbar().update(cx, |toolbar, cx| {
+                        let breadcrumbs = cx.new(|_| breadcrumbs::Breadcrumbs::new());
+                        toolbar.add_item(breadcrumbs, window, cx);
+                    });
+                });
+            });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let directory = cx
+            .debug_bounds("PATH-1")
+            .expect("directory breadcrumb must be visible");
+        cx.simulate_click(directory.center(), Modifiers::none());
+        cx.run_until_parked();
+        let entry_id = revealed
+            .lock()
+            .expect("directory breadcrumb must reveal an entry");
+        project.read_with(&**cx, |project, cx| {
+            let worktree = project.worktree_for_entry(entry_id, cx).expect("worktree");
+            assert_eq!(
+                worktree
+                    .read(cx)
+                    .entry_for_id(entry_id)
+                    .expect("directory entry")
+                    .path
+                    .as_unix_str(),
+                "dir"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_navigation_go_location_response_modifier_click(cx: &mut gpui::TestAppContext) {
+        init_test(cx, |_| {});
+        let language = language::Language::new(
+            language::LanguageConfig {
+                name: "Go".into(),
+                matcher: language::LanguageMatcher {
+                    path_suffixes: vec!["go".into()],
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            },
+            None,
+        );
+        let mut cx = EditorLspTestContext::new(
+            language,
+            lsp::ServerCapabilities {
+                definition_provider: Some(lsp::OneOf::Left(true)),
+                ..Default::default()
+            },
+            cx,
+        )
+        .await;
+        cx.set_state("package main\nfunc main() { ˇwork() }\nfunc work() {}\n");
+        let target_range = cx.lsp_range("package main\nfunc main() { work() }\nfunc «work»() {}\n");
+        let _requests =
+            cx.set_request_handler::<GotoDefinition, _, _>(move |url, _, _| async move {
+                Ok(Some(lsp::GotoDefinitionResponse::Array(vec![
+                    lsp::Location {
+                        uri: url,
+                        range: target_range,
+                    },
+                ])))
+            });
+        cx.run_until_parked();
+        let position = cx.pixel_position("package main\nfunc main() { woˇrk() }\nfunc work() {}\n");
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        let modifiers = cx.read(Modifiers::secondary_key);
+        cx.simulate_modifiers_change(modifiers);
+        cx.run_until_parked();
+        cx.assert_editor_text_highlights(
+            HighlightKey::HoveredLinkState,
+            "package main\nfunc main() { «work»() }\nfunc work() {}\n",
+        );
+        cx.simulate_click(position, modifiers);
+        cx.run_until_parked();
+        cx.assert_editor_state("package main\nfunc main() { work() }\nfunc «workˇ»() {}\n");
     }
 
     #[gpui::test]

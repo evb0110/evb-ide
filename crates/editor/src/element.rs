@@ -7139,7 +7139,104 @@ pub fn render_breadcrumb_text(
 ) -> gpui::AnyElement {
     const MAX_SEGMENTS: usize = 12;
 
-    let element = h_flex().flex_grow_1().text_ui(cx);
+    let mut element = h_flex().flex_grow_1().text_ui(cx);
+    let mut has_path_breadcrumbs = false;
+    if !multibuffer_header
+        && let Some(editor) = active_item.downcast::<Editor>()
+        && let Some(project_path) = active_item.project_path(cx)
+        && let Some(project) = editor.read(cx).project.clone()
+        && editor.read(cx).breadcrumb_header.is_none()
+        && project.read(cx).entry_for_path(&project_path, cx).is_some()
+        && let Some(worktree) = project
+            .read(cx)
+            .worktree_for_id(project_path.worktree_id, cx)
+        && editor
+            .read(cx)
+            .buffer
+            .read(cx)
+            .as_singleton()
+            .is_some_and(|buffer| {
+                buffer.read(cx).file().is_some_and(|file| {
+                    !matches!(file.disk_state(), language::DiskState::Historic { .. })
+                })
+            })
+    {
+        has_path_breadcrumbs = true;
+        let worktree = worktree.read(cx);
+        let mut paths = project_path.path.ancestors().collect::<Vec<_>>();
+        paths.reverse();
+        if !segments.is_empty() {
+            segments.remove(0);
+        }
+        for (index, path) in paths.into_iter().enumerate() {
+            let Some(entry) = worktree.entry_for_path(path) else {
+                continue;
+            };
+            let label = path
+                .file_name()
+                .unwrap_or_else(|| worktree.root_name().as_unix_str())
+                .to_string();
+            let entry_id = entry.id;
+            let project = project.clone();
+            let editor = editor.downgrade();
+            let mut text_style = window.text_style();
+            if let Some(font) = &breadcrumb_font {
+                text_style.font_family = font.family.clone();
+                text_style.font_features = font.features.clone();
+                text_style.font_style = font.style;
+                text_style.font_weight = font.weight;
+            }
+            text_style.color = Color::Muted.color(cx);
+            let segment = HighlightedText {
+                text: label.into(),
+                highlights: vec![],
+            };
+            let styled_label = if path == project_path.path.as_ref()
+                && !workspace::TabBarSettings::get_global(cx).show
+                && active_item.is_dirty(cx)
+            {
+                apply_dirty_filename_style(&segment, &text_style, cx)
+            } else {
+                None
+            }
+            .unwrap_or_else(|| {
+                StyledText::new(segment.text)
+                    .with_default_highlights(&text_style, [])
+                    .into_any()
+            });
+            if index > 0 {
+                element = element.child(Label::new("›").color(Color::Placeholder));
+            }
+            element = element.child(
+                div().debug_selector(move || format!("PATH-{index}")).child(
+                    ButtonLike::new(("path-breadcrumb", index))
+                        .child(styled_label)
+                        .tooltip(Tooltip::text(
+                            "Reveal in Project Panel. Right-click to copy file path",
+                        ))
+                        .on_click(move |_, _, cx| {
+                            project.update(cx, |_, cx| {
+                                cx.emit(project::Event::RevealInProjectPanel(entry_id))
+                            });
+                        })
+                        .on_right_click(move |_, _, cx| {
+                            if let Some(path) = editor
+                                .upgrade()
+                                .and_then(|editor| {
+                                    editor.update(cx, |editor, cx| editor.target_file_abs_path(cx))
+                                })
+                                .and_then(|path| path.to_str().map(str::to_string))
+                            {
+                                cx.write_to_clipboard(ClipboardItem::new_string(path));
+                            }
+                        }),
+                ),
+            );
+        }
+        if !segments.is_empty() {
+            element = element.child(Label::new("›").color(Color::Placeholder));
+        }
+    }
 
     let prefix_end_ix = cmp::min(segments.len(), MAX_SEGMENTS / 2);
     let suffix_start_ix = cmp::max(
@@ -7168,6 +7265,7 @@ pub fn render_breadcrumb_text(
         text_style.color = Color::Muted.color(cx);
 
         if index == 0
+            && !has_path_breadcrumbs
             && !workspace::TabBarSettings::get_global(cx).show
             && active_item.is_dirty(cx)
             && let Some(styled_element) = apply_dirty_filename_style(&segment, &text_style, cx)

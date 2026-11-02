@@ -350,6 +350,17 @@ mod capture {
             })
             .context("reading the workspace")?;
 
+        workspace.update_in_window(any_window, &mut cx, |workspace, window, cx| {
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.toolbar().update(cx, |toolbar, cx| {
+                    let breadcrumbs = cx.new(|_| breadcrumbs::Breadcrumbs::new());
+                    toolbar.add_item(breadcrumbs, window, cx);
+                    let commit_toolbar = cx.new(|_| git_ui::commit_view::CommitViewToolbar::new());
+                    toolbar.add_item(commit_toolbar, window, cx);
+                });
+            });
+        })?;
+
         load_panels(&workspace, any_window, &mut cx)?;
         workspace
             .update_in_window(any_window, &mut cx, |workspace, window, cx| {
@@ -361,6 +372,9 @@ mod capture {
             .log_err();
         open_file(&workspace, any_window, "server/api/trip.get.ts", &mut cx)?;
         settle(&mut cx, 20);
+        if std::env::var_os("EVB_NAVIGATION_CAPTURE").is_some() {
+            return capture_navigation(&workspace, any_window, &mut cx, &output_dir);
+        }
         if let Ok(film_dir) = std::env::var("EVB_FILM_DIR") {
             return film(&workspace, any_window, &mut cx, Path::new(&film_dir));
         }
@@ -678,6 +692,107 @@ mod capture {
         focus: Option<[f32; 4]>,
         /// Keys shown as pressed during the step.
         keys: Option<&'static str>,
+    }
+
+    fn capture_navigation(
+        workspace: &Entity<Workspace>,
+        window: AnyWindowHandle,
+        cx: &mut VisualTestAppContext,
+        output: &Path,
+    ) -> Result<()> {
+        save(cx, window, output, "navigation-path")?;
+        let panel = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.panel::<project_panel::ProjectPanel>(cx)
+            })
+            .context("fixture project panel")?;
+        cx.simulate_click(window, point(px(322.), px(78.)), Default::default());
+        settle(cx, 5);
+        anyhow::ensure!(
+            panel.read_with(cx, |panel, cx| panel
+                .selected_entry_project_path(cx)
+                .is_some_and(|path| path.path.as_unix_str() == "server")),
+            "breadcrumb must select its directory"
+        );
+        save(cx, window, output, "navigation-breadcrumb-reveal")?;
+        cx.simulate_click(window, point(px(223.), px(48.)), Default::default());
+        settle(cx, 5);
+        anyhow::ensure!(
+            panel.read_with(cx, |panel, cx| panel
+                .selected_entry_project_path(cx)
+                .is_some_and(|path| path.path.as_unix_str() == "server/api/trip.get.ts")),
+            "crosshair must select the active file"
+        );
+        save(cx, window, output, "navigation-select-opened-file")?;
+        let repository = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.project().read(cx).active_repository(cx)
+            })
+            .context("fixture repository")?;
+        let repository_path = repository.read_with(cx, |repository, _| {
+            repository.work_directory_abs_path.clone()
+        });
+        let root_commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository_path.as_ref())
+            .args(["rev-list", "--max-parents=0", "HEAD"])
+            .output()?;
+        anyhow::ensure!(root_commit.status.success(), "reading fixture root commit");
+        let root_commit = String::from_utf8(root_commit.stdout)?.trim().to_string();
+        let path = git::repository::RepoPath::new("README.md")?;
+        workspace.update_in_window(window, cx, |_, window, cx| {
+            git_ui::commit_view::CommitView::open(
+                root_commit,
+                repository.downgrade(),
+                workspace.downgrade(),
+                None,
+                Some(path),
+                window,
+                cx,
+            );
+        })?;
+        wait_real_time(cx, Duration::from_secs(2));
+        save(cx, window, output, "navigation-commit")?;
+        cx.simulate_click(window, point(px(1380.), px(190.)), Default::default());
+        wait_real_time(cx, Duration::from_secs(1));
+        let historical_editor = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item(cx)?.downcast::<editor::Editor>()
+            })
+            .context("Open File must open a standalone historical editor")?;
+        let historical_text = historical_editor.read_with(cx, |editor, cx| {
+            anyhow::ensure!(editor.read_only(cx), "snapshot must remain read-only");
+            Ok(editor.buffer().read(cx).snapshot(cx).text())
+        })?;
+        save(cx, window, output, "navigation-historical-file")?;
+        cx.simulate_click(window, point(px(1380.), px(78.)), Default::default());
+        wait_real_time(cx, Duration::from_secs(1));
+        workspace.read_with(cx, |workspace, cx| -> Result<()> {
+            let editor = workspace
+                .active_item_as::<editor::Editor>(cx)
+                .context("working-copy editor")?;
+            anyhow::ensure!(editor != historical_editor, "must leave the historical tab");
+            let editor = editor.read(cx);
+            anyhow::ensure!(!editor.read_only(cx), "working copy must be editable");
+            anyhow::ensure!(
+                editor.buffer().read(cx).snapshot(cx).text()
+                    == std::fs::read_to_string(repository_path.join("README.md"))?,
+                "working copy must retain its current contents"
+            );
+            anyhow::ensure!(
+                historical_editor
+                    .read(cx)
+                    .buffer()
+                    .read(cx)
+                    .snapshot(cx)
+                    .text()
+                    == historical_text,
+                "historical contents must remain unchanged"
+            );
+            Ok(())
+        })?;
+        save(cx, window, output, "navigation-working-copy")?;
+        Ok(())
     }
 
     /// Points in the fixed 1440x900 window.
