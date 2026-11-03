@@ -33,8 +33,10 @@ tools using `gclient`, applies the included patches, and produces
 before building EVB IDE to use your local native build.
 
 The unmodified native distribution's combined WebRTC and third-party license
-notices are retained in `assets/WEBRTC-LICENSE.md`, the generated in-app
-dependency notices, and the app's `Contents/Resources/licenses` directory.
+notices are retained in `assets/WEBRTC-LICENSE.md` and in every release's
+licenses directory (`Contents/Resources/licenses` on macOS, `licenses` in the
+Linux and Windows archives). The generated in-app dependency notices include
+them on macOS and Linux.
 
 ## Other native dependencies
 

@@ -260,7 +260,7 @@ const questions: IQuestion[] = [
   },
   {
     title: "How does it update?",
-    text: "Download each new release from this page or GitHub and replace the app. It does not update itself.",
+    text: "It checks GitHub for new releases, downloads them in the background and installs them when you restart. Set auto_update to false in the settings to update by hand instead.",
   },
 ];
 

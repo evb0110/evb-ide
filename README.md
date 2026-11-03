@@ -25,20 +25,23 @@ endorsed by Zed Industries or JetBrains.
 - Vue, TypeScript, PHP, and Blade defaults, including fixes to language-server
   completion and rename behavior.
 - Separate application identity and settings, so EVB IDE can run alongside Zed.
-- AI features, telemetry, sign-in UI, and automatic updates disabled by default.
+- AI features, telemetry, and the sign-in button off by default; updates come
+  from this repository's GitHub releases.
 
 See [EVB.md](EVB.md) for the detailed differences and development checks.
 
 ## Install
 
-Download a build for your Mac from [Releases](https://github.com/evb0110/evb-ide/releases).
-Open the disk image and drag **EVB IDE** into **Applications**. Each release
-lists its supported architecture and macOS requirements. Only published,
-verified platforms are offered on the website.
+Download a build for macOS (Apple Silicon), Linux (x64) or Windows (x64) from
+[Releases](https://github.com/evb0110/evb-ide/releases). On macOS, open the disk
+image and drag **EVB IDE** into **Applications**; on Linux, extract the archive
+and run `install.sh`; on Windows, extract the archive and run `evb-ide.exe`.
+Each release lists its requirements.
 
-Updates are manual: download the next release and replace the application.
-Your EVB IDE settings and projects are preserved. The fork never replaces an
-installed Zed with an upstream update.
+EVB IDE updates itself from this repository's releases: it checks at startup
+and hourly, downloads a newer version in the background and installs it when
+you restart. Set `"auto_update": false` to update by hand. Your EVB IDE
+settings and projects are preserved, and an installed Zed is never touched.
 
 To build from source, follow [EVB.md](EVB.md). The source tag and source archive
 for each downloadable release are linked on its release page, together with
@@ -64,7 +67,9 @@ modify, and redistribute this fork under those terms, including commercially.
 
 Read [LICENSE-GPL](LICENSE-GPL), [LICENSE-APACHE](LICENSE-APACHE), and
 [NOTICE.md](NOTICE.md). The application's **Help → View Dependency Licenses**
-includes bundled dependency and asset notices. The IntelliJ-derived themes
+includes bundled dependency and asset notices on macOS and Linux; on Windows it
+lists the Rust dependencies, and the archive's `licenses` folder has the
+native and asset notices. The IntelliJ-derived themes
 and icons are Apache-2.0; bundled fonts have their own licenses.
 
 Zed is developed by Zed Industries and its contributors. EVB IDE modifications

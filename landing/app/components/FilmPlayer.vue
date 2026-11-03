@@ -110,6 +110,10 @@ const posterStyle = computed(() => {
   };
 });
 
+// The visitor's Pause holds until they press Play: scrolling back or switching the theme
+// must not start the film again.
+const pausedByVisitor = ref(false);
+
 function play() {
   showPoster.value = false;
   void video.value?.play().catch(() => {});
@@ -124,15 +128,17 @@ function onMetadata() {
   duration.value = element.duration;
   element.currentTime = (still.value ? info.still : film.intro) / film.fps;
   time.value = element.currentTime;
-  if (visible.value && !still.value) {
+  if (visible.value && !still.value && !pausedByVisitor.value) {
     play();
   }
 }
 
 function toggle() {
   if (video.value?.paused) {
+    pausedByVisitor.value = false;
     play();
   } else {
+    pausedByVisitor.value = true;
     video.value?.pause();
   }
 }
@@ -202,7 +208,9 @@ useIntersectionObserver(video, ([entry]) => {
     return;
   }
   if (visible.value) {
-    play();
+    if (!pausedByVisitor.value) {
+      play();
+    }
   } else {
     element.pause();
   }
