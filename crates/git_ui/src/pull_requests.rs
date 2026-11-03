@@ -441,6 +441,8 @@ pub struct PullRequestIndicator {
     key: Option<StatusKey>,
     pull_request: Option<PullRequest>,
     error: Option<GitHubError>,
+    /// Why the review threads could not be read, while the pull request itself could.
+    review_error: Option<GitHubError>,
     failures: u32,
     enabled: bool,
     task: Option<Task<()>>,
@@ -471,6 +473,7 @@ impl PullRequestIndicator {
             key: None,
             pull_request: None,
             error: None,
+            review_error: None,
             failures: 0,
             enabled: StatusBarSettings::get_global(cx).pull_request_button,
             task: None,
@@ -514,6 +517,15 @@ impl PullRequestIndicator {
             if let Some(old) = &self.key {
                 set_branch_review(old.work_directory.clone(), None, cx);
             }
+            // A review cached for this directory by an earlier window may be another branch's.
+            if let Some(new) = &key
+                && branch_review(&new.work_directory, cx).is_some_and(|review| {
+                    new.branch.as_ref().map(|branch| branch.name()) != Some(review.branch.as_str())
+                })
+            {
+                set_branch_review(new.work_directory.clone(), None, cx);
+            }
+            self.review_error = None;
         }
         self.key = key.clone();
         cx.notify();
@@ -589,22 +601,40 @@ impl PullRequestIndicator {
                 self.pull_request = result.pull_request.clone();
                 let delay = success_delay(&result);
                 match (review, &result.pull_request) {
-                    (Some(Ok(review)), Some(pull_request)) => set_branch_review(
-                        key.work_directory.clone(),
-                        Some(BranchReview {
-                            work_directory: key.work_directory.clone(),
-                            branch: branch.local_branch.clone(),
-                            repository: branch.head.target.clone(),
-                            url: pull_request.url.clone(),
-                            review,
-                        }),
-                        cx,
-                    ),
-                    // Threads that failed to load keep showing as they were.
-                    (Some(Err(error)), _) => {
-                        log::warn!("could not read the pull request's review threads: {error}")
+                    (Some(Ok(review)), Some(pull_request)) => {
+                        self.review_error = None;
+                        set_branch_review(
+                            key.work_directory.clone(),
+                            Some(BranchReview {
+                                work_directory: key.work_directory.clone(),
+                                branch: branch.local_branch.clone(),
+                                repository: branch.head.target.clone(),
+                                url: pull_request.url.clone(),
+                                review,
+                            }),
+                            cx,
+                        )
                     }
-                    (None, _) => set_branch_review(key.work_directory.clone(), None, cx),
+                    // Threads that failed to load keep showing as they were, but only while
+                    // they belong to this pull request; the menu says they may be out of date.
+                    (Some(Err(error)), pull_request) => {
+                        log::warn!("could not read the pull request's review threads: {error}");
+                        let belongs =
+                            branch_review(&key.work_directory, cx).is_some_and(|review| {
+                                pull_request.as_ref().is_some_and(|pull_request| {
+                                    review.review.number == pull_request.number
+                                        && review.repository == branch.head.target
+                                })
+                            });
+                        if !belongs {
+                            set_branch_review(key.work_directory.clone(), None, cx);
+                        }
+                        self.review_error = Some(error);
+                    }
+                    (None, _) => {
+                        self.review_error = None;
+                        set_branch_review(key.work_directory.clone(), None, cx)
+                    }
                     (Some(Ok(_)), None) => {}
                 }
                 cx.default_global::<PullRequestCache>()
@@ -629,6 +659,7 @@ impl PullRequestIndicator {
     fn build_menu(
         pull_request: PullRequest,
         review: Option<(Arc<Path>, Arc<BranchReview>)>,
+        review_error: Option<String>,
         workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut App,
@@ -666,6 +697,16 @@ impl PullRequestIndicator {
                         move |_, cx| cx.open_url(&url),
                     );
                 }
+            }
+            if let Some(review_error) = review_error.clone() {
+                menu = menu.separator().item(
+                    ui::ContextMenuEntry::new(format!(
+                        "Review threads could not be loaded: {review_error}"
+                    ))
+                    .icon(IconName::Warning)
+                    .icon_color(Color::Warning)
+                    .disabled(true),
+                );
             }
             if let Some((work_directory, review)) = review.clone() {
                 let mut threads = review.review.threads.clone();
@@ -871,6 +912,7 @@ impl Render for PullRequestIndicator {
             .menu({
                 let workspace = self.workspace.clone();
                 let work_directory = self.key.as_ref().map(|key| key.work_directory.clone());
+                let review_error = self.review_error.as_ref().map(ToString::to_string);
                 move |window, cx| {
                     let review = work_directory.clone().and_then(|work_directory| {
                         branch_review(&work_directory, cx).map(|review| (work_directory, review))
@@ -878,6 +920,7 @@ impl Render for PullRequestIndicator {
                     Some(Self::build_menu(
                         pull_request.clone(),
                         review,
+                        review_error.clone(),
                         workspace.clone(),
                         window,
                         cx,
@@ -943,6 +986,12 @@ pub(crate) fn create_pull_request(
             return;
         }
     }
+    // The form is filled from this commit and opens only while its branch is still checked out.
+    let head_sha = repository
+        .read(cx)
+        .head_commit
+        .as_ref()
+        .map(|commit| commit.sha.to_string());
     let push_target = pushed.map(|pushed| PushTarget {
         remote: Some(pushed.remote),
         branch: Some(pushed.remote_branch),
@@ -986,20 +1035,49 @@ pub(crate) fn create_pull_request(
         }
         let base = status.default_branch.unwrap_or_else(|| "main".into());
         let format = "--format=%s%x00%b%x1e";
+        let head = head_sha.clone().unwrap_or_else(|| "HEAD".to_string());
         // Without the base fetched, the branch's own commits are unknown; the last one is used.
         let mut commits = match &branch.target_remote {
             Some(remote) => {
-                let range = format!("refs/remotes/{remote}/{base}..HEAD");
+                let range = format!("refs/remotes/{remote}/{base}..{head}");
                 read_commits(&repository, args(["log", "--reverse", format, &range]), cx).await
             }
             None => None,
         };
         if commits.is_none() {
-            commits = read_commits(&repository, args(["log", "-1", format, "HEAD"]), cx).await;
+            commits = read_commits(&repository, args(["log", "-1", format, &head]), cx).await;
         }
         let commits = commits.unwrap_or_default();
         let (title, body) = evb_github::fill_pull_request_text(&branch.local_branch, &commits);
+        let still_checked_out = repository.read_with(cx, |repository, _| {
+            repository.branch.as_ref().map(|branch| branch.name())
+                == Some(branch.local_branch.as_str())
+                && repository
+                    .head_commit
+                    .as_ref()
+                    .map(|commit| commit.sha.to_string())
+                    == head_sha
+        });
+        if !still_checked_out {
+            show_toast(
+                &workspace,
+                format!(
+                    "{} changed while the pull request was prepared; create it again.",
+                    branch.local_branch
+                ),
+                None,
+                cx,
+            );
+            return Ok(());
+        }
         workspace.update_in(cx, |workspace, window, cx| {
+            // A second request finishing later must not close a form the user is filling in.
+            if workspace
+                .active_modal::<CreatePullRequestModal>(cx)
+                .is_some()
+            {
+                return;
+            }
             let workspace_handle = cx.weak_entity();
             workspace.toggle_modal(window, cx, |window, cx| {
                 CreatePullRequestModal::new(

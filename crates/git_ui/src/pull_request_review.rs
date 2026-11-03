@@ -13,7 +13,7 @@ use evb_github::{
 };
 use gpui::{
     Action as _, AnyElement, App, AsyncWindowContext, Context, DismissEvent, Entity, EventEmitter,
-    FocusHandle, Focusable, Global, SharedString, Subscription, WeakEntity, Window,
+    FocusHandle, Focusable, Global, SharedString, Subscription, Task, WeakEntity, Window,
 };
 use language::Point;
 use menu::{Cancel, Confirm};
@@ -631,7 +631,7 @@ fn thread_buttons(
                             let client = github_client(cx);
                             let host = review.repository.host.clone();
                             let thread_id = thread_id.clone();
-                            run_write(
+                            if let Some(write) = run_write(
                                 workspace,
                                 &review,
                                 async move {
@@ -641,7 +641,9 @@ fn thread_buttons(
                                 },
                                 window,
                                 cx,
-                            );
+                            ) {
+                                write.detach();
+                            }
                         }
                     }),
                 )
@@ -676,13 +678,15 @@ fn editor_workspace(editor: &WeakEntity<Editor>, cx: &App) -> Option<WeakEntity<
 
 /// Runs a write to GitHub for `review`, then reads the pull request again so every view shows
 /// the result. Returns `false`, writing nothing, when the review is no longer the current one.
+/// Sends `write` unless the review is stale, and resolves to whether GitHub accepted it. Errors
+/// are shown here.
 fn run_write(
     workspace: WeakEntity<Workspace>,
     review: &BranchReview,
     write: impl Future<Output = Result<(), GitHubError>> + 'static,
     window: &mut Window,
     cx: &mut App,
-) -> bool {
+) -> Option<Task<bool>> {
     if !is_current(review, cx) {
         let error = stale_review_error(review);
         window
@@ -690,20 +694,21 @@ fn run_write(
                 show_error(&workspace, error.to_string(), cx)
             })
             .detach();
-        return false;
+        return None;
     }
-    window
-        .spawn(cx, async move |cx| match write.await {
-            Ok(()) => {
-                cx.update(|window, cx| {
-                    window.dispatch_action(RefreshPullRequestStatus.boxed_clone(), cx)
-                })
-                .log_err();
-            }
-            Err(error) => show_error(&workspace, error.to_string(), cx),
-        })
-        .detach();
-    true
+    Some(window.spawn(cx, async move |cx| match write.await {
+        Ok(()) => {
+            cx.update(|window, cx| {
+                window.dispatch_action(RefreshPullRequestStatus.boxed_clone(), cx)
+            })
+            .log_err();
+            true
+        }
+        Err(error) => {
+            show_error(&workspace, error.to_string(), cx);
+            false
+        }
+    }))
 }
 
 fn show_error(workspace: &WeakEntity<Workspace>, message: String, cx: &mut AsyncWindowContext) {
@@ -833,7 +838,7 @@ fn add_comment(editor: WeakEntity<Editor>, row: Option<u32>, window: &mut Window
                             show_error(&workspace, error.to_string(), cx)
                         })
                         .detach();
-                    return false;
+                    return None;
                 }
                 let client = github_client(cx);
                 let repository = repository.clone();
@@ -880,7 +885,7 @@ pub(crate) fn submit_review(
         let workspace = workspace.clone();
         let review = review.clone();
         let head_sha = head_sha.clone();
-        let run = move |body: String, window: &mut Window, cx: &mut App| -> bool {
+        let run = move |body: String, window: &mut Window, cx: &mut App| -> Option<Task<bool>> {
             // A push after the form opened would put the verdict on commits the user never saw.
             let head_now = branch_review(&review.work_directory, cx)
                 .and_then(|current| current.review.head_sha.clone());
@@ -892,7 +897,7 @@ pub(crate) fn submit_review(
                         show_error(&workspace, error.to_string(), cx)
                     })
                     .detach();
-                return false;
+                return None;
             }
             let client = github_client(cx);
             let repository = repository.clone();
@@ -996,14 +1001,15 @@ struct ModalAction {
     label: &'static str,
     primary: bool,
     allow_empty: bool,
-    /// Returns whether it sent the text; the form stays open, keeping it, when not.
-    run: Rc<dyn Fn(String, &mut Window, &mut App) -> bool>,
+    /// Sends the text, resolving to whether GitHub accepted it. The form closes only then, so a
+    /// failed or refused write keeps the text.
+    run: Rc<dyn Fn(String, &mut Window, &mut App) -> Option<Task<bool>>>,
 }
 
 impl ModalAction {
     fn primary(
         label: &'static str,
-        run: impl Fn(String, &mut Window, &mut App) -> bool + 'static,
+        run: impl Fn(String, &mut Window, &mut App) -> Option<Task<bool>> + 'static,
     ) -> Self {
         Self {
             label,
@@ -1037,6 +1043,7 @@ fn open_text_modal(
                 subtitle: subtitle.into(),
                 editor,
                 actions,
+                sending: None,
             }
         });
     });
@@ -1047,6 +1054,7 @@ pub(crate) struct ReviewTextModal {
     subtitle: SharedString,
     editor: Entity<Editor>,
     actions: Vec<ModalAction>,
+    sending: Option<Task<()>>,
 }
 
 impl ReviewTextModal {
@@ -1068,10 +1076,25 @@ impl ReviewTextModal {
         if body.is_empty() && !action.allow_empty {
             return;
         }
-        let run = action.run.clone();
-        if run(body, window, cx) {
-            cx.emit(DismissEvent);
+        if self.sending.is_some() {
+            return;
         }
+        let run = action.run.clone();
+        let Some(write) = run(body, window, cx) else {
+            return;
+        };
+        self.sending = Some(cx.spawn(async move |this, cx| {
+            let sent = write.await;
+            this.update(cx, |this, cx| {
+                this.sending = None;
+                if sent {
+                    cx.emit(DismissEvent);
+                }
+                cx.notify();
+            })
+            .log_err();
+        }));
+        cx.notify();
     }
 }
 

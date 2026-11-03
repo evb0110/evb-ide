@@ -519,6 +519,19 @@ impl GitHubClient {
         variables: Value,
         errors_fail: bool,
     ) -> Result<T, GitHubError> {
+        self.graphql_partial(host, query, variables, errors_fail)
+            .await
+            .map(|(data, _)| data)
+    }
+
+    /// The data of a GraphQL answer, and whether GitHub reported errors for parts of it.
+    async fn graphql_partial<T: DeserializeOwned>(
+        &self,
+        host: &str,
+        query: &str,
+        variables: Value,
+        errors_fail: bool,
+    ) -> Result<(T, bool), GitHubError> {
         #[derive(Deserialize)]
         struct Envelope<T> {
             data: Option<T>,
@@ -557,6 +570,7 @@ impl GitHubClient {
                 })
             }
             (Some(data), errors) => {
+                let partial = errors_present;
                 if let Some(errors) = errors.filter(|errors| !errors.is_empty()) {
                     log::warn!(
                         "GitHub answered with partial errors: {}",
@@ -567,7 +581,7 @@ impl GitHubClient {
                             .join("; ")
                     );
                 }
-                Ok(data)
+                Ok((data, partial))
             }
             (None, errors) => {
                 let errors = errors.unwrap_or_default();
@@ -656,9 +670,12 @@ impl GitHubClient {
             let mut commit_oid: Option<String> = None;
             let mut after: Option<String> = None;
             let mut complete = false;
+            // Fields GitHub could not resolve come back null, which would read as checks that
+            // passed or never ran.
+            let mut partial = false;
             for page in 0..STATUS_CONTEXT_PAGES {
-                let status: StatusQueryData = self
-                    .graphql(
+                let (status, page_partial): (StatusQueryData, bool) = self
+                    .graphql_partial(
                         &target.host,
                         &query,
                         json!({
@@ -667,8 +684,10 @@ impl GitHubClient {
                             "number": pull.number,
                             "after": after,
                         }),
+                        false,
                     )
                     .await?;
+                partial |= page_partial;
                 let Some(status) = status
                     .repository
                     .and_then(|repository| repository.pull_request)
@@ -728,7 +747,7 @@ impl GitHubClient {
             let required_names = self.required_check_names(target, &pull.base.name).await;
             add_required_checks(&mut checks, &required_names);
             pull_request.checks = checks;
-            pull_request.checks_complete = complete;
+            pull_request.checks_complete = complete && !partial;
         }
         Ok(BranchPullRequests {
             default_branch: Some(default_branch),
@@ -2334,6 +2353,48 @@ mod tests {
                 json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "after": null }).to_string(),
             ]
         );
+    }
+
+    #[gpui::test]
+    async fn partial_status_errors_never_pass_the_checks(cx: &mut gpui::TestAppContext) {
+        let http = FakeHttpClient::create(|request| async move {
+            let uri = request.uri().to_string();
+            Ok(if uri.ends_with("/graphql") {
+                // GitHub could not resolve a check's conclusion and says so beside the data.
+                json_response(
+                    200,
+                    json!({
+                        "data": { "repository": { "pullRequest": {
+                            "mergeable": "MERGEABLE",
+                            "reviewDecision": null,
+                            "commits": { "nodes": [{ "commit": { "statusCheckRollup": {
+                                "contexts": { "nodes": [
+                                    { "name": "CI", "status": "COMPLETED", "conclusion": null }
+                                ] }
+                            } } }] }
+                        } } },
+                        "errors": [{ "message": "Something went wrong while resolving conclusion" }]
+                    }),
+                )
+            } else if uri.contains("/rules/branches/") {
+                json_response(200, json!([]))
+            } else if uri.contains("/branches/") {
+                json_response(200, json!({ "name": "main" }))
+            } else if uri.contains("/pulls?") {
+                json_response(200, json!([pull(12, "open", false, "evb0110/evb-ide")]))
+            } else {
+                json_response(200, json!({ "default_branch": "main" }))
+            })
+        });
+        let client = GitHubClient::new(http, Arc::new(FixedToken), cx.executor());
+        let pull_request = client
+            .branch_pull_request(&same_repository_branch("feature/one"))
+            .await
+            .unwrap()
+            .pull_request
+            .unwrap();
+        assert!(!pull_request.checks_complete);
+        assert_eq!(pull_request.checks_summary(), ChecksSummary::Pending);
     }
 
     #[gpui::test]
