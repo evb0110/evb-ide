@@ -238,6 +238,41 @@ fn composer_script_template(script: &str, label: &str, cwd: &Path) -> TaskTempla
     }
 }
 
+/// The terminal joins a task's arguments into one command line for its shell without quoting
+/// them, which suits hand-written tasks. A script name comes from `package.json` or
+/// `composer.json` instead, and a name such as `qa; rm -rf build` must stay one argument.
+fn quote_script_name(
+    configuration: &RunConfiguration,
+    mut spawn_in_terminal: task::SpawnInTerminal,
+    project: &Entity<Project>,
+    cx: &App,
+) -> anyhow::Result<task::SpawnInTerminal> {
+    if configuration.kind == RunConfigurationKind::Task {
+        return Ok(spawn_in_terminal);
+    }
+    let project = project.read(cx);
+    let is_windows = project.path_style(cx).is_windows();
+    // The shell `TerminalPanel::spawn_task` will run the command line in.
+    let remote_shell = project
+        .remote_client()
+        .and_then(|remote_client| remote_client.read(cx).shell());
+    let shell = match remote_shell {
+        Some(remote_shell) if spawn_in_terminal.shell == task::Shell::System => {
+            task::Shell::Program(remote_shell)
+        }
+        _ => spawn_in_terminal.shell.clone(),
+    };
+    let shell_kind = util::shell_builder::ShellBuilder::new(&shell, is_windows).kind();
+    if let Some(script) = spawn_in_terminal.args.last_mut() {
+        let quoted = shell_kind
+            .try_quote(script)
+            .ok_or_else(|| anyhow::anyhow!("the shell cannot quote the script name {script:?}"))?
+            .into_owned();
+        *script = quoted;
+    }
+    Ok(spawn_in_terminal)
+}
+
 /// The terminal label of a script: its shown label plus the tool that runs it,
 /// such as `dev · pnpm` or `dev · composer`. Zed reuses a terminal for every
 /// task with the same label, and this keeps scripts apart from each other and
@@ -686,11 +721,27 @@ impl RunController {
                 if !this.may_spawn(&configuration.id, generation) {
                     return None;
                 }
+                let spawn_in_terminal = match quote_script_name(
+                    &configuration,
+                    resolved.resolved.clone(),
+                    &project,
+                    cx,
+                ) {
+                    Ok(spawn_in_terminal) => spawn_in_terminal,
+                    Err(error) => {
+                        this.show_error(
+                            format!("Cannot run '{}': {error}", configuration.label),
+                            cx,
+                        );
+                        this.finish_run(&configuration.id, generation, RunStatus::Failed, cx);
+                        return None;
+                    }
+                };
                 if let Some(run) = this.runs.get_mut(&configuration.id) {
                     run.spawning = true;
                 }
                 Some(terminal_panel.update(cx, |terminal_panel, cx| {
-                    terminal_panel.spawn_task(&resolved.resolved, window, cx)
+                    terminal_panel.spawn_task(&spawn_in_terminal, window, cx)
                 }))
             });
             if let Ok(Some(spawn)) = spawn {
@@ -1158,6 +1209,51 @@ mod tests {
                     .map(|configuration| configuration.label.clone()),
                 Some("dev".into())
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn quotes_script_names_for_the_shell(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            AppState::test(cx);
+            project::task_store::TaskStore::init(None);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/trailmap"), json!({ "package.json": "{}" }))
+            .await;
+        let project = Project::test(fs, [path!("/trailmap").as_ref()], cx).await;
+        let configuration = |kind: RunConfigurationKind| RunConfiguration {
+            id: "id".into(),
+            label: "qa; touch injected".into(),
+            kind,
+            worktree_id: None,
+            source_kind: TaskSourceKind::UserInput,
+            template: TaskTemplate::default(),
+        };
+        let spawn = |shell: &str| task::SpawnInTerminal {
+            command: Some("npm".into()),
+            args: vec!["run".into(), "qa; touch injected".into()],
+            shell: task::Shell::Program(shell.into()),
+            ..task::SpawnInTerminal::default()
+        };
+        cx.update(|cx| {
+            let quoted = quote_script_name(
+                &configuration(RunConfigurationKind::PackageScript(PackageManager::Npm)),
+                spawn("/bin/sh"),
+                &project,
+                cx,
+            )
+            .unwrap();
+            assert_eq!(quoted.args, vec!["run", "'qa; touch injected'"]);
+            // A hand-written task keeps its shell syntax.
+            let task = quote_script_name(
+                &configuration(RunConfigurationKind::Task),
+                spawn("/bin/sh"),
+                &project,
+                cx,
+            )
+            .unwrap();
+            assert_eq!(task.args, vec!["run", "qa; touch injected"]);
         });
     }
 
