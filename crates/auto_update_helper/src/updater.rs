@@ -164,7 +164,7 @@ impl Job {
 }
 
 #[cfg(not(test))]
-pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
+pub(crate) static JOBS: LazyLock<[Job; 25]> = LazyLock::new(|| {
     fn p(value: &str) -> &Path {
         Path::new(value)
     }
@@ -188,6 +188,13 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         ),
         //
         Job::move_file(p("conpty.dll"), p("old\\conpty.dll")),
+        // This helper is running from tools\. Windows lets a running executable be renamed but
+        // not replaced, so it moves aside and the next update's cleanup removes it.
+        Job::mkdir(p("old\\tools")),
+        Job::move_if_exists(
+            p("tools\\auto_update_helper.exe"),
+            p("old\\tools\\auto_update_helper.exe"),
+        ),
         // Copy new files
         Job::move_file(p("install\\evb-ide.exe"), p("evb-ide.exe")),
         Job::move_file(p("install\\bin\\evb-ide.exe"), p("bin\\evb-ide.exe")),
@@ -205,6 +212,10 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         ),
         //
         Job::move_file(p("install\\conpty.dll"), p("conpty.dll")),
+        Job::move_if_exists(
+            p("install\\tools\\auto_update_helper.exe"),
+            p("tools\\auto_update_helper.exe"),
+        ),
         // Cleanup installer and updates folder
         Job::rmdir_nofail(p("updates")),
         Job::rmdir_nofail(p("install")),

@@ -878,15 +878,13 @@ impl AutoUpdater {
     }
 
     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
-        let (client, installed_version, previous_status, release_channel) =
-            this.read_with(cx, |this, cx| {
-                (
-                    this.client.http_client(),
-                    this.current_version.clone(),
-                    this.status.clone(),
-                    ReleaseChannel::try_global(cx).unwrap_or(ReleaseChannel::Stable),
-                )
-            });
+        let (client, installed_version, previous_status) = this.read_with(cx, |this, _| {
+            (
+                this.client.http_client(),
+                this.current_version.clone(),
+                this.status.clone(),
+            )
+        });
 
         Self::check_dependencies()?;
 
@@ -902,8 +900,11 @@ impl AutoUpdater {
         let fetched_release_data = fetched_release.asset.clone();
         let fetched_version = fetched_release_data.clone().version;
         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
+        // EVB IDE publishes plain versions on one channel. A nightly or preview build compares
+        // them by version too: the nightly rule compares commit SHAs, which these releases do
+        // not carry, so it would reinstall the same version or downgrade.
         let newer_version = Self::check_if_fetched_version_is_newer(
-            release_channel,
+            ReleaseChannel::Stable,
             app_commit_sha,
             installed_version,
             fetched_version,
