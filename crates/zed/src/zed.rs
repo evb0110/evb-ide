@@ -6308,6 +6308,80 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_evb_run_keys_resolve_where_webstorm_has_them(cx: &mut App) {
+        use gpui::{KeyContext, Keymap, Keystroke};
+        fn keymap(paths: [&'static str; 3], cx: &mut App) -> Keymap {
+            let mut keymap = Keymap::default();
+            for (path, source) in paths.into_iter().zip([
+                KeybindSource::Default,
+                KeybindSource::Base,
+                KeybindSource::Base,
+            ]) {
+                keymap.add_bindings(
+                    KeymapFile::load_asset(path, Some(source), cx)
+                        .unwrap_or_else(|error| panic!("{error:#}")),
+                );
+            }
+            keymap
+        }
+        let action = |keymap: &Keymap, keys: &'static str, contexts: &[&str]| {
+            let contexts = contexts
+                .iter()
+                .map(|context| KeyContext::parse(context).unwrap())
+                .collect::<Vec<_>>();
+            let (bindings, _) =
+                keymap.bindings_for_input(&[Keystroke::parse(keys).unwrap()], &contexts);
+            bindings
+                .first()
+                .map(|binding| binding.action().name().to_string())
+        };
+        let editor = ["Workspace", "Pane", "Editor mode = full"];
+        let terminal = ["Workspace", "Pane", "Terminal"];
+        let project_panel = ["Workspace", "Dock", "ProjectPanel"];
+
+        let macos = keymap(
+            [
+                "keymaps/default-macos.json",
+                "keymaps/macos/jetbrains.json",
+                "keymaps/evb.json",
+            ],
+            cx,
+        );
+        assert_eq!(action(&macos, "ctrl-r", &editor).as_deref(), Some("evb_run::Run"));
+        assert_eq!(action(&macos, "ctrl-d", &editor).as_deref(), Some("evb_run::Debug"));
+        // The terminal keeps ctrl-r (reverse search) and ctrl-d (end of input).
+        assert_eq!(
+            action(&macos, "ctrl-r", &terminal).as_deref(),
+            Some("terminal::SendKeystroke")
+        );
+        assert_eq!(
+            action(&macos, "ctrl-d", &terminal).as_deref(),
+            Some("terminal::SendKeystroke")
+        );
+
+        let linux = keymap(
+            [
+                "keymaps/default-linux.json",
+                "keymaps/linux/jetbrains.json",
+                "keymaps/linux/evb.json",
+            ],
+            cx,
+        );
+        for contexts in [&editor[..], &terminal[..], &project_panel[..]] {
+            assert_eq!(
+                action(&linux, "shift-f10", contexts).as_deref(),
+                Some("evb_run::Run"),
+                "{contexts:?}"
+            );
+            assert_eq!(
+                action(&linux, "shift-f9", contexts).as_deref(),
+                Some("evb_run::Debug"),
+                "{contexts:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn test_bundled_settings_and_themes(cx: &mut App) {
         cx.text_system()
             .add_fonts(vec![

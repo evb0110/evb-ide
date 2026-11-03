@@ -265,6 +265,25 @@ mod evb_default_settings_tests {
         assert_eq!(merged["cli_default_open_behavior"], "new_window");
         assert_eq!(merged["use_system_window_tabs"], true);
         assert_eq!(merged["credentials_url"], "https://zed.dev/evb-ide");
+        // The JSONC list keeps upstream's patterns and adds EVB IDE's config directory.
+        let jsonc = &merged["file_types"]["JSONC"];
+        let defaults = parse_json_with_comments::<serde_json::Value>(&default_settings())
+            .expect("default settings are valid JSON");
+        for pattern in defaults["file_types"]["JSONC"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            assert!(
+                jsonc.as_array().is_some_and(|list| list.contains(pattern)),
+                "{pattern}"
+            );
+        }
+        assert!(
+            jsonc
+                .to_string()
+                .contains("**/{evb-ide,EVB-IDE}/{settings,keymap,tasks,debug}.json")
+        );
         assert_eq!(merged["project_panel"]["auto_reveal_entries"], false);
         assert_eq!(merged["auto_install_extensions"]["scss"], true);
         // `disable_ai` merges with OR, so a default of true could never be undone.
@@ -276,5 +295,11 @@ mod evb_default_settings_tests {
 
         let content = UserSettingsContent::parse_json_with_comments(&app_default_settings());
         assert!(content.is_ok(), "{:?}", content.err());
+
+        // A settings file created on first use must not override the EVB layer.
+        let initial =
+            parse_json_with_comments::<serde_json::Value>(&initial_user_settings_content())
+                .expect("the initial settings file is valid JSON");
+        assert_eq!(initial, serde_json::json!({}));
     }
 }

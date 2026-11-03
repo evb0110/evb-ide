@@ -3,12 +3,19 @@
 // User keymaps still override these.
 [
   {
-    "context": "Workspace",
+    // Without a context, like WebStorm's run keys: a binding with a context loses to the base
+    // keymap's context-free shift-f9 (debugger::Start) and to panels' own bindings, such as
+    // shift-f10 opening the Project panel's context menu.
     "bindings": {
       "shift-f10": "evb_run::Run",
       "shift-f9": "evb_run::Debug",
       "ctrl-f2": "evb_run::Stop",
       "alt-shift-f10": "evb_run::ChooseConfiguration",
+    },
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
       "ctrl-j": "workspace::ToggleBottomDock",
     },
   },
@@ -22,9 +29,6 @@
   {
     "context": "Editor && mode == full",
     "bindings": {
-      "shift-f10": "evb_run::Run",
-      "shift-f9": "evb_run::Debug",
-      "ctrl-f2": "evb_run::Stop",
       // JetBrains inserts a live template on ctrl-j; EVB IDE toggles the bottom dock there,
       // as cmd-j does on macOS. Hover stays on ctrl-q (Quick Documentation).
       "ctrl-j": "workspace::ToggleBottomDock",
