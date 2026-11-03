@@ -1645,6 +1645,7 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
           isOutdated
           path
           line
+          startLine
           diffSide
           viewerCanReply
           viewerCanResolve
@@ -1675,6 +1676,8 @@ pub struct ReviewThread {
     pub path: String,
     /// The line on the head commit; `None` once the line left the diff.
     pub line: Option<u32>,
+    /// The first line of a comment on several lines, on the same side as `line`.
+    pub start_line: Option<u32>,
     /// Whether `line` counts lines of the head commit. Comments on deleted lines count the
     /// base commit's lines instead, which the head's file does not have.
     pub on_head: bool,
@@ -1762,6 +1765,8 @@ struct ReviewThreadNode {
     path: String,
     line: Option<u32>,
     #[serde(default)]
+    start_line: Option<u32>,
+    #[serde(default)]
     diff_side: Option<String>,
     #[serde(default)]
     viewer_can_reply: bool,
@@ -1798,6 +1803,7 @@ impl ReviewThreadNode {
             id: self.id,
             path: self.path,
             line: self.line,
+            start_line: self.start_line,
             on_head: self.diff_side.as_deref() != Some("LEFT"),
             is_resolved: self.is_resolved,
             is_outdated: self.is_outdated,

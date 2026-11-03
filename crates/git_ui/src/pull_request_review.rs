@@ -340,8 +340,20 @@ fn refresh_blocks(editor: &mut Editor, force: bool, cx: &mut Context<Editor>) {
             .iter()
             .filter(|thread| &thread.path == relative && thread.on_head)
             .filter_map(|thread| {
-                let row = map.head_to_buffer(thread.line?.checked_sub(1)?)?;
-                Some((thread.clone(), row))
+                let last = thread.line?.checked_sub(1)?;
+                let row = map.head_to_buffer(last)?;
+                // A comment on several lines shows inline only while all of them are unchanged
+                // and still together; otherwise it stays in the status bar list.
+                let first = thread
+                    .start_line
+                    .and_then(|line| line.checked_sub(1))
+                    .unwrap_or(last)
+                    .min(last);
+                let unchanged = (first..last).all(|head_row| {
+                    map.head_to_buffer(head_row)
+                        .is_some_and(|buffer_row| buffer_row + (last - head_row) == row)
+                });
+                unchanged.then(|| (thread.clone(), row))
             })
             .collect();
     }
@@ -412,8 +424,10 @@ fn schedule_remap(editor: &mut Editor, cx: &mut Context<Editor>) {
     }
     let task = cx.spawn(async move |editor, cx| {
         cx.background_executor().timer(REMAP_DELAY).await;
+        // Rebuilt even when every thread maps to the same row: an edit replacing a thread's
+        // line with the same text leaves the old block anchored to the removed text.
         editor
-            .update(cx, |editor, cx| refresh_blocks(editor, false, cx))
+            .update(cx, |editor, cx| refresh_blocks(editor, true, cx))
             .log_err();
     });
     if let Some(addon) = editor.addon_mut::<ReviewAddon>() {
@@ -1435,6 +1449,7 @@ mod tests {
             id: "T".into(),
             path: "src/main.rs".into(),
             line: Some(3),
+            start_line: None,
             on_head: true,
             is_resolved: false,
             is_outdated: false,
