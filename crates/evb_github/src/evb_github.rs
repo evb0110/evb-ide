@@ -7,7 +7,9 @@ use anyhow::Context as _;
 use collections::HashMap;
 use futures::{AsyncReadExt as _, FutureExt as _, future::BoxFuture};
 use gpui::BackgroundExecutor;
-use http_client::{AsyncBody, HttpClient, Method, Request, http::HeaderMap};
+use http_client::{
+    AsyncBody, HttpClient, HttpRequestExt as _, Method, RedirectPolicy, Request, http::HeaderMap,
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -118,6 +120,31 @@ impl std::error::Error for GitHubError {}
 
 pub fn normalize_host(host: &str) -> String {
     host.trim().to_lowercase()
+}
+
+/// A host as remotes and `gh` name it: a DNS name, optionally with a port. Anything else, such as
+/// a path, query or user info from a crafted `gh-resolved`, would move the API URL, and the token
+/// sent to it, to another host.
+pub fn is_valid_host(host: &str) -> bool {
+    let host = normalize_host(host);
+    let (name, port) = match host.rsplit_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (host.as_str(), None),
+    };
+    let valid_port = port.is_none_or(|port| {
+        !port.is_empty() && port.len() <= 5 && port.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    let valid_name = !name.is_empty()
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        });
+    valid_port && valid_name
 }
 
 fn is_github_dot_com(host: &str) -> bool {
@@ -282,13 +309,14 @@ pub fn retry_at(headers: &HeaderMap, now: SystemTime) -> Option<SystemTime> {
     if let Some(seconds) =
         header(headers, "retry-after").and_then(|value| value.trim().parse::<u64>().ok())
     {
-        return Some(now + Duration::from_secs(seconds));
+        // An absurd value would overflow; the caller then falls back to its default pause.
+        return now.checked_add(Duration::from_secs(seconds));
     }
     let reset = header(headers, "x-ratelimit-reset")?
         .trim()
         .parse::<u64>()
         .ok()?;
-    let reset = SystemTime::UNIX_EPOCH + Duration::from_secs(reset);
+    let reset = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(reset))?;
     (reset > now).then_some(reset)
 }
 
@@ -353,6 +381,16 @@ impl GitHubClient {
         })
     }
 
+    fn check_paused(&self, host: &str) -> Result<(), GitHubError> {
+        match self.paused_until.lock().get(host).copied() {
+            Some(until) if until > SystemTime::now() => Err(GitHubError::RateLimited {
+                host: host.to_string(),
+                retry_at: Some(until),
+            }),
+            _ => Ok(()),
+        }
+    }
+
     async fn send(
         &self,
         host: &str,
@@ -361,19 +399,22 @@ impl GitHubClient {
         body: Option<&Value>,
     ) -> Result<Answer, GitHubError> {
         let host = normalize_host(host);
-        if let Some(until) = self.paused_until.lock().get(&host).copied()
-            && until > SystemTime::now()
-        {
-            return Err(GitHubError::RateLimited {
+        if !is_valid_host(&host) {
+            return Err(GitHubError::Request {
+                detail: format!("{host:?} is not a GitHub host name"),
                 host,
-                retry_at: Some(until),
             });
         }
+        self.check_paused(&host)?;
         let token = self.credentials.token(&host).await?;
         let _slot = self.slots.acquire().await;
+        // A pause can begin while this request waited for a slot.
+        self.check_paused(&host)?;
         let request = Request::builder()
             .method(method)
             .uri(url)
+            // A redirect, even to the same host over plain HTTP, would carry the token along.
+            .follow_redirects(RedirectPolicy::NoFollow)
             .header("Authorization", format!("Bearer {token}"))
             .header("Accept", "application/vnd.github+json")
             .header("Content-Type", "application/json")
@@ -1892,6 +1933,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_hosts_that_would_move_the_api_url() {
+        for host in [
+            "github.com",
+            "GitHub.com",
+            "acme.ghe.com",
+            "git.example.com:8443",
+        ] {
+            assert!(is_valid_host(host), "{host}");
+        }
+        for host in [
+            "",
+            "attacker.example?.ghe.com",
+            "attacker.example/.ghe.com",
+            "user@github.com",
+            "github.com:",
+            "github.com:99999999",
+            "-github.com",
+            "github..com",
+        ] {
+            assert!(!is_valid_host(host), "{host}");
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", u64::MAX.to_string().parse().unwrap());
+        assert_eq!(retry_at(&headers, SystemTime::now()), None);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-reset", u64::MAX.to_string().parse().unwrap());
+        assert_eq!(retry_at(&headers, SystemTime::now()), None);
+    }
+
+    #[test]
     fn api_urls_per_host() {
         assert_eq!(
             api_urls("github.com").graphql,
@@ -2078,10 +2149,7 @@ mod tests {
             url: None,
         };
         // The other app's failing `test` is not hidden by the first app's success.
-        assert_eq!(
-            pull_request(checks).checks_summary(),
-            ChecksSummary::Failed
-        );
+        assert_eq!(pull_request(checks).checks_summary(), ChecksSummary::Failed);
         assert_eq!(
             pull_request(Vec::new()).checks_summary(),
             ChecksSummary::None

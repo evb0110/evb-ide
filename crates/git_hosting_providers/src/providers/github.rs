@@ -111,7 +111,8 @@ impl Github {
         // TODO: detecting self hosted instances by checking whether "github" is in the url or not
         // is not very reliable. See https://github.com/zed-industries/zed/issues/26393 for more
         // information.
-        if !host.contains("github") {
+        // GitHub Enterprise Cloud with data residency lives on `<enterprise>.ghe.com`.
+        if !host.contains("github") && !host.ends_with(".ghe.com") {
             bail!("not a GitHub URL");
         }
 
@@ -359,6 +360,13 @@ mod tests {
             github.base_url,
             Url::parse("https://github.my-enterprise.com").unwrap()
         );
+    }
+
+    #[test]
+    fn test_from_remote_url_ghe_com() {
+        let github = Github::from_remote_url("https://acme.ghe.com/org/project.git").unwrap();
+        assert_eq!(github.base_url, Url::parse("https://acme.ghe.com").unwrap());
+        assert!(Github::from_remote_url("https://acme.example.com/org/project.git").is_err());
     }
 
     #[test]

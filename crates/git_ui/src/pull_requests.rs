@@ -126,6 +126,8 @@ pub(crate) struct ResolvedBranch {
 struct RemoteConfig {
     name: String,
     url: Option<String>,
+    /// Where `git push` sends to, when it differs from `url`.
+    push_url: Option<String>,
     /// `gh repo set-default`: `base` on the remote of the chosen repository, or the chosen
     /// repository's `owner/name` when no remote points at it.
     gh_resolved: Option<String>,
@@ -141,7 +143,7 @@ fn parse_remote_config(output: &str) -> Vec<RemoteConfig> {
             continue;
         };
         let (name, field) = match key.rsplit_once('.') {
-            Some((name, field @ ("url" | "gh-resolved"))) => (name, field),
+            Some((name, field @ ("url" | "pushurl" | "gh-resolved"))) => (name, field),
             _ => continue,
         };
         let index = match remotes.iter().position(|remote| remote.name == name) {
@@ -157,6 +159,9 @@ fn parse_remote_config(output: &str) -> Vec<RemoteConfig> {
         let remote = &mut remotes[index];
         match field {
             "url" if remote.url.is_none() => remote.url = Some(value.trim().to_string()),
+            "pushurl" if remote.push_url.is_none() => {
+                remote.push_url = Some(value.trim().to_string())
+            }
             "gh-resolved" => remote.gh_resolved = Some(value.trim().to_string()),
             _ => {}
         }
@@ -196,7 +201,10 @@ fn target_repository(
         let parts = resolved.split('/').collect::<Vec<_>>();
         let (host, owner, name) = match parts.as_slice() {
             [owner, name] => (located.host, *owner, *name),
-            [host, owner, name] => (host.to_string(), *owner, *name),
+            // The host picks where the token goes, so it must be a plain host name.
+            [host, owner, name] if evb_github::is_valid_host(host) => {
+                (host.to_string(), *owner, *name)
+            }
             _ => continue,
         };
         let target = RepositoryLocator {
@@ -267,7 +275,7 @@ fn resolve_from_remotes(
                 .then_some("origin")
         })
         .and_then(|name| remotes.iter().find(|remote| remote.name == name))
-        .and_then(|remote| remote.url.as_deref())
+        .and_then(|remote| remote.push_url.as_deref().or(remote.url.as_deref()))
     {
         Some(url) => locate(registry, url)?,
         None => target.clone(),
@@ -319,7 +327,7 @@ pub(crate) fn resolve_branch(
             repository.read_git_command(args([
                 "config",
                 "--get-regexp",
-                r"^remote\..*\.(url|gh-resolved)$",
+                r"^remote\..*\.(url|pushurl|gh-resolved)$",
             ])),
             repository.read_git_command(args([
                 "for-each-ref",
@@ -341,6 +349,7 @@ pub(crate) fn resolve_branch(
                     remotes.push(RemoteConfig {
                         name: name.into(),
                         url: Some(url),
+                        push_url: None,
                         gh_resolved: None,
                     });
                 }
@@ -1505,6 +1514,7 @@ pub(crate) mod tests {
         RemoteConfig {
             name: name.into(),
             url: Some(url.into()),
+            push_url: None,
             gh_resolved: None,
         }
     }
@@ -1524,10 +1534,14 @@ pub(crate) mod tests {
                  remote.my.fork.url https://github.com/me/fork.git\n\
                  remote.upstream.url https://github.com/evb0110/evb-ide.git\n\
                  remote.upstream.gh-resolved base\n\
+                 remote.origin.pushurl git@github.com:me/push.git\n\
                  remote.origin.fetch +refs/heads/*:refs/remotes/origin/*\n"
             ),
             vec![
-                remote("origin", "git@github.com:me/evb-ide.git"),
+                RemoteConfig {
+                    push_url: Some("git@github.com:me/push.git".into()),
+                    ..remote("origin", "git@github.com:me/evb-ide.git")
+                },
                 remote("my.fork", "https://github.com/me/fork.git"),
                 RemoteConfig {
                     gh_resolved: Some("base".into()),
@@ -1574,6 +1588,30 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(tracking_upstream.head.selector(), "me:feature");
+
+        // `git push` sends to the remote's push URL, so the head is there.
+        let push_url = [RemoteConfig {
+            push_url: Some("git@github.com:me/evb-ide.git".into()),
+            ..remote("origin", "https://github.com/evb0110/evb-ide.git")
+        }];
+        let resolved = resolve_from_remotes(
+            &push_url,
+            &registry,
+            "feature".into(),
+            &push(Some("origin"), None),
+        )
+        .unwrap();
+        assert_eq!(resolved.head.target, locator("evb0110"));
+        assert_eq!(resolved.head.selector(), "me:feature");
+
+        // A `gh-resolved` host must be a host name: it decides where the token goes.
+        let crafted = [RemoteConfig {
+            gh_resolved: Some("attacker.example?.ghe.com/org/repo".into()),
+            ..remote("origin", "https://github.com/evb0110/evb-ide.git")
+        }];
+        let resolved =
+            resolve_from_remotes(&crafted, &registry, "feature".into(), &push(None, None)).unwrap();
+        assert_eq!(resolved.head.target, locator("evb0110"));
 
         // `gh repo set-default` picks the base: on a remote ...
         let set_default = [
