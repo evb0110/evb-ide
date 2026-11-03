@@ -24,6 +24,10 @@
   "buffer_line_height": { "custom": 1.4 },
   "ui_font_family": "Inter",
   "ui_font_size": 13,
+  // Keychain entries are keyed by this URL. Zed keys them by its server URL, so without a key of
+  // its own EVB IDE would read an installed Zed's login, send it to Zed's servers at startup, and
+  // delete it when signing out.
+  "credentials_url": "https://zed.dev/evb-ide",
   "title_bar": {
     "show_onboarding_banner": false,
     "show_sign_in": false,

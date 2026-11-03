@@ -1,4 +1,3 @@
-use super::register_zed_scheme;
 use anyhow::Result;
 use gpui::{AppContext as _, AsyncApp, Context, PromptLevel, Window, actions};
 use release_channel::ReleaseChannel;
@@ -130,7 +129,8 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                 Toast::new(
                     NotificationId::unique::<InstalledZedCli>(),
                     format!(
-                        "Installed `zed` to {}. You can launch {} from your terminal.",
+                        "Installed `{}` to {}. You can launch {} from your terminal.",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
                         path.to_string_lossy(),
                         ReleaseChannel::global(cx).display_name()
                     ),
@@ -138,7 +138,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                 cx,
             )
         })?;
-        register_zed_scheme(cx).await.log_err();
+        // `zed://` links belong to an installed Zed, so EVB IDE does not claim the scheme.
         Ok(())
     })
     .detach_and_prompt_err("Cannot install the EVB IDE CLI", window, cx, |_, _, _| None);

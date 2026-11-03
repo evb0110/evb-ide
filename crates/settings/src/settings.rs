@@ -264,6 +264,7 @@ mod evb_default_settings_tests {
         assert_eq!(merged["default_open_behavior"], "new_window");
         assert_eq!(merged["cli_default_open_behavior"], "new_window");
         assert_eq!(merged["use_system_window_tabs"], true);
+        assert_eq!(merged["credentials_url"], "https://zed.dev/evb-ide");
         assert_eq!(merged["project_panel"]["auto_reveal_entries"], false);
         assert_eq!(merged["auto_install_extensions"]["scss"], true);
         // `disable_ai` merges with OR, so a default of true could never be undone.

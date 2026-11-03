@@ -1228,9 +1228,55 @@ pub struct DisableAiSettings {
 
 impl settings::Settings for DisableAiSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
+        // EVB IDE turns AI off through the agent and edit prediction settings, as `disable_ai`
+        // cannot be turned back on once a default sets it. With both off nothing uses AI, and
+        // treating that as `disable_ai` keeps AI services (Copilot Chat models, the agent
+        // registry) from being contacted and AI menu items from doing nothing.
+        let agent_disabled = content
+            .agent
+            .as_ref()
+            .and_then(|agent| agent.enabled)
+            == Some(false);
+        let predictions_disabled = content
+            .project
+            .all_languages
+            .edit_predictions
+            .as_ref()
+            .and_then(|edit_predictions| edit_predictions.provider)
+            == Some(settings::EditPredictionProvider::None);
         Self {
-            disable_ai: content.project.disable_ai.unwrap().0,
+            disable_ai: content.project.disable_ai.unwrap().0
+                || (agent_disabled && predictions_disabled),
         }
+    }
+}
+
+#[cfg(test)]
+mod disable_ai_settings_tests {
+    use super::DisableAiSettings;
+    use settings::{
+        AgentSettingsContent, EditPredictionProvider, EditPredictionSettingsContent, Settings as _,
+        SettingsContent,
+    };
+
+    #[test]
+    fn agent_and_predictions_both_off_disable_ai() {
+        let content = |agent_enabled: bool, provider: EditPredictionProvider| {
+            let mut content = SettingsContent::default();
+            content.project.disable_ai = Some(false.into());
+            content.agent = Some(AgentSettingsContent {
+                enabled: Some(agent_enabled),
+                ..AgentSettingsContent::default()
+            });
+            content.project.all_languages.edit_predictions = Some(EditPredictionSettingsContent {
+                provider: Some(provider),
+                ..EditPredictionSettingsContent::default()
+            });
+            DisableAiSettings::from_settings(&content).disable_ai
+        };
+        assert!(content(false, EditPredictionProvider::None));
+        assert!(!content(true, EditPredictionProvider::None));
+        assert!(!content(false, EditPredictionProvider::Copilot));
     }
 }
 
