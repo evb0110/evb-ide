@@ -108,6 +108,25 @@ async fn git(
         .await?
 }
 
+/// Runs a git command that changes the repository only if HEAD is still `head`, checked in the
+/// same git job so no other queued operation can move HEAD in between.
+async fn git_at_head(
+    repository: &Entity<Repository>,
+    status: &str,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    head: &HeadState,
+    cx: &mut AsyncWindowContext,
+) -> Result<String> {
+    let status = SharedString::from(status.to_string());
+    let (sha, branch) = (head.sha.clone(), head.branch.clone());
+    repository
+        .update(cx, |repository, cx| {
+            repository.run_git_command_at_head(Some(status), args, env, sha, branch, cx)
+        })
+        .await?
+}
+
 async fn parent_count(
     repository: &Entity<Repository>,
     sha: Oid,
@@ -160,13 +179,14 @@ async fn confirm(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HeadState {
     sha: String,
+    /// The full ref, such as `refs/heads/main`: a short name is ambiguous when a tag shares it.
     branch: Option<String>,
 }
 
 impl HeadState {
     fn label(&self) -> String {
         match &self.branch {
-            Some(branch) => format!("'{branch}'"),
+            Some(branch) => format!("'{}'", branch.strip_prefix("refs/heads/").unwrap_or(branch)),
             None => "HEAD".to_string(),
         }
     }
@@ -194,7 +214,7 @@ async fn read_head(
     let branch = git(
         repository,
         "Reading HEAD",
-        args(["symbolic-ref", "-q", "--short", "HEAD"]),
+        args(["symbolic-ref", "-q", "HEAD"]),
         HashMap::default(),
         cx,
     )
@@ -271,6 +291,17 @@ async fn confirm_rewriting_pushed_commit(
     action: &str,
     cx: &mut AsyncWindowContext,
 ) -> Result<bool> {
+    confirm_rewriting_pushed(&target.sha.to_string(), repository, action, cx).await
+}
+
+/// Asks before rewriting `sha` when a remote branch contains it.
+async fn confirm_rewriting_pushed(
+    sha: &str,
+    repository: &Entity<Repository>,
+    action: &str,
+    cx: &mut AsyncWindowContext,
+) -> Result<bool> {
+    let short_sha = sha.get(..7).unwrap_or(sha);
     let pushed_to = git(
         repository,
         "Checking history",
@@ -278,7 +309,7 @@ async fn confirm_rewriting_pushed_commit(
             "branch",
             "-r",
             "--contains",
-            &target.sha.to_string(),
+            sha,
             "--format=%(refname:short)",
         ]),
         HashMap::default(),
@@ -295,11 +326,7 @@ async fn confirm_rewriting_pushed_commit(
     }
     confirm(
         PromptLevel::Warning,
-        format!(
-            "{} is already pushed to {}",
-            target.short_sha(),
-            pushed_to.join(", ")
-        ),
+        format!("{short_sha} is already pushed to {}", pushed_to.join(", ")),
         Some(format!(
             "{action} it means you will have to force push. Continue?"
         )),
@@ -370,10 +397,10 @@ async fn stopped_rebase_started_from(
     let work_directory = repository.update(cx, |repository, _| {
         repository.work_directory_abs_path.to_path_buf()
     });
-    let expected_head_name = match &head.branch {
-        Some(branch) => format!("refs/heads/{branch}"),
-        None => "detached HEAD".to_string(),
-    };
+    let expected_head_name = head
+        .branch
+        .clone()
+        .unwrap_or_else(|| "detached HEAD".to_string());
     for state_directory in ["rebase-merge", "rebase-apply"] {
         let path = git(
             repository,
@@ -421,21 +448,26 @@ async fn rebase(
         "rebase",
     ]);
     command.extend(rebase_args);
-    let result = git(repository, status, command, env, cx).await;
+    let result = git_at_head(repository, status, command, env, head, cx).await;
     if let Err(error) = result {
         if !stopped_rebase_started_from(repository, head, cx).await? {
             return Err(error.context("The rebase failed"));
         }
-        git(
+        let abort = git(
             repository,
             "Aborting rebase",
             args(["rebase", "--abort"]),
             HashMap::default(),
             cx,
         )
-        .await
-        .log_err();
-        return Err(error.context("The rebase failed and was aborted"));
+        .await;
+        return Err(match abort {
+            Ok(_) => error.context("The rebase failed and was aborted"),
+            Err(abort_error) => error.context(format!(
+                "The rebase failed, and aborting it failed too, so the rebase is still in \
+                 progress; finish or abort it with git. Abort error: {abort_error:#}"
+            )),
+        });
     }
     Ok(())
 }
@@ -481,6 +513,7 @@ fn apply_commit(
                 .repository
                 .upgrade()
                 .context("the repository was closed")?;
+            ensure_no_operation_in_progress(&repository, cx).await?;
             let mut command = args([subcommand]);
             if subcommand == "revert" {
                 command.push("--no-edit".to_string());
@@ -489,14 +522,25 @@ fn apply_commit(
                 command.extend(args(["-m", "1"]));
             }
             command.push(target.sha.to_string());
-            git(
+            let result = git(
                 &repository,
                 &format!("{status} {}", target.short_sha()),
                 command,
                 HashMap::default(),
                 cx,
             )
-            .await?;
+            .await;
+            if let Err(error) = result {
+                // Like WebStorm, conflicts stay for the user to resolve rather than being undone.
+                if operation_in_progress(&repository, cx).await?.is_some() {
+                    return Err(error.context(format!(
+                        "{} stopped on conflicts. Resolve them and commit, or run \
+                         `git {subcommand} --abort` to undo it",
+                        target.short_sha()
+                    )));
+                }
+                return Err(error);
+            }
             show_toast(
                 &target.workspace,
                 format!("{done} {}", target.short_sha()),
@@ -549,12 +593,12 @@ pub(crate) fn reset_current_branch(target: &CommitTarget, window: &mut Window, c
                 return Ok(());
             };
             let flag = format!("--{}", mode.to_lowercase());
-            ensure_head_unchanged(&repository, &head, cx).await?;
-            git(
+            git_at_head(
                 &repository,
                 &format!("Resetting to {}", target.short_sha()),
                 args(["reset", &flag, &target.sha.to_string()]),
                 HashMap::default(),
+                &head,
                 cx,
             )
             .await?;
@@ -592,12 +636,12 @@ pub(crate) fn undo_commit(target: &CommitTarget, window: &mut Window, cx: &mut A
             if !confirm_rewriting_pushed_commit(&target, &repository, "Undoing", cx).await? {
                 return Ok(());
             }
-            ensure_head_unchanged(&repository, &head, cx).await?;
-            git(
+            git_at_head(
                 &repository,
                 "Undoing commit",
                 args(["reset", "--soft", &format!("{sha}^")]),
                 HashMap::default(),
+                &head,
                 cx,
             )
             .await?;
@@ -699,12 +743,12 @@ pub(crate) fn fixup(target: &CommitTarget, window: &mut Window, cx: &mut App) {
                 return Ok(());
             };
             let sha = target.sha.to_string();
-            ensure_head_unchanged(&repository, &head, cx).await?;
-            git(
+            git_at_head(
                 &repository,
                 "Committing fixup",
                 args(["commit", &format!("--fixup={sha}")]),
                 HashMap::default(),
+                &head,
                 cx,
             )
             .await?;
@@ -762,13 +806,18 @@ pub(crate) fn push_up_to(target: &CommitTarget, window: &mut Window, cx: &mut Ap
             let branch = git(
                 &repository,
                 "Reading branch",
-                args(["symbolic-ref", "--short", "HEAD"]),
+                args(["symbolic-ref", "HEAD"]),
                 HashMap::default(),
                 cx,
             )
             .await
             .map_err(|_| anyhow::anyhow!("HEAD is detached; check out a branch first."))?;
-            let branch = branch.trim().to_string();
+            // `--short` would say `heads/main` when a tag is also named `main`.
+            let branch = branch.trim();
+            let branch = branch
+                .strip_prefix("refs/heads/")
+                .unwrap_or(branch)
+                .to_string();
             let config = async |key: String, cx: &mut AsyncWindowContext| {
                 git(
                     &repository,
@@ -874,18 +923,21 @@ pub(crate) fn create_patch(target: &CommitTarget, window: &mut Window, cx: &mut 
                 "{} is a merge commit; a patch can only be created for a regular commit.",
                 target.short_sha()
             );
-            let patch = git(
+            // Git writes the file itself: its output read as text would replace bytes of files
+            // that are not UTF-8, and the patch would no longer apply.
+            git(
                 &repository,
                 "Creating patch",
-                args(["format-patch", "-1", "--stdout", &target.sha.to_string()]),
+                vec![
+                    "format-patch".to_string(),
+                    "-1".to_string(),
+                    format!("--output={}", path.display()),
+                    target.sha.to_string(),
+                ],
                 HashMap::default(),
                 cx,
             )
             .await?;
-            let write_path = path.clone();
-            cx.background_spawn(async move { std::fs::write(&write_path, patch) })
-                .await
-                .with_context(|| format!("writing {}", path.display()))?;
             show_toast(
                 &target.workspace,
                 format!("Saved the patch to {}", path.display()),
@@ -948,8 +1000,7 @@ fn reword(
                 if !confirm_rewriting_pushed_commit(&target, &repository, "Rewriting", cx).await? {
                     return Ok(());
                 }
-                ensure_head_unchanged(&repository, &head, cx).await?;
-                git(
+                git_at_head(
                     &repository,
                     "Editing commit message",
                     args([
@@ -963,6 +1014,7 @@ fn reword(
                         &message,
                     ]),
                     HashMap::default(),
+                    &head,
                     cx,
                 )
                 .await?;
@@ -1123,6 +1175,33 @@ fn rebase_onto(
                 .upgrade()
                 .context("the repository was closed")?;
             let head = read_head(&repository, cx).await?;
+            let replayed = format!("{ref_name}..{}", head.sha);
+            let merges = git(
+                &repository,
+                "Checking history",
+                args(["rev-list", "--merges", &replayed, "--"]),
+                HashMap::default(),
+                cx,
+            )
+            .await?;
+            // A rebase flattens merges, dropping changes made only in a merge commit.
+            anyhow::ensure!(
+                merges.trim().is_empty(),
+                "The commits to rebase include merge commits, which can't be rebased here."
+            );
+            let oldest_replayed = git(
+                &repository,
+                "Checking history",
+                args(["rev-list", "--reverse", &replayed, "--"]),
+                HashMap::default(),
+                cx,
+            )
+            .await?;
+            if let Some(oldest_replayed) = oldest_replayed.lines().next().map(str::trim)
+                && !confirm_rewriting_pushed(oldest_replayed, &repository, "Rebasing", cx).await?
+            {
+                return Ok(());
+            }
             rebase(
                 &repository,
                 &format!("Rebasing onto {name}"),
@@ -1189,7 +1268,7 @@ fn checkout_branch(target: &CommitTarget, branch: &Branch, window: &mut Window, 
                 if !local_exists {
                     args(["switch", "-c", &local_name, "--track", &branch.ref_name])
                 } else if local_upstream == branch.ref_name.as_ref() {
-                    args(["switch", &local_name])
+                    args(["switch", "--", &local_name])
                 } else {
                     let note = if local_upstream.is_empty() {
                         format!("A local '{local_name}' already exists and tracks no branch.")
@@ -1235,7 +1314,7 @@ fn checkout_branch(target: &CommitTarget, branch: &Branch, window: &mut Window, 
                     return Ok(());
                 }
             } else {
-                args(["switch", &name])
+                args(["switch", "--", &name])
             };
             git(
                 &repository,
@@ -1276,7 +1355,7 @@ fn delete_branch(target: &CommitTarget, name: &str, window: &mut Window, cx: &mu
             let deleted = git(
                 &repository,
                 &format!("Deleting {name}"),
-                args(["branch", "-d", &name]),
+                args(["branch", "-d", "--", &name]),
                 HashMap::default(),
                 cx,
             )
@@ -1299,7 +1378,7 @@ fn delete_branch(target: &CommitTarget, name: &str, window: &mut Window, cx: &mu
                 git(
                     &repository,
                     &format!("Deleting {name}"),
-                    args(["branch", "-D", &name]),
+                    args(["branch", "-D", "--", &name]),
                     HashMap::default(),
                     cx,
                 )
@@ -1649,7 +1728,7 @@ pub(crate) mod tests {
     fn head_state(directory: &Path) -> HeadState {
         HeadState {
             sha: run_git(directory, &["rev-parse", "HEAD"]),
-            branch: try_run_git(directory, &["symbolic-ref", "-q", "--short", "HEAD"]).ok(),
+            branch: try_run_git(directory, &["symbolic-ref", "-q", "HEAD"]).ok(),
         }
     }
 
@@ -1969,6 +2048,74 @@ pub(crate) mod tests {
         wait_for_prompt(&mut cx, "OK");
         assert_eq!(run_git(root, &["rev-parse", "main"]), d);
         assert_eq!(run_git(root, &["rev-parse", "other"]), shas[0]);
+    }
+
+    #[gpui::test]
+    async fn test_head_checked_command_refuses_a_moved_head(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let tree = TempTree::new(json!({}));
+        let root = tree.path();
+        let shas = create_repository(root);
+        let (mut cx, repository, _) = open(root, cx).await;
+
+        // Confirmed on `main` at C, but a queued switch moved HEAD to `other` first.
+        run_git(root, &["switch", "-q", "-c", "other"]);
+        let mut receiver = repository.update(&mut cx, |repository, cx| {
+            repository.run_git_command_at_head(
+                None,
+                args(["reset", "--hard", &shas[0]]),
+                HashMap::default(),
+                shas[2].clone(),
+                Some("refs/heads/main".into()),
+                cx,
+            )
+        });
+        let result = loop {
+            cx.run_until_parked();
+            if let Ok(Some(result)) = receiver.try_recv() {
+                break result;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(result.is_err());
+        assert_eq!(run_git(root, &["rev-parse", "other"]), shas[2]);
+        assert_eq!(run_git(root, &["rev-parse", "main"]), shas[2]);
+    }
+
+    #[gpui::test]
+    async fn test_rebase_onto_refuses_merge_commits(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let tree = TempTree::new(json!({}));
+        let root = tree.path();
+        let shas = create_repository(root);
+        // `main` gets a merge that adds a file of its own; `onto` diverges from A.
+        run_git(root, &["switch", "-q", "-c", "side", &shas[1]]);
+        commit_file(root, "side.txt", "1\n", "S");
+        run_git(root, &["switch", "-q", "main"]);
+        run_git(root, &["merge", "-q", "--no-ff", "--no-commit", "side"]);
+        std::fs::write(root.join("resolution.txt"), "1\n").expect("writing a fixture file");
+        run_git(root, &["add", "resolution.txt"]);
+        run_git(root, &["commit", "-q", "-m", "Merge side"]);
+        let merged = run_git(root, &["rev-parse", "HEAD"]);
+        run_git(root, &["branch", "onto", &shas[0]]);
+        run_git(root, &["switch", "-q", "onto"]);
+        commit_file(root, "o.txt", "1\n", "O");
+        run_git(root, &["switch", "-q", "main"]);
+        let (mut cx, repository, workspace) = open(root, cx).await;
+
+        cx.update(|window, cx| {
+            rebase_onto(
+                &target(&shas[0], &repository, &workspace),
+                "onto",
+                "refs/heads/onto",
+                window,
+                cx,
+            )
+        });
+        wait_for_prompt(&mut cx, "OK");
+        assert_eq!(run_git(root, &["rev-parse", "main"]), merged);
     }
 
     #[gpui::test]

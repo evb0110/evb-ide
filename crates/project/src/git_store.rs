@@ -7121,7 +7121,39 @@ impl Repository {
         env: HashMap<String, String>,
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<Result<String>> {
-        let receiver = self.git_command_job(status, args, env);
+        self.run_git_command_with_head_check(status, args, env, None, cx)
+    }
+
+    /// Runs a git command only if HEAD still points at `expected_sha` on `expected_ref` (`None`
+    /// when detached). The check runs in the same job as the command, so no other queued git
+    /// operation, such as a branch switch, can move HEAD between them.
+    pub fn run_git_command_at_head(
+        &mut self,
+        status: Option<SharedString>,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+        expected_sha: String,
+        expected_ref: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<Result<String>> {
+        self.run_git_command_with_head_check(
+            status,
+            args,
+            env,
+            Some((expected_sha, expected_ref)),
+            cx,
+        )
+    }
+
+    fn run_git_command_with_head_check(
+        &mut self,
+        status: Option<SharedString>,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+        expected_head: Option<(String, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<Result<String>> {
+        let receiver = self.git_command_job(status, args, env, expected_head);
 
         let scan_updates_tx =
             self.git_store()
@@ -7142,7 +7174,7 @@ impl Repository {
 
     /// Runs a git command that changes nothing, so no rescan follows it.
     pub fn read_git_command(&mut self, args: Vec<String>) -> oneshot::Receiver<Result<String>> {
-        self.git_command_job(None, args, HashMap::default())
+        self.git_command_job(None, args, HashMap::default(), None)
     }
 
     fn git_command_job(
@@ -7150,32 +7182,51 @@ impl Repository {
         status: Option<SharedString>,
         args: Vec<String>,
         env: HashMap<String, String>,
+        expected_head: Option<(String, Option<String>)>,
     ) -> oneshot::Receiver<Result<String>> {
-        self.send_job(
-            "run_git_command",
-            status,
-            move |git_repo, _| async move {
-                match git_repo {
-                    RepositoryState::Local(LocalRepositoryState {
-                        backend,
-                        environment,
-                        ..
-                    }) => {
-                        let mut command_environment = (*environment).clone();
-                        command_environment.insert("GIT_EDITOR".into(), "true".into());
-                        command_environment.insert("GIT_SEQUENCE_EDITOR".into(), "true".into());
-                        command_environment.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
-                        command_environment.extend(env);
-                        backend
-                            .run_command(args, Arc::new(command_environment))
+        self.send_job("run_git_command", status, move |git_repo, _| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => {
+                    if let Some((expected_sha, expected_ref)) = expected_head {
+                        let current_sha = backend
+                            .run_command(
+                                vec!["rev-parse".into(), "--verify".into(), "HEAD".into()],
+                                environment.clone(),
+                            )
+                            .await?;
+                        // `symbolic-ref -q` fails quietly on a detached HEAD.
+                        let current_ref = backend
+                            .run_command(
+                                vec!["symbolic-ref".into(), "-q".into(), "HEAD".into()],
+                                environment.clone(),
+                            )
                             .await
+                            .ok()
+                            .map(|current_ref| current_ref.trim().to_string())
+                            .filter(|current_ref| !current_ref.is_empty());
+                        anyhow::ensure!(
+                            current_sha.trim() == expected_sha && current_ref == expected_ref,
+                            "HEAD moved since the operation was confirmed; nothing was changed."
+                        );
                     }
-                    RepositoryState::Remote(_) => {
-                        anyhow::bail!("this git operation is only available for local projects")
-                    }
+                    let mut command_environment = (*environment).clone();
+                    command_environment.insert("GIT_EDITOR".into(), "true".into());
+                    command_environment.insert("GIT_SEQUENCE_EDITOR".into(), "true".into());
+                    command_environment.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+                    command_environment.extend(env);
+                    backend
+                        .run_command(args, Arc::new(command_environment))
+                        .await
                 }
-            },
-        )
+                RepositoryState::Remote(_) => {
+                    anyhow::bail!("this git operation is only available for local projects")
+                }
+            }
+        })
     }
 
     pub fn show(&mut self, commit: String) -> oneshot::Receiver<Result<CommitDetails>> {
