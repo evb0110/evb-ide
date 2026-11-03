@@ -789,9 +789,10 @@ fn blame_author_short_name(author: &str) -> &str {
 
 fn format_blame_date(timestamp: OffsetDateTime) -> String {
     let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    // Both in local time: on Linux the formatter compares calendar days for Today/Yesterday.
     time_format::format_date(
         timestamp.to_offset(local_offset),
-        OffsetDateTime::now_utc(),
+        OffsetDateTime::now_utc().to_offset(local_offset),
         false,
     )
 }

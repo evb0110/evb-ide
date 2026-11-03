@@ -3946,6 +3946,10 @@ impl GitPanel {
         if self.pending_commit.is_some() {
             return;
         }
+        // A collaboration guest commits on the host but cannot push.
+        if !self.can_push_and_pull(cx) {
+            return;
+        }
         let Some(repository_id) = self
             .active_repository
             .as_ref()
@@ -4198,7 +4202,19 @@ impl GitPanel {
                                 .active_repository
                                 .as_ref()
                                 .map(|repository| repository.read(cx).id);
-                            if active_repository_id == Some(repository_id) {
+                            if active_repository_id == Some(repository_id)
+                                && this.pending_remote_operation.is_some()
+                            {
+                                // Pushing now would be refused without a word.
+                                this.pull_request_after_push = None;
+                                this.show_error_toast(
+                                    "push",
+                                    anyhow::anyhow!(
+                                        "Committed, but another fetch, pull or push was running, so nothing was pushed; push when it finishes"
+                                    ),
+                                    cx,
+                                );
+                            } else if active_repository_id == Some(repository_id) {
                                 this.push(false, false, window, cx);
                             } else {
                                 this.pull_request_after_push = None;
@@ -6794,6 +6810,7 @@ impl GitPanel {
                 let signoff = self.signoff_enabled;
                 let skip_hooks = self.skip_hooks_enabled;
                 let can_create_pull_request = self.can_create_pull_request(cx);
+                let can_push = self.can_push_and_pull(cx);
 
                 move |window, cx| {
                     Some(ContextMenu::build(window, cx, |context_menu, _, _| {
@@ -6801,8 +6818,10 @@ impl GitPanel {
                             .when_some(keybinding_target.clone(), |el, keybinding_target| {
                                 el.context(keybinding_target)
                             })
-                            .action("Commit and Push…", Box::new(CommitAndPush))
-                            .when(can_create_pull_request, |menu| {
+                            .when(can_push, |menu| {
+                                menu.action("Commit and Push…", Box::new(CommitAndPush))
+                            })
+                            .when(can_push && can_create_pull_request, |menu| {
                                 menu.action(
                                     "Commit, Push and Create Pull Request…",
                                     Box::new(CommitPushAndCreatePullRequest),
