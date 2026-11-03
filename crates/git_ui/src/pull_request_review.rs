@@ -871,20 +871,38 @@ pub(crate) fn submit_review(
     let Some(review) = branch_review(&work_directory, cx) else {
         return;
     };
+    let Some(head_sha) = review.review.head_sha.clone() else {
+        return;
+    };
     let number = review.review.number;
     let verdict = |label: &'static str, verdict: ReviewVerdict, primary: bool| {
         let repository = review.repository.clone();
         let workspace = workspace.clone();
         let review = review.clone();
+        let head_sha = head_sha.clone();
         let run = move |body: String, window: &mut Window, cx: &mut App| -> bool {
+            // A push after the form opened would put the verdict on commits the user never saw.
+            let head_now = branch_review(&review.work_directory, cx)
+                .and_then(|current| current.review.head_sha.clone());
+            if head_now.as_deref() != Some(head_sha.as_str()) {
+                let error = stale_review_error(&review);
+                let workspace = workspace.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        show_error(&workspace, error.to_string(), cx)
+                    })
+                    .detach();
+                return false;
+            }
             let client = github_client(cx);
             let repository = repository.clone();
+            let head_sha = head_sha.clone();
             run_write(
                 workspace.clone(),
                 &review,
                 async move {
                     client
-                        .submit_review(&repository, number, verdict, &body)
+                        .submit_review(&repository, number, &head_sha, verdict, &body)
                         .await
                 },
                 window,
@@ -1189,6 +1207,13 @@ mod tests {
                     };
                     if uri.ends_with("/repos/evb0110/evb-ide") {
                         return Ok(json_response(200, json!({ "default_branch": "main" })));
+                    }
+                    // The base branch requires no checks.
+                    if uri.contains("/rules/branches/") {
+                        return Ok(json_response(200, json!([])));
+                    }
+                    if uri.contains("/branches/") {
+                        return Ok(json_response(200, json!({ "name": "main" })));
                     }
                     if uri.contains("/pulls?") {
                         return Ok(json_response(

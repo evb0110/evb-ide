@@ -26,6 +26,7 @@ const GH_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long requests to a host pause after a rate limit that names no reset time.
 const DEFAULT_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(60);
 const DEFAULT_BRANCH_TTL: Duration = Duration::from_secs(60 * 60);
+const REQUIRED_CHECKS_TTL: Duration = Duration::from_secs(10 * 60);
 const API_VERSION: &str = "2022-11-28";
 const USER_AGENT: &str = "evb-ide";
 
@@ -332,6 +333,7 @@ pub struct GitHubClient {
     slots: async_lock::Semaphore,
     paused_until: Mutex<HashMap<String, SystemTime>>,
     default_branches: Mutex<HashMap<(String, String, String), (Instant, String)>>,
+    required_checks: Mutex<HashMap<(String, String, String, String), (Instant, Vec<String>)>>,
 }
 
 impl GitHubClient {
@@ -347,6 +349,7 @@ impl GitHubClient {
             slots: async_lock::Semaphore::new(CONCURRENCY),
             paused_until: Mutex::new(HashMap::default()),
             default_branches: Mutex::new(HashMap::default()),
+            required_checks: Mutex::new(HashMap::default()),
         })
     }
 
@@ -600,54 +603,91 @@ impl GitHubClient {
             base_branch: pull.base.name.clone(),
             head_sha: Some(pull.head.sha.clone()),
             checks: Vec::new(),
+            checks_complete: true,
             mergeable: Mergeable::Unknown,
             review: None,
         };
-        let node = pull;
         if pull_request.state.is_open() {
-            let status: StatusQueryData = self
-                .graphql(
-                    &target.host,
-                    PULL_REQUEST_STATUS_QUERY,
-                    json!({
-                        "owner": target.owner,
-                        "name": target.name,
-                        "number": node.number,
-                        // An older Enterprise server may not know `isRequired`, and an
-                        // unknown field fails the whole read.
-                        "required": is_github_dot_com(&normalize_host(&target.host)),
-                    }),
-                )
-                .await?;
-            if let Some(status) = status
-                .repository
-                .and_then(|repository| repository.pull_request)
-            {
-                pull_request.mergeable = match status.mergeable.as_deref() {
-                    Some("MERGEABLE") => Mergeable::Mergeable,
-                    Some("CONFLICTING") => Mergeable::Conflicting,
-                    _ => Mergeable::Unknown,
+            // An older Enterprise server may not know `isRequired`, and GraphQL rejects a
+            // document naming an unknown field even behind `@include`.
+            let query = pull_request_status_query(is_github_dot_com(&normalize_host(&target.host)));
+            let mut contexts = Vec::new();
+            let mut commit_oid: Option<String> = None;
+            let mut after: Option<String> = None;
+            let mut complete = false;
+            for page in 0..STATUS_CONTEXT_PAGES {
+                let status: StatusQueryData = self
+                    .graphql(
+                        &target.host,
+                        &query,
+                        json!({
+                            "owner": target.owner,
+                            "name": target.name,
+                            "number": pull.number,
+                            "after": after,
+                        }),
+                    )
+                    .await?;
+                let Some(status) = status
+                    .repository
+                    .and_then(|repository| repository.pull_request)
+                else {
+                    complete = page == 0;
+                    break;
                 };
-                pull_request.review =
-                    status
-                        .review_decision
-                        .as_deref()
-                        .and_then(|decision| match decision {
-                            "APPROVED" => Some(ReviewDecision::Approved),
-                            "CHANGES_REQUESTED" => Some(ReviewDecision::ChangesRequested),
-                            "REVIEW_REQUIRED" => Some(ReviewDecision::ReviewRequired),
-                            _ => None,
-                        });
-                let contexts = status
+                if page == 0 {
+                    pull_request.mergeable = match status.mergeable.as_deref() {
+                        Some("MERGEABLE") => Mergeable::Mergeable,
+                        Some("CONFLICTING") => Mergeable::Conflicting,
+                        _ => Mergeable::Unknown,
+                    };
+                    pull_request.review =
+                        status
+                            .review_decision
+                            .as_deref()
+                            .and_then(|decision| match decision {
+                                "APPROVED" => Some(ReviewDecision::Approved),
+                                "CHANGES_REQUESTED" => Some(ReviewDecision::ChangesRequested),
+                                "REVIEW_REQUIRED" => Some(ReviewDecision::ReviewRequired),
+                                _ => None,
+                            });
+                }
+                let Some(commit) = status
                     .commits
                     .nodes
                     .into_iter()
                     .next()
-                    .and_then(|node| node.commit.status_check_rollup)
-                    .map(|rollup| rollup.contexts.nodes)
-                    .unwrap_or_default();
-                pull_request.checks = collapse_checks(contexts);
+                    .map(|node| node.commit)
+                else {
+                    complete = page == 0;
+                    break;
+                };
+                // A push between pages would mix the checks of two commits.
+                if page > 0 && commit_oid != commit.oid {
+                    break;
+                }
+                commit_oid = commit.oid.clone();
+                let Some(rollup) = commit.status_check_rollup else {
+                    complete = page == 0;
+                    break;
+                };
+                contexts.extend(rollup.contexts.nodes);
+                match rollup.contexts.page_info {
+                    Some(PageInfo {
+                        has_next_page: true,
+                        end_cursor: Some(cursor),
+                    }) => after = Some(cursor),
+                    _ => {
+                        complete = true;
+                        break;
+                    }
+                }
             }
+            let mut checks = collapse_checks(contexts);
+            let required_names = self.required_check_names(target, &pull.base.name).await;
+            add_required_checks(&mut checks, &required_names);
+            pull_request.checks = checks;
+            pull_request.checks_complete = complete;
         }
         Ok(BranchPullRequests {
             default_branch: Some(default_branch),
@@ -685,6 +725,118 @@ impl GitHubClient {
         Ok(read.default_branch)
     }
 
+    /// The names of the checks the base branch requires, from its rulesets and classic branch
+    /// protection. GitHub waits for a required check that never reports (a workflow skipped by a
+    /// path filter), which the pull request's own checks cannot show. A failed read leaves only
+    /// the checks that report themselves as required.
+    async fn required_check_names(
+        &self,
+        repository: &RepositoryLocator,
+        branch: &str,
+    ) -> Vec<String> {
+        #[derive(Deserialize)]
+        struct Rule {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            parameters: Option<RuleParameters>,
+        }
+        #[derive(Deserialize)]
+        struct RuleParameters {
+            #[serde(default)]
+            required_status_checks: Vec<RequiredCheck>,
+        }
+        #[derive(Deserialize)]
+        struct RequiredCheck {
+            context: String,
+        }
+        #[derive(Deserialize)]
+        struct Branch {
+            #[serde(default)]
+            protection: Option<Protection>,
+        }
+        #[derive(Deserialize)]
+        struct Protection {
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default)]
+            required_status_checks: Option<ProtectionChecks>,
+        }
+        #[derive(Deserialize)]
+        struct ProtectionChecks {
+            #[serde(default)]
+            enforcement_level: Option<String>,
+            #[serde(default)]
+            contexts: Vec<String>,
+        }
+
+        let key = (
+            normalize_host(&repository.host),
+            repository.owner.to_lowercase(),
+            repository.name.to_lowercase(),
+            branch.to_string(),
+        );
+        if let Some((read_at, names)) = self.required_checks.lock().get(&key)
+            && read_at.elapsed() < REQUIRED_CHECKS_TTL
+        {
+            return names.clone();
+        }
+        let branch_path = query_value(branch);
+        let mut names = Vec::new();
+        match self
+            .rest::<Vec<Rule>>(
+                &repository.host,
+                Method::GET,
+                &format!(
+                    "repos/{}/{}/rules/branches/{branch_path}",
+                    repository.owner, repository.name
+                ),
+                None,
+            )
+            .await
+        {
+            Ok(rules) => names.extend(
+                rules
+                    .into_iter()
+                    .filter(|rule| rule.kind == "required_status_checks")
+                    .filter_map(|rule| rule.parameters)
+                    .flat_map(|parameters| parameters.required_status_checks)
+                    .map(|check| check.context),
+            ),
+            Err(error) => log::warn!("Could not read the rules of {branch}: {error}"),
+        }
+        match self
+            .rest::<Branch>(
+                &repository.host,
+                Method::GET,
+                &format!(
+                    "repos/{}/{}/branches/{branch_path}",
+                    repository.owner, repository.name
+                ),
+                None,
+            )
+            .await
+        {
+            Ok(Branch {
+                protection:
+                    Some(Protection {
+                        enabled: true,
+                        required_status_checks: Some(checks),
+                    }),
+            }) if checks.enforcement_level.as_deref() != Some("off") => {
+                names.extend(checks.contexts)
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("Could not read the protection of {branch}: {error}"),
+        }
+        names.sort();
+        names.dedup();
+        self.required_checks
+            .lock()
+            .insert(key, (Instant::now(), names.clone()));
+        names
+    }
+
     pub async fn create_pull_request(
         &self,
         request: &NewPullRequest,
@@ -715,12 +867,33 @@ impl GitHubClient {
         .await
     }
 
-    /// The pull request's review threads with their first comments, page by page.
+    /// The pull request's review threads with their first comments, page by page. Thread lines
+    /// belong to the head commit, so a push between pages restarts the read.
     pub async fn review_threads(
         &self,
         repository: &RepositoryLocator,
         number: u64,
     ) -> Result<PullRequestReview, GitHubError> {
+        for _ in 0..REVIEW_THREAD_ATTEMPTS {
+            if let Some(review) = self.read_review_threads(repository, number).await? {
+                return Ok(review);
+            }
+        }
+        Err(GitHubError::Response {
+            host: normalize_host(&repository.host),
+            status: 0,
+            messages: vec![
+                "The pull request kept changing while its review was read; try again.".into(),
+            ],
+        })
+    }
+
+    /// One read of the review threads, or None when the head commit changed between pages.
+    async fn read_review_threads(
+        &self,
+        repository: &RepositoryLocator,
+        number: u64,
+    ) -> Result<Option<PullRequestReview>, GitHubError> {
         let mut review: Option<PullRequestReview> = None;
         let mut after: Option<String> = None;
         for _ in 0..REVIEW_THREAD_PAGES {
@@ -743,6 +916,12 @@ impl GitHubClient {
                     host: normalize_host(&repository.host),
                 })?;
             let page = pull_request.review_threads;
+            if review
+                .as_ref()
+                .is_some_and(|review| review.head_sha != pull_request.head_ref_oid)
+            {
+                return Ok(None);
+            }
             let review = review.get_or_insert_with(|| PullRequestReview {
                 pull_request_id: pull_request.id.clone(),
                 number,
@@ -760,7 +939,7 @@ impl GitHubClient {
                 _ => break,
             }
         }
-        review.ok_or_else(|| GitHubError::NotFound {
+        review.map(Some).ok_or_else(|| GitHubError::NotFound {
             host: normalize_host(&repository.host),
         })
     }
@@ -830,10 +1009,13 @@ impl GitHubClient {
         .map(drop)
     }
 
+    /// Reviews `commit_sha`, the head the user looked at; without it GitHub would review whatever
+    /// was pushed last.
     pub async fn submit_review(
         &self,
         repository: &RepositoryLocator,
         number: u64,
+        commit_sha: &str,
         verdict: ReviewVerdict,
         body: &str,
     ) -> Result<(), GitHubError> {
@@ -842,7 +1024,7 @@ impl GitHubClient {
             ReviewVerdict::Approve => "APPROVE",
             ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
         };
-        let mut request = json!({ "event": event });
+        let mut request = json!({ "event": event, "commit_id": commit_sha });
         if !body.is_empty() {
             request["body"] = Value::String(body.to_string());
         }
@@ -995,6 +1177,8 @@ pub struct PullRequest {
     pub base_branch: String,
     pub head_sha: Option<String>,
     pub checks: Vec<Check>,
+    /// False when some of the head commit's checks could not be read, so passing is unknown.
+    pub checks_complete: bool,
     pub mergeable: Mergeable,
     pub review: Option<ReviewDecision>,
 }
@@ -1013,9 +1197,10 @@ impl PullRequest {
             .checks
             .iter()
             .filter(|check| !required || check.required);
-        if gate
-            .clone()
-            .all(|check| check.status != CheckStatus::Pending)
+        if self.checks_complete
+            && gate
+                .clone()
+                .all(|check| check.status != CheckStatus::Pending)
         {
             ChecksSummary::Passed
         } else {
@@ -1051,44 +1236,59 @@ pub struct CreatedPullRequest {
     pub html_url: String,
 }
 
-const PULL_REQUEST_STATUS_QUERY: &str = r#"
-query PullRequestStatus($owner: String!, $name: String!, $number: Int!, $required: Boolean!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
+/// Bounds one status read: a hundred check contexts a page.
+const STATUS_CONTEXT_PAGES: usize = 10;
+
+fn pull_request_status_query(include_required: bool) -> String {
+    let required = if include_required {
+        "isRequired(pullRequestNumber: $number)"
+    } else {
+        ""
+    };
+    format!(
+        r#"
+query PullRequestStatus($owner: String!, $name: String!, $number: Int!, $after: String) {{
+  repository(owner: $owner, name: $name) {{
+    pullRequest(number: $number) {{
       mergeable
       reviewDecision
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: 100) {
-                nodes {
-                  ... on StatusContext {
+      commits(last: 1) {{
+        nodes {{
+          commit {{
+            oid
+            statusCheckRollup {{
+              contexts(first: 100, after: $after) {{
+                pageInfo {{ hasNextPage endCursor }}
+                nodes {{
+                  ... on StatusContext {{
                     context
                     state
                     targetUrl
                     createdAt
-                    isRequired(pullRequestNumber: $number) @include(if: $required)
-                  }
-                  ... on CheckRun {
+                    {required}
+                  }}
+                  ... on CheckRun {{
                     name
                     status
                     conclusion
                     detailsUrl
                     startedAt
                     completedAt
-                    isRequired(pullRequestNumber: $number) @include(if: $required)
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
+                    checkSuite {{ app {{ slug }} }}
+                    {required}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+    )
 }
-"#;
 
 #[derive(Deserialize)]
 struct Nodes<T> {
@@ -1204,12 +1404,33 @@ struct CommitNode {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusCommit {
+    #[serde(default)]
+    oid: Option<String>,
     status_check_rollup: Option<Rollup>,
 }
 
 #[derive(Deserialize)]
 struct Rollup {
-    contexts: Nodes<CheckNode>,
+    contexts: CheckContexts,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckContexts {
+    #[serde(default)]
+    page_info: Option<PageInfo>,
+    #[serde(default = "Vec::new")]
+    nodes: Vec<CheckNode>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CheckSuite {
+    app: Option<CheckApp>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CheckApp {
+    slug: Option<String>,
 }
 
 /// A `CheckRun` or a `StatusContext`; the other variant's fields stay empty.
@@ -1227,6 +1448,7 @@ struct CheckNode {
     completed_at: Option<String>,
     created_at: Option<String>,
     is_required: Option<bool>,
+    check_suite: Option<CheckSuite>,
 }
 
 /// GitHub's sentinel for timestamps not reached yet.
@@ -1256,10 +1478,12 @@ fn check_status(node: &CheckNode) -> CheckStatus {
     }
 }
 
-/// One entry per check name: a run still going outranks finished runs of the same check (a push
-/// and a pull request workflow can both report it), else the latest finished run wins.
+/// One entry per check: a run still going outranks finished runs of the same check (a push and a
+/// pull request workflow can both report it), else the latest finished run wins. A check is its
+/// name together with the app reporting it, or a commit status: two apps' checks of one name are
+/// different checks.
 fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
-    let mut latest: Vec<(Check, Option<String>)> = Vec::new();
+    let mut latest: Vec<(Check, CheckIdentity, Option<String>)> = Vec::new();
     for node in nodes {
         let Some(name) = node
             .name
@@ -1271,6 +1495,14 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
             continue;
         };
         let status = check_status(&node);
+        let identity = CheckIdentity {
+            is_status: node.context.is_some() && node.name.is_none(),
+            app: node
+                .check_suite
+                .as_ref()
+                .and_then(|suite| suite.app.as_ref())
+                .and_then(|app| app.slug.clone()),
+        };
         let at = [&node.completed_at, &node.started_at, &node.created_at]
             .into_iter()
             .flatten()
@@ -1282,11 +1514,10 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
             required: node.is_required.unwrap_or(false),
             url: node.details_url.or(node.target_url),
         };
-        match latest
-            .iter_mut()
-            .find(|(existing, _)| existing.name == check.name)
-        {
-            Some((existing, existing_at)) => {
+        match latest.iter_mut().find(|(existing, existing_identity, _)| {
+            existing.name == check.name && *existing_identity == identity
+        }) {
+            Some((existing, _, existing_at)) => {
                 let required = existing.required || check.required;
                 let replaces = match (
                     existing.status == CheckStatus::Pending,
@@ -1302,14 +1533,41 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
                 }
                 existing.required = required;
             }
-            None => latest.push((check, at)),
+            None => latest.push((check, identity, at)),
         }
     }
-    latest.into_iter().map(|(check, _)| check).collect()
+    latest.into_iter().map(|(check, _, _)| check).collect()
+}
+
+#[derive(PartialEq)]
+struct CheckIdentity {
+    is_status: bool,
+    app: Option<String>,
+}
+
+/// Marks the checks the base branch requires, and adds the required ones that have not reported
+/// yet as pending, as GitHub waits for them.
+fn add_required_checks(checks: &mut Vec<Check>, required_names: &[String]) {
+    for name in required_names {
+        let mut found = false;
+        for check in checks.iter_mut().filter(|check| &check.name == name) {
+            check.required = true;
+            found = true;
+        }
+        if !found {
+            checks.push(Check {
+                name: name.clone(),
+                status: CheckStatus::Pending,
+                required: true,
+                url: None,
+            });
+        }
+    }
 }
 
 /// Bounds one read: a hundred threads a page, comments limited per thread.
 const REVIEW_THREAD_PAGES: usize = 5;
+const REVIEW_THREAD_ATTEMPTS: usize = 2;
 
 /// Only ten comments ride with each thread: a hundred threads times a hundred comments made
 /// GitHub charge a hundred points for one read.
@@ -1757,6 +2015,11 @@ mod tests {
                 json!({ "context": "ci/legacy", "state": "SUCCESS", "targetUrl": "https://ci.example.com/1" }),
             ),
             check(json!({ "name": "  " })),
+            // Another app's check of the same name is a different check.
+            check(
+                json!({ "name": "test", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-31T12:00:00Z", "checkSuite": { "app": { "slug": "other-ci" } } }),
+            ),
+            check(json!({ "context": "test", "state": "PENDING" })),
         ]);
         assert_eq!(
             checks,
@@ -1779,8 +2042,22 @@ mod tests {
                     required: false,
                     url: Some("https://ci.example.com/1".into()),
                 },
+                Check {
+                    name: "test".into(),
+                    status: CheckStatus::Failure,
+                    required: false,
+                    url: None,
+                },
+                Check {
+                    name: "test".into(),
+                    status: CheckStatus::Pending,
+                    required: false,
+                    url: None,
+                },
             ]
         );
+        assert!(pull_request_status_query(true).contains("isRequired"));
+        assert!(!pull_request_status_query(false).contains("isRequired"));
 
         let pull_request = |checks: Vec<Check>| PullRequest {
             number: 1,
@@ -1790,6 +2067,7 @@ mod tests {
             base_branch: "main".into(),
             head_sha: None,
             checks,
+            checks_complete: true,
             mergeable: Mergeable::Unknown,
             review: None,
         };
@@ -1799,13 +2077,42 @@ mod tests {
             required,
             url: None,
         };
+        // The other app's failing `test` is not hidden by the first app's success.
         assert_eq!(
             pull_request(checks).checks_summary(),
-            ChecksSummary::Pending
+            ChecksSummary::Failed
         );
         assert_eq!(
             pull_request(Vec::new()).checks_summary(),
             ChecksSummary::None
+        );
+        // Checks that could not all be read cannot pass, but a failure among them still fails.
+        let partial = |checks: Vec<Check>| PullRequest {
+            checks_complete: false,
+            ..pull_request(checks)
+        };
+        assert_eq!(
+            partial(vec![named("a", CheckStatus::Success, false)]).checks_summary(),
+            ChecksSummary::Pending
+        );
+        assert_eq!(
+            partial(vec![named("a", CheckStatus::Failure, false)]).checks_summary(),
+            ChecksSummary::Failed
+        );
+        // A required check that never reported keeps the pull request pending, and a reported
+        // one becomes required even when GitHub did not say so.
+        let mut checks = vec![named("build", CheckStatus::Success, false)];
+        add_required_checks(&mut checks, &["build".to_string(), "security".to_string()]);
+        assert_eq!(
+            checks,
+            vec![
+                named("build", CheckStatus::Success, true),
+                named("security", CheckStatus::Pending, true),
+            ]
+        );
+        assert_eq!(
+            pull_request(checks).checks_summary(),
+            ChecksSummary::Pending
         );
         // Only required checks gate passing; an advisory one still running does not.
         assert_eq!(
@@ -1891,7 +2198,7 @@ mod tests {
                                 "reviewDecision": "APPROVED",
                                 "commits": { "nodes": [{ "commit": { "statusCheckRollup": {
                                     "contexts": { "nodes": [
-                                        { "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://ci/1", "isRequired": true },
+                                        { "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://ci/1" },
                                         {}
                                     ] }
                                 } } }] }
@@ -1899,7 +2206,20 @@ mod tests {
                         ));
                     }
                     requests.lock().push(uri.clone());
-                    Ok(if uri.contains("/pulls?") {
+                    Ok(if uri.contains("/rules/branches/") {
+                        json_response(
+                            200,
+                            json!([
+                                { "type": "deletion" },
+                                { "type": "required_status_checks", "parameters": { "required_status_checks": [{ "context": "build" }] } }
+                            ]),
+                        )
+                    } else if uri.contains("/branches/") {
+                        json_response(
+                            200,
+                            json!({ "name": "main", "protection": { "enabled": false, "required_status_checks": { "enforcement_level": "off", "contexts": ["never"] } } }),
+                        )
+                    } else if uri.contains("/pulls?") {
                         json_response(
                             200,
                             json!([
@@ -1923,16 +2243,27 @@ mod tests {
         assert_eq!(pull_request.mergeable, Mergeable::Conflicting);
         assert_eq!(pull_request.review, Some(ReviewDecision::Approved));
         assert_eq!(pull_request.checks_summary(), ChecksSummary::Passed);
-        // The default branch is read once and kept.
+        // The base branch's rules made `build` required; disabled protection added nothing.
+        assert_eq!(
+            pull_request
+                .checks
+                .iter()
+                .map(|check| (check.name.as_str(), check.required))
+                .collect::<Vec<_>>(),
+            vec![("build", true)]
+        );
+        // The default branch and the required checks are read once and kept.
         client.branch_pull_request(&branch).await.unwrap();
         assert_eq!(
             *requests.lock(),
             vec![
                 "https://api.github.com/repos/evb0110/evb-ide".to_string(),
                 "https://api.github.com/repos/evb0110/evb-ide/pulls?state=all&sort=updated&direction=desc&per_page=100&head=evb0110:feature%2Fone".to_string(),
-                json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "required": true }).to_string(),
+                json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "after": null }).to_string(),
+                "https://api.github.com/repos/evb0110/evb-ide/rules/branches/main".to_string(),
+                "https://api.github.com/repos/evb0110/evb-ide/branches/main".to_string(),
                 "https://api.github.com/repos/evb0110/evb-ide/pulls?state=all&sort=updated&direction=desc&per_page=100&head=evb0110:feature%2Fone".to_string(),
-                json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "required": true }).to_string(),
+                json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "after": null }).to_string(),
             ]
         );
     }
@@ -2076,6 +2407,39 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn rereads_review_threads_after_a_push_between_pages(cx: &mut gpui::TestAppContext) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let http = FakeHttpClient::create({
+            let calls = calls.clone();
+            move |_| {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    // The second page arrives after a push; the reread sees one page at the new head.
+                    let (head, page_info) = match call {
+                        0 => (
+                            "old",
+                            json!({ "hasNextPage": true, "endCursor": "cursor-1" }),
+                        ),
+                        _ => ("new", json!({ "hasNextPage": false, "endCursor": null })),
+                    };
+                    Ok(json_response(
+                        200,
+                        json!({ "data": { "repository": { "pullRequest": {
+                            "id": "PR_node",
+                            "headRefOid": head,
+                            "reviewThreads": { "pageInfo": page_info, "nodes": [] }
+                        } } } }),
+                    ))
+                }
+            }
+        });
+        let client = GitHubClient::new(http, Arc::new(FixedToken), cx.executor());
+        let review = client.review_threads(&locator("o", "r"), 7).await.unwrap();
+        assert_eq!(review.head_sha.as_deref(), Some("new"));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[gpui::test]
     async fn sends_review_writes(cx: &mut gpui::TestAppContext) {
         let sent = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
         let http = FakeHttpClient::create({
@@ -2136,7 +2500,7 @@ mod tests {
             .await
             .unwrap();
         client
-            .submit_review(&repository, 7, ReviewVerdict::Approve, "")
+            .submit_review(&repository, 7, "head", ReviewVerdict::Approve, "")
             .await
             .unwrap();
         let sent = sent.lock().clone();
@@ -2161,7 +2525,7 @@ mod tests {
             sent[4],
             (
                 "https://api.github.com/repos/o/r/pulls/7/reviews".to_string(),
-                json!({ "event": "APPROVE" })
+                json!({ "event": "APPROVE", "commit_id": "head" })
             )
         );
     }

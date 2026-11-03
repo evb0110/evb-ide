@@ -660,6 +660,13 @@ mod capture {
             if uri.ends_with("/repos/trailmap-app/trailmap") {
                 return Ok(respond(json!({ "default_branch": "main" }))?);
             }
+            // The base branch requires no checks.
+            if uri.contains("/rules/branches/") {
+                return Ok(respond(json!([]))?);
+            }
+            if uri.contains("/branches/") {
+                return Ok(respond(json!({ "name": "main" }))?);
+            }
             if uri.contains("/pulls?") {
                 let pulls = if PULL_REQUEST_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
                     json!([{

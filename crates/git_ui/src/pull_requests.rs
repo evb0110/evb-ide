@@ -1343,6 +1343,13 @@ pub(crate) mod tests {
                     if uri.ends_with("/repos/evb0110/evb-ide") {
                         return Ok(json_response(200, json!({ "default_branch": "main" })));
                     }
+                    // The base branch requires no checks.
+                    if uri.contains("/rules/branches/") {
+                        return Ok(json_response(200, json!([])));
+                    }
+                    if uri.contains("/branches/") {
+                        return Ok(json_response(200, json!({ "name": "main" })));
+                    }
                     if uri.contains("/pulls?") {
                         // The exact head: the branch on its push remote's owner.
                         assert!(
