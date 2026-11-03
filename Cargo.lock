@@ -13520,6 +13520,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "ui",
+ "util",
  "windows 0.62.2",
  "workspace",
  "zed_actions",

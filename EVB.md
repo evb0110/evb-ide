@@ -131,7 +131,7 @@ cargo run -p zed --bin evb-visual-capture --features visual-tests
 `evb-visual-capture` opens EVB IDE in hidden, unfocused windows on a throwaway
 git project and writes screenshots of the workspace, the run configuration
 menu, a running and a stopped `npm run dev`, the Commit panel, the git log,
-both themes, the blame column with its menus, and the pull request indicator, its menu, review threads in the editor, the Create Pull Request form (against a fake GitHub) and two projects as window tabs to `target/evb_captures` (or `EVB_CAPTURE_DIR`).
+both themes, the blame column with its menus, and the pull request indicator, its menu, review threads in the editor, the Create Pull Request form (against a fake GitHub) and three projects as window tabs (two with the same name) in the IntelliJ themes and One Light to `target/evb_captures` (or `EVB_CAPTURE_DIR`).
 
 ## Updating the themes
 

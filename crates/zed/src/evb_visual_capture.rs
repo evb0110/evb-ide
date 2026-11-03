@@ -564,9 +564,19 @@ mod capture {
         let second_project = create_project(&second_project_path, &app_state, &mut cx)?;
         let second_window: AnyWindowHandle =
             open_window(second_project, &app_state, &mut cx)?.into();
+        // A second checkout with the first project's name, which its tab tells apart by folder.
+        let third_project_path = project_path
+            .parent()
+            .context("the fixture project has no parent folder")?
+            .join("archive")
+            .join("trailmap");
+        std::fs::create_dir_all(&third_project_path)?;
+        std::fs::write(third_project_path.join("README.md"), "# Trailmap\n")?;
+        let third_project = create_project(&third_project_path, &app_state, &mut cx)?;
+        let third_window: AnyWindowHandle = open_window(third_project, &app_state, &mut cx)?.into();
         settle(&mut cx, 5);
         cx.update(|cx| {
-            let tabs = [any_window, second_window]
+            let tabs = [any_window, second_window, third_window]
                 .into_iter()
                 .filter_map(|handle| {
                     handle
@@ -581,6 +591,35 @@ mod capture {
         });
         settle(&mut cx, 5);
         save(&mut cx, any_window, &output_dir, "20-project-tabs")?;
+        for (theme, name) in [
+            ("IntelliJ Dark", "20-project-tabs-dark"),
+            ("One Light", "20-project-tabs-one-light"),
+        ] {
+            set_theme(&mut cx, theme);
+            settle(&mut cx, 3);
+            save(&mut cx, any_window, &output_dir, name)?;
+        }
+        // Hovering an inactive tab shows its close button.
+        cx.simulate_mouse_move(
+            any_window,
+            point(px(170.), px(47.)),
+            None,
+            Default::default(),
+        );
+        settle(&mut cx, 3);
+        save(
+            &mut cx,
+            any_window,
+            &output_dir,
+            "20-project-tabs-one-light-hover",
+        )?;
+        cx.simulate_mouse_move(
+            any_window,
+            point(px(1000.), px(600.)),
+            None,
+            Default::default(),
+        );
+        set_theme(&mut cx, "IntelliJ Light");
 
         println!("Captures written to {}", output_dir.display());
         Ok(())
