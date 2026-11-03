@@ -50,7 +50,7 @@
             </a>
             <p class="installer-note">
               <span class="installer-requirement">{{ platformNote.requirement }}</span>
-              <span
+              <span v-if="platformNote.action"
                 >{{ platformNote.action }} <code v-if="platformNote.file">{{ platformNote.file }}</code></span
               >
             </p>
@@ -88,7 +88,6 @@
           title="EVB IDE"
           label="EVB IDE running a project script, showing the Git Log, a pull request review thread and blame"
         />
-        <p class="film-caption">Recorded in the real app, with a sample Nuxt project.</p>
       </div>
     </section>
 
@@ -126,7 +125,7 @@ interface IFeature {
 
 interface IPlatformNote {
   requirement: string;
-  action: string;
+  action?: string;
   file?: string;
 }
 
@@ -139,7 +138,7 @@ const { data, error, status } = await useFetch("/api/releases/latest");
 const release = computed(() => data.value?.release);
 const platformLabels: Record<TPlatform, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
 const platformNotes: Record<TPlatform, IPlatformNote> = {
-  macos: { requirement: "macOS 12 or later", action: "Drag EVB IDE from the disk image to Applications" },
+  macos: { requirement: "macOS 12 or later" },
   linux: {
     requirement: "glibc 2.35 or later, such as Ubuntu 22.04",
     action: "Extract the archive and run",
@@ -448,13 +447,6 @@ function formatSize(size: number) {
 
 .installer-links a {
   color: var(--site-accent);
-}
-
-.film-caption {
-  margin-top: 10px;
-  color: var(--site-muted);
-  font-size: 13px;
-  text-align: center;
 }
 
 .section {
