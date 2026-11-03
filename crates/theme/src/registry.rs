@@ -318,11 +318,17 @@ impl ThemeRegistry {
 
         let icon_theme_family = deserialize_icon_theme(&contents)?;
         let resolve_icon_path = |path: SharedString| {
-            icons_root_dir
-                .join(path.as_ref())
-                .to_string_lossy()
-                .to_string()
-                .into()
+            if bundled {
+                // A bundled theme's icons are embedded assets, whose keys use `/` on every
+                // platform; `Path::join` would put a `\` after the root on Windows.
+                format!("{}/{path}", icons_root_dir.to_string_lossy()).into()
+            } else {
+                icons_root_dir
+                    .join(path.as_ref())
+                    .to_string_lossy()
+                    .to_string()
+                    .into()
+            }
         };
 
         let default_icon_theme = default_icon_theme();

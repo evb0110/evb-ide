@@ -124,14 +124,23 @@ if [ "$here" != "$target" ]; then
     mkdir -p "$HOME/.local"
     cp -R "$here" "$target"
 fi
-mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+mkdir -p "$HOME/.local/bin" "$data_home/applications"
 ln -sf "$target/bin/evb-ide" "$HOME/.local/bin/evb-ide"
 for size in 512 1024; do
-    mkdir -p "$HOME/.local/share/icons/hicolor/${size}x${size}/apps"
-    cp "$target/share/icons/hicolor/${size}x${size}/apps/evb-ide.png" "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/"
+    mkdir -p "$data_home/icons/hicolor/${size}x${size}/apps"
+    cp "$target/share/icons/hicolor/${size}x${size}/apps/evb-ide.png" "$data_home/icons/hicolor/${size}x${size}/apps/"
 done
-sed "s|^TryExec=evb-ide|TryExec=$target/bin/evb-ide|; s|^Exec=evb-ide|Exec=$target/bin/evb-ide|" \
-    "$target/share/applications/dev.evb.EVB-IDE.desktop" > "$HOME/.local/share/applications/dev.evb.EVB-IDE.desktop"
+# Desktop entries split Exec at spaces, so the program is quoted; inside the quotes ", `, $ and \
+# take a backslash, which the file format then doubles, like any other backslash in a value.
+program="$target/bin/evb-ide"
+EXEC_PROGRAM="$(printf '%s' "$program" | sed 's/[\\"`$]/\\\\&/g')" \
+TRY_EXEC="$(printf '%s' "$program" | sed 's/\\/\\\\/g')" \
+    awk '
+        /^TryExec=evb-ide$/ { print "TryExec=" ENVIRON["TRY_EXEC"]; next }
+        /^Exec=evb-ide/ { sub(/^Exec=evb-ide/, ""); print "Exec=\"" ENVIRON["EXEC_PROGRAM"] "\"" $0; next }
+        { print }
+    ' "$target/share/applications/dev.evb.EVB-IDE.desktop" > "$data_home/applications/dev.evb.EVB-IDE.desktop"
 echo "EVB IDE is installed. Run evb-ide, or open it from the applications menu."
 INSTALL
 chmod +x "$app_dir/install.sh"
