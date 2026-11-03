@@ -57,8 +57,10 @@ app_path="$out_dir/$app_name.app"
 rm -rf "$app_path"
 mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 
-cp "target/release/$executable" "$app_path/Contents/MacOS/$executable"
-cp "target/release/cli" "$app_path/Contents/MacOS/cli"
+# Cargo builds where CARGO_TARGET_DIR says, when it is set.
+target_dir="${CARGO_TARGET_DIR:-target}"
+cp "$target_dir/release/$executable" "$app_path/Contents/MacOS/$executable"
+cp "$target_dir/release/cli" "$app_path/Contents/MacOS/cli"
 licenses_dir="$app_path/Contents/Resources/licenses"
 mkdir -p "$licenses_dir"
 cp LICENSE-GPL LICENSE-APACHE NOTICE.md assets/licenses.md "$licenses_dir/"
@@ -129,10 +131,10 @@ signing_options=()
 if [[ "$signing_identity" != - ]]; then
     signing_options=(--options runtime --timestamp)
 fi
-codesign --force --sign "$signing_identity" "${signing_options[@]}" "$app_path/Contents/MacOS/cli"
-codesign --force --sign "$signing_identity" "${signing_options[@]}" --entitlements crates/zed/resources/zed.entitlements \
+codesign --force --sign "$signing_identity" ${signing_options[@]+"${signing_options[@]}"} "$app_path/Contents/MacOS/cli"
+codesign --force --sign "$signing_identity" ${signing_options[@]+"${signing_options[@]}"} --entitlements crates/zed/resources/zed.entitlements \
     "$app_path/Contents/MacOS/$executable"
-codesign --force --sign "$signing_identity" "${signing_options[@]}" --entitlements crates/zed/resources/zed.entitlements "$app_path"
+codesign --force --sign "$signing_identity" ${signing_options[@]+"${signing_options[@]}"} --entitlements crates/zed/resources/zed.entitlements "$app_path"
 codesign --verify --strict "$app_path"
 echo "Assembled $app_path"
 

@@ -52,11 +52,21 @@ if [[ "$publish" == true ]]; then
     git fetch --quiet origin main
     remote_commit="$(git rev-parse FETCH_HEAD)"
     git merge-base --is-ancestor "$commit" "$remote_commit" || { echo 'Push this commit to origin/main before publishing.' >&2; exit 1; }
-    # Archives for other systems, built elsewhere, join when SHA256SUMS lists them.
-    shopt -s nullglob
-    other_systems=("$output"/EVB-IDE-"$version"-linux-*.tar.gz "$output"/EVB-IDE-"$version"-windows-*.zip)
-    shopt -u nullglob
+    # The latest release is what installed copies update to, so it never goes back. This runs
+    # here, just before publishing, for the workflow and for a local publication alike.
+    latest="$(gh release view --repo evb0110/evb-ide --json tagName --jq '.tagName | ltrimstr("v")')"
+    if [[ "$version" == "$latest" || "$(printf '%s\n%s\n' "$latest" "$version" | sort -V | tail -n 1)" != "$version" ]]; then
+        echo "EVB_VERSION $version must be newer than the latest release $latest." >&2
+        exit 1
+    fi
+    # Upstream Zed's tags share these names. An existing tag elsewhere would carry this release
+    # (and its source downloads) on another commit, so it must point here already.
+    tagged="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk '{ print $1 }' | tail -n 1)"
+    [[ -z "$tagged" || "$tagged" == "$commit" ]] || { echo "Tag $tag already exists on GitHub at $tagged, not $commit." >&2; exit 1; }
+    # Every release ships all three systems: an installed copy updates only to its own archive.
+    other_systems=("$output/EVB-IDE-$version-linux-x64.tar.gz" "$output/EVB-IDE-$version-windows-x64.zip")
     for archive in "${other_systems[@]}"; do
+        [[ -f "$archive" ]] || { echo "Missing $(basename "$archive"): add the Linux and Windows archives first." >&2; exit 1; }
         grep -q "  $(basename "$archive")\$" "$output/SHA256SUMS" || { echo "SHA256SUMS does not list $(basename "$archive")." >&2; exit 1; }
     done
     gh release create "$tag" --repo evb0110/evb-ide --target "$commit" --draft \

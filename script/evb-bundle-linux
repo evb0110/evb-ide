@@ -55,12 +55,14 @@ out_dir="target/evb-bundle"
 app_dir="$out_dir/evb-ide"
 rm -rf "$app_dir"
 mkdir -p "$app_dir/bin" "$app_dir/libexec" "$app_dir/lib" "$app_dir/licenses"
-"$objcopy" --strip-unneeded target/release/evb-ide "$app_dir/libexec/evb-ide-editor"
-"$objcopy" --strip-debug --discard-all target/release/cli "$app_dir/bin/evb-ide"
+# Cargo builds where CARGO_TARGET_DIR says, when it is set.
+target_dir="${CARGO_TARGET_DIR:-target}"
+"$objcopy" --strip-unneeded "$target_dir/release/evb-ide" "$app_dir/libexec/evb-ide-editor"
+"$objcopy" --strip-debug --discard-all "$target_dir/release/cli" "$app_dir/bin/evb-ide"
 
 # Bundle libraries newer distributions might lack, as upstream does, but never the C runtime,
 # ALSA or the GLib family: libraries the host loads at run time are built against its own.
-ldd target/release/evb-ide | cut -d' ' -f3 \
+ldd "$target_dir/release/evb-ide" | cut -d' ' -f3 \
     | grep -v '\<\(libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' \
     | grep -v '\<\(libglib-2.0.so\|libgobject-2.0.so\|libgio-2.0.so\|libgmodule-2.0.so\|libpcre.so\|libpcre2-8.so\|libmount.so\|libblkid.so\|libselinux.so\|libffi.so\|libresolv.so\|libz.so\)' \
     | grep '^/' | xargs -r cp -t "$app_dir/lib"
