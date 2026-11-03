@@ -2614,8 +2614,9 @@ mod tests {
             .unwrap();
     }
 
+    // EVB IDE: with projects in their own windows, opening an open project switches to it.
     #[gpui::test]
-    async fn test_e2e_new_window_setting_opens_project_root_in_new_window(cx: &mut TestAppContext) {
+    async fn test_e2e_new_window_setting_reuses_an_open_project_root(cx: &mut TestAppContext) {
         let app_state = init_test(cx);
 
         app_state
@@ -2662,7 +2663,7 @@ mod tests {
             !prompt_shown,
             "no prompt should be shown when setting already configured"
         );
-        assert_eq!(cx.windows().len(), 2);
+        assert_eq!(cx.windows().len(), 1);
     }
 
     #[gpui::test]

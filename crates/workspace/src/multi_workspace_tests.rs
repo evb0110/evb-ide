@@ -357,6 +357,13 @@ async fn test_opening_an_open_project_in_new_window_activates_its_window(cx: &mu
     assert_eq!(opened, workspace_a);
     assert_eq!(cx.update(|cx| cx.windows().len()), 2);
 
+    // A symlink to an open project is the same project.
+    fs.insert_symlink(path!("/link_a"), PathBuf::from(path!("/project_a")))
+        .await;
+    let opened = open_from_window_b(path!("/link_a"), cx).await.unwrap();
+    assert_eq!(opened, workspace_a);
+    assert_eq!(cx.update(|cx| cx.windows().len()), 2);
+
     let opened = open_from_window_b(path!("/project_c"), cx).await.unwrap();
     assert_ne!(opened, workspace_a);
     assert_ne!(opened, workspace_b);

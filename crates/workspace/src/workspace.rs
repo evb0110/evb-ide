@@ -4092,9 +4092,10 @@ impl Workspace {
         cx.spawn(async move |_, cx| {
             // Opening a project that is already open brings its window (its tab, with system
             // window tabs) to the front instead of opening it a second time.
+            let requested_roots = canonical_paths(&paths, app_state.fs.as_ref()).await;
             if open_mode == OpenMode::NewWindow
                 && let Some((window, workspace)) =
-                    cx.update(|cx| local_workspace_with_root_paths(&paths, cx))
+                    cx.update(|cx| local_workspace_with_root_paths(&requested_roots, cx))
             {
                 window.update(cx, |multi_workspace, window, cx| {
                     window.activate_window();
@@ -11168,6 +11169,8 @@ fn preferred_target_for_files(host: &ProjectHost<'_>, cx: &App) -> Option<Worksp
     }
 }
 
+/// The open local workspace with exactly these roots. A collaborator's shared project has no
+/// remote connection either, but its roots are paths on the host's machine.
 fn local_workspace_with_root_paths(
     paths: &[PathBuf],
     cx: &App,
@@ -11183,9 +11186,18 @@ fn local_workspace_with_root_paths(
             let workspace = window
                 .read(cx)
                 .ok()?
-                .workspace_for_paths(&path_list, None, cx)?;
+                .workspace_for_paths(&path_list, None, cx)
+                .filter(|workspace| workspace.read(cx).project().read(cx).is_local())?;
             Some((window, workspace))
         })
+}
+
+async fn canonical_paths(paths: &[PathBuf], fs: &dyn Fs) -> Vec<PathBuf> {
+    let mut canonical = Vec::with_capacity(paths.len());
+    for path in paths {
+        canonical.push(fs.canonicalize(path).await.unwrap_or_else(|_| path.clone()));
+    }
+    canonical
 }
 
 pub fn find_existing_workspace(
@@ -11217,6 +11229,15 @@ pub fn find_existing_workspace(
                             WorkspaceMatching::None => None,
                             WorkspaceMatching::MatchExact => {
                                 project.visibility_for_paths(abs_paths, true, cx)
+                            }
+                            // Opening a project that is already open switches to it, so its own
+                            // roots match too, not only paths inside them.
+                            WorkspaceMatching::MatchSubpaths
+                                if !abs_paths.is_empty()
+                                    && PathList::new(&workspace_ref.root_paths(cx))
+                                        == PathList::new(abs_paths) =>
+                            {
+                                Some(true)
                             }
                             WorkspaceMatching::MatchSubpaths => {
                                 project.visibility_for_subpaths(abs_paths, cx)
@@ -11479,8 +11500,10 @@ pub fn open_paths(
         .find_map(|p| util::paths::WslPath::from_path(p));
 
     cx.spawn(async move |cx| {
+        // Workspace roots are canonical, so a path through a symlink must be too to match one.
+        let canonical_paths = canonical_paths(&abs_paths, app_state.fs.as_ref()).await;
         let mut reuse_target =
-            find_existing_workspace(&abs_paths, &open_options, &ProjectHost::Local, cx);
+            find_existing_workspace(&canonical_paths, &open_options, &ProjectHost::Local, cx);
 
         let mut creation_window = open_options.requesting_window;
 

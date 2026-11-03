@@ -179,25 +179,29 @@ impl SystemWindowTabs {
                 SystemWindowTabController::init(cx);
             }
 
-            cx.windows().iter().for_each(|handle| {
-                handle
-                    .update(cx, |_, window, cx| {
-                        window.set_tabbing_identifier(tabbing_identifier.clone());
-                        if use_system_window_tabs {
-                            let tabs = if let Some(tabs) = window.tabbed_windows() {
-                                tabs
-                            } else {
-                                vec![SystemWindowTab::new(
-                                    SharedString::from(window.window_title()),
-                                    window.window_handle(),
-                                )]
-                            };
+            // Only project windows are tabs of one another; Settings and other windows stay apart.
+            cx.windows()
+                .iter()
+                .filter(|handle| handle.downcast::<MultiWorkspace>().is_some())
+                .for_each(|handle| {
+                    handle
+                        .update(cx, |_, window, cx| {
+                            window.set_tabbing_identifier(tabbing_identifier.clone());
+                            if use_system_window_tabs {
+                                let tabs = if let Some(tabs) = window.tabbed_windows() {
+                                    tabs
+                                } else {
+                                    vec![SystemWindowTab::new(
+                                        SharedString::from(window.window_title()),
+                                        window.window_handle(),
+                                    )]
+                                };
 
-                            SystemWindowTabController::add_tab(cx, handle.window_id(), tabs);
-                        }
-                    })
-                    .log_err();
-            });
+                                SystemWindowTabController::add_tab(cx, handle.window_id(), tabs);
+                            }
+                        })
+                        .log_err();
+                });
         })
         .detach();
 
