@@ -310,10 +310,11 @@ fn historical_working_copy(editor: &Editor, cx: &App) -> Option<ProjectPath> {
         .repository
         .as_ref()?
         .upgrade()?;
-    let workspace = editor.workspace()?;
+    // The editor's project, not its workspace's: the OpenFileAtHead action runs while the
+    // workspace is being updated, and reading it then would panic.
     working_copy_path(
         repository.read(cx),
-        workspace.read(cx).project().read(cx),
+        editor.project()?.read(cx),
         file.as_ref(),
         cx,
     )
@@ -2023,6 +2024,20 @@ mod tests {
             );
             assert!(historical_editor.read(cx).read_only(cx));
             assert_eq!(buffer.read(cx).text(), "package historical\n");
+        });
+
+        // The action takes the same route while the workspace handles it.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&historical_editor, true, true, window, cx);
+        });
+        cx.dispatch_action(OpenFileAtHead);
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            let editor = workspace
+                .active_item_as::<Editor>(cx)
+                .expect("working copy editor");
+            assert_ne!(editor, historical_editor);
+            assert!(!editor.read(cx).read_only(cx));
         });
     }
 
