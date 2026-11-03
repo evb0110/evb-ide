@@ -7423,6 +7423,12 @@ impl Repository {
         .detach();
     }
 
+    /// Drops the cached log of `log_source`, so the next read runs git again.
+    pub fn forget_graph_data(&mut self, log_source: &LogSource) {
+        self.initial_graph_data
+            .retain(|(source, _), _| source != log_source);
+    }
+
     pub fn graph_data(
         &mut self,
         log_source: LogSource,

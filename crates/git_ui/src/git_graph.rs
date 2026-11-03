@@ -2506,11 +2506,24 @@ impl GitGraph {
         if self.log_source == log_source {
             return;
         }
+        // "7 days ago" means another cutoff each time it is chosen, so a log cached for it
+        // earlier may hold commits that have since fallen out of the window.
+        if let LogSource::Filtered(LogFilter { since: Some(_), .. }) = &log_source
+            && let Some(repository) = self.get_repository(cx)
+        {
+            repository.update(cx, |repository, _| {
+                repository.forget_graph_data(&log_source)
+            });
+        }
         self.log_source = log_source;
         self.selected_entry_idx = None;
         self.hovered_entry_idx = None;
         self.selected_commit_diff = None;
         self.selected_commit_message = None;
+        // Another log starts at its top, not at the previous log's scroll position.
+        self.table_interaction_state.update(cx, |state, _| {
+            state.scroll_handle.scroll_to_item(0, ScrollStrategy::Top)
+        });
         self.invalidate_state(cx);
     }
 
@@ -2839,8 +2852,14 @@ impl GitGraph {
         if item.item_id() == cx.entity_id() {
             return None;
         }
-        let editor = item.downcast::<Editor>()?;
-        let project_path = workspace::ItemHandle::project_path(&editor, cx)?;
+        // A diff view is an editor over many files; the one at its cursor is the active file.
+        let editor = item.act_as::<Editor>(cx)?;
+        let editor = editor.read(cx);
+        let file = editor.file_at(editor.selections.newest_anchor().head(), cx)?;
+        let project_path = ProjectPath {
+            worktree_id: file.worktree_id(cx),
+            path: file.path().clone(),
+        };
         let (repository, repo_path) = workspace
             .project()
             .read(cx)

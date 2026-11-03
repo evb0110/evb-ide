@@ -85,6 +85,11 @@ impl GitLogPanel {
             .active_repository()
             .map(|repository| repository.read(cx).id)
         else {
+            // The last repository went away: show the empty state, not its old log.
+            if self.graph.take().is_some() {
+                self._graph_subscription = None;
+                cx.notify();
+            }
             return;
         };
         let graph = match &self.graph {

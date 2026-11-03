@@ -765,6 +765,10 @@ impl LogSource {
                 Cow::Borrowed("--tags"),
                 Cow::Borrowed("HEAD"),
             ],
+            // HEAD of a repository without commits yet is an empty log, not an error.
+            LogSource::Branch(branch) if branch.as_str() == "HEAD" => {
+                vec![Cow::Borrowed("--ignore-missing"), Cow::Borrowed("HEAD")]
+            }
             LogSource::Branch(branch) => vec![Cow::Borrowed(branch.as_str())],
             LogSource::Sha(oid) => vec![Cow::Owned(oid.to_string())],
             LogSource::Path(path) => vec![
@@ -774,6 +778,9 @@ impl LogSource {
             ],
             LogSource::Filtered(filter) => {
                 let mut args = match &filter.revision {
+                    Some(revision) if revision.as_str() == "HEAD" => {
+                        vec![Cow::Borrowed("--ignore-missing"), Cow::Borrowed("HEAD")]
+                    }
                     Some(revision) => vec![Cow::Borrowed(revision.as_str())],
                     None => LogSource::All
                         .get_args()
@@ -791,11 +798,13 @@ impl LogSource {
                 // Path limiting then reports the nearest shown ancestors as parents.
                 args.push(Cow::Borrowed("--parents"));
                 args.push(Cow::Borrowed("--"));
+                // Paths are files and folders, not patterns: `notes?.md` must not match
+                // `notes1.md`, nor a name starting with `:(` change the match.
                 args.extend(
                     filter
                         .paths
                         .iter()
-                        .map(|path| Cow::Borrowed(path.as_unix_str())),
+                        .map(|path| Cow::Owned(format!(":(literal){}", path.as_unix_str()))),
                 );
                 return args;
             }
