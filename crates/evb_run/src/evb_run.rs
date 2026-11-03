@@ -142,33 +142,77 @@ impl PackageManager {
     /// Picks the package manager the way the project's lockfile or the
     /// `packageManager` field in `package.json` declares it, falling back to npm.
     pub fn detect(root_files: &[&str], package_json: &serde_json::Value) -> Self {
+        Self::declared(root_files, package_json).unwrap_or(PackageManager::Npm)
+    }
+
+    /// The package manager a directory's lockfile or `package.json` names, if any.
+    pub fn declared(root_files: &[&str], package_json: &serde_json::Value) -> Option<Self> {
         let has = |name: &str| root_files.contains(&name);
         if has("pnpm-lock.yaml") {
-            return PackageManager::Pnpm;
+            return Some(PackageManager::Pnpm);
         }
         if has("yarn.lock") {
-            return PackageManager::Yarn;
+            return Some(PackageManager::Yarn);
         }
         if has("bun.lock") || has("bun.lockb") {
-            return PackageManager::Bun;
+            return Some(PackageManager::Bun);
         }
         if has("package-lock.json") {
-            return PackageManager::Npm;
+            return Some(PackageManager::Npm);
         }
         let declared = package_json
             .get("packageManager")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         if declared.starts_with("pnpm@") {
-            PackageManager::Pnpm
+            Some(PackageManager::Pnpm)
         } else if declared.starts_with("yarn@") {
-            PackageManager::Yarn
+            Some(PackageManager::Yarn)
         } else if declared.starts_with("bun@") {
-            PackageManager::Bun
+            Some(PackageManager::Bun)
+        } else if declared.starts_with("npm@") {
+            Some(PackageManager::Npm)
         } else {
-            PackageManager::Npm
+            None
         }
     }
+}
+
+/// The package manager of the workspace enclosing `root`: a package of a pnpm or yarn workspace
+/// opened on its own has no lockfile, and npm cannot run its dependencies. The search stops at
+/// the repository root.
+async fn enclosing_package_manager(fs: &dyn Fs, root: &Path) -> Option<PackageManager> {
+    const LOCKFILES: &[&str] = &[
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "package-lock.json",
+    ];
+    for directory in root.ancestors().skip(1).take(16) {
+        let mut files = Vec::new();
+        for name in LOCKFILES {
+            if fs.is_file(&directory.join(name)).await {
+                files.push(*name);
+            }
+        }
+        let manifest = load_manifest(fs, &directory.join("package.json"))
+            .await
+            .unwrap_or(serde_json::Value::Null);
+        if let Some(manager) = PackageManager::declared(&files, &manifest) {
+            return Some(manager);
+        }
+        if fs
+            .metadata(&directory.join(".git"))
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return None;
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,6 +428,22 @@ impl RunController {
             }
             _ => {}
         });
+        let mut subscriptions = vec![subscription];
+        // Stop and the running state follow the configurations' debug sessions too.
+        subscriptions.push(cx.subscribe(
+            &project.read(cx).dap_store(),
+            |_, _, _: &project::debugger::dap_store::DapStoreEvent, cx| cx.notify(),
+        ));
+        // Task files load asynchronously after they change; refresh once the inventory has them.
+        if let Some(inventory) = project
+            .read(cx)
+            .task_store()
+            .read(cx)
+            .task_inventory()
+            .cloned()
+        {
+            subscriptions.push(cx.observe(&inventory, |this, _, cx| this.refresh(cx)));
+        }
         let mut this = Self {
             workspace: workspace.weak_handle(),
             project,
@@ -395,7 +455,7 @@ impl RunController {
             next_generation: 0,
             menu_handle: PopoverMenuHandle::default(),
             refresh_task: Task::ready(()),
-            _subscriptions: vec![subscription],
+            _subscriptions: subscriptions,
         };
         this.refresh(cx);
         this
@@ -525,7 +585,12 @@ impl RunController {
                     let manifest =
                         load_manifest(fs.as_ref(), &root.abs_path.join("package.json")).await;
                     if let Some(manifest) = manifest {
-                        let manager = PackageManager::detect(&root_files, &manifest);
+                        let manager = match PackageManager::declared(&root_files, &manifest) {
+                            Some(manager) => manager,
+                            None => enclosing_package_manager(fs.as_ref(), &root.abs_path)
+                                .await
+                                .unwrap_or(PackageManager::Npm),
+                        };
                         for script in script_names(&manifest) {
                             configurations.push(RunConfiguration {
                                 id: format!("package:{}:{script}", root.abs_path.display()).into(),
@@ -608,6 +673,34 @@ impl RunController {
                         template,
                     });
                 }
+            }
+
+            // The terminal panel reuses a task's terminal by label, so two folders' tasks named
+            // alike would replace each other's terminal: those get their folder in the label.
+            let mut task_label_counts = HashMap::<String, usize>::default();
+            for configuration in &configurations {
+                if configuration.kind == RunConfigurationKind::Task {
+                    *task_label_counts
+                        .entry(configuration.template.label.clone())
+                        .or_default() += 1;
+                }
+            }
+            for configuration in &mut configurations {
+                if configuration.kind != RunConfigurationKind::Task
+                    || task_label_counts
+                        .get(&configuration.template.label)
+                        .is_none_or(|count| *count < 2)
+                {
+                    continue;
+                }
+                let Some(root) = configuration.worktree_id.and_then(|worktree_id| {
+                    roots.iter().find(|root| root.worktree_id == worktree_id)
+                }) else {
+                    continue;
+                };
+                let label = format!("{} · {}", configuration.template.label, root.root_name);
+                configuration.label = label.clone().into();
+                configuration.template.label = label;
             }
 
             this.update(cx, |this, cx| {
@@ -865,6 +958,24 @@ impl RunController {
     /// launch is told not to start it (a save already under way still
     /// finishes); afterwards exactly its terminal is killed, as soon as it exists.
     pub fn stop(&mut self, configuration_id: &str, cx: &mut Context<Self>) {
+        // Debug launches its own session, which the debugger names after the configuration.
+        let debug_sessions = self
+            .configurations
+            .iter()
+            .find(|configuration| configuration.id.as_ref() == configuration_id)
+            .map(|configuration| self.debug_sessions(configuration, cx))
+            .unwrap_or_default();
+        if !debug_sessions.is_empty() {
+            let dap_store = self.project.read(cx).dap_store();
+            dap_store.update(cx, |dap_store, cx| {
+                for session_id in debug_sessions {
+                    dap_store
+                        .shutdown_session(session_id, cx)
+                        .detach_and_log_err(cx);
+                }
+            });
+            cx.notify();
+        }
         let Some(run) = self.runs.get_mut(configuration_id) else {
             return;
         };
@@ -884,6 +995,25 @@ impl RunController {
         {
             terminal.update(cx, |terminal, _| terminal.kill_active_task());
         }
+    }
+
+    /// The live debug sessions of `configuration`.
+    fn debug_sessions(
+        &self,
+        configuration: &RunConfiguration,
+        cx: &App,
+    ) -> Vec<dap::client::SessionId> {
+        self.project
+            .read(cx)
+            .dap_store()
+            .read(cx)
+            .sessions()
+            .filter(|session| {
+                let session = session.read(cx);
+                !session.is_terminated() && session.label().as_ref() == Some(&configuration.label)
+            })
+            .map(|session| session.read(cx).session_id())
+            .collect()
     }
 
     fn debug_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1040,9 +1170,9 @@ async fn load_manifest(fs: &dyn Fs, path: &Path) -> Option<serde_json::Value> {
 impl Render for RunController {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.selected_configuration().cloned();
-        let running = selected
-            .as_ref()
-            .is_some_and(|configuration| self.is_running(&configuration.id));
+        let running = selected.as_ref().is_some_and(|configuration| {
+            self.is_running(&configuration.id) || !self.debug_sessions(configuration, cx).is_empty()
+        });
         let can_debug = selected.as_ref().is_some_and(|configuration| {
             matches!(
                 configuration.kind,
@@ -1209,6 +1339,45 @@ mod tests {
                     .map(|configuration| configuration.label.clone()),
                 Some("dev".into())
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn uses_the_enclosing_workspace_package_manager(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            AppState::test(cx);
+            editor::init(cx);
+            project::task_store::TaskStore::init(None);
+            init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/repo"),
+            json!({
+                ".git": {},
+                "pnpm-lock.yaml": "",
+                "packages": {
+                    "web": { "package.json": r#"{ "scripts": { "dev": "vite" } }"# },
+                },
+            }),
+        )
+        .await;
+        let project = Project::test(fs, [path!("/repo/packages/web").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        cx.run_until_parked();
+
+        let controller = cx
+            .update(|_, cx| RunController::for_workspace(workspace.entity_id(), cx))
+            .expect("every workspace gets a run controller");
+        controller.read_with(cx, |controller, _| {
+            let commands = controller
+                .configurations()
+                .iter()
+                .map(|configuration| configuration.template.command.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(commands, vec!["pnpm"]);
         });
     }
 

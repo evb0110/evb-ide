@@ -282,8 +282,11 @@ impl TaskStore {
             .map(|json| json.trim())
             .filter(|json| !json.is_empty());
 
-        task_inventory.update(cx, |inventory, _| {
-            inventory.update_file_based_tasks(location, raw_tasks_json)
+        task_inventory.update(cx, |inventory, cx| {
+            let result = inventory.update_file_based_tasks(location, raw_tasks_json);
+            // Lets observers, such as the run configuration list, see the new tasks.
+            cx.notify();
+            result
         })
     }
 
