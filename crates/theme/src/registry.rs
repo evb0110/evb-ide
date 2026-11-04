@@ -451,12 +451,8 @@ mod tests {
             let assert_icons =
                 |actual: &DirectoryIcons, expected: &crate::DirectoryIconsContent| {
                     let resolve = |path: &Option<SharedString>| {
-                        path.as_ref().map(|path| {
-                            Path::new(BUNDLED_ROOT)
-                                .join(path.as_ref())
-                                .to_string_lossy()
-                                .to_string()
-                        })
+                        // Bundled icons are embedded assets, keyed with `/` on every platform.
+                        path.as_ref().map(|path| format!("{BUNDLED_ROOT}/{path}"))
                     };
                     assert_eq!(
                         actual.expanded.as_deref(),

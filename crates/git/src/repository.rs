@@ -1672,25 +1672,11 @@ impl GitRepository for RealGitRepository {
         let git = self.git_binary_in_worktree();
         async move {
             let git = git?;
-            // These would point git at another repository, index or work tree than this one's,
-            // from the IDE's or the project's environment.
-            const ROUTING_VARIABLES: &[&str] = &[
-                "GIT_DIR",
-                "GIT_WORK_TREE",
-                "GIT_INDEX_FILE",
-                "GIT_OBJECT_DIRECTORY",
-                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                "GIT_COMMON_DIR",
-                "GIT_NAMESPACE",
-            ];
-            let mut command = git.build_command(&args);
-            for name in ROUTING_VARIABLES {
-                command.env_remove(name);
-            }
-            let output = command
+            let output = git
+                .build_command(&args)
                 .envs(
                     env.iter()
-                        .filter(|(name, _)| !ROUTING_VARIABLES.contains(&name.as_str())),
+                        .filter(|(name, _)| !GIT_ROUTING_VARIABLES.contains(&name.as_str())),
                 )
                 .output()
                 .await?;
@@ -3875,6 +3861,18 @@ pub(crate) struct GitBinary {
     is_trusted: bool,
 }
 
+/// Variables that route git to another repository, index or work tree than the one a command is
+/// for, as the IDE's or a project's environment may carry them.
+const GIT_ROUTING_VARIABLES: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+];
+
 impl GitBinary {
     pub(crate) fn new(
         git_binary_path: PathBuf,
@@ -3986,6 +3984,11 @@ impl GitBinary {
     {
         let mut command = new_command(&self.git_binary_path);
         command.current_dir(&self.working_directory);
+        // Inherited from the IDE's environment, these would point git at another repository,
+        // index or work tree. Callers that need one, such as a temporary index, set it after.
+        for name in GIT_ROUTING_VARIABLES {
+            command.env_remove(name);
+        }
         // Disabled to stop malicious actors from running arbitrary commands via fsmonitor hooks
         command.args(["-c", "core.fsmonitor=false"]);
         // Prepended signature lines would corrupt our --format parsers.

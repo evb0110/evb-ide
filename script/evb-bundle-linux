@@ -133,10 +133,11 @@ for size in 512 1024; do
     mkdir -p "$data_home/icons/hicolor/${size}x${size}/apps"
     cp "$target/share/icons/hicolor/${size}x${size}/apps/evb-ide.png" "$data_home/icons/hicolor/${size}x${size}/apps/"
 done
-# Desktop entries split Exec at spaces, so the program is quoted; inside the quotes ", `, $ and \
-# take a backslash, which the file format then doubles, like any other backslash in a value.
+# Desktop entries split Exec at spaces, so the program is quoted. Inside the quotes ", `, $ and \
+# take a backslash, and each backslash is then doubled again as in any value, so a backslash
+# becomes four; a percent sign would start a field code, so it is doubled.
 program="$target/bin/evb-ide"
-EXEC_PROGRAM="$(printf '%s' "$program" | sed 's/[\\"`$]/\\\\&/g')" \
+EXEC_PROGRAM="$(printf '%s' "$program" | sed -e 's/\\/\\\\\\\\/g' -e 's/["`$]/\\\\&/g' -e 's/%/%%/g')" \
 TRY_EXEC="$(printf '%s' "$program" | sed 's/\\/\\\\/g')" \
     awk '
         /^TryExec=evb-ide$/ { print "TryExec=" ENVIRON["TRY_EXEC"]; next }

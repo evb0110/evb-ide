@@ -189,6 +189,16 @@ async fn enclosing_package_manager(fs: &dyn Fs, root: &Path) -> Option<PackageMa
         "bun.lockb",
         "package-lock.json",
     ];
+    // The folder itself may be the repository root, beyond which nothing encloses it.
+    if fs
+        .metadata(&root.join(".git"))
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return None;
+    }
     for directory in root.ancestors().skip(1).take(16) {
         let mut files = Vec::new();
         for name in LOCKFILES {
@@ -715,7 +725,18 @@ impl RunController {
                 }) else {
                     continue;
                 };
-                let label = format!("{} · {}", configuration.template.label, root.root_name);
+                // Folders of the same name are told apart by their paths, as scripts are.
+                let folder = if roots
+                    .iter()
+                    .filter(|other| other.root_name == root.root_name)
+                    .count()
+                    > 1
+                {
+                    root.abs_path.display().to_string()
+                } else {
+                    root.root_name.clone()
+                };
+                let label = format!("{} · {folder}", configuration.template.label);
                 configuration.label = label.clone().into();
                 configuration.template.label = label;
             }
@@ -725,7 +746,8 @@ impl RunController {
                 // renamed or removed, so it can still be stopped.
                 let mut configurations = configurations;
                 for configuration in &this.configurations {
-                    if this.is_running(&configuration.id)
+                    if (this.is_running(&configuration.id)
+                        || !this.debug_sessions(configuration, cx).is_empty())
                         && !configurations
                             .iter()
                             .any(|listed| listed.id == configuration.id)
@@ -766,7 +788,9 @@ impl RunController {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_running(&configuration.id) {
+        // Rerun replaces a debug session of the configuration as well as a run.
+        if self.is_running(&configuration.id) || !self.debug_sessions(&configuration, cx).is_empty()
+        {
             self.stop(&configuration.id, cx);
         }
         let Some(workspace) = self.workspace.upgrade() else {

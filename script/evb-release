@@ -160,7 +160,7 @@ EVB IDE is an independent open-source fork of Zed with JetBrains shortcuts,
 IntelliJ themes and file icons, run configurations, and Git tools for web development.
 
 - macOS 12 or later, $architecture. Developer ID signed and Apple notarized.
-- Open the DMG and drag EVB IDE into Applications. Updates are manual.
+- Open the DMG and drag EVB IDE into Applications. Installed copies update themselves from these releases.
 - AI features, telemetry, and sign-in UI are disabled by default.
 - The editor is GPL-3.0-or-later, with Apache-2.0 components where marked.
 - Independent from Zed Industries and JetBrains. No hosted-service subscription is included.

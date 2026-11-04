@@ -59,8 +59,9 @@ impl Job {
             }),
             rollback: Box::new(move |app_dir| {
                 let dir = app_dir.join(name);
+                // Not recursive: files still in it are backups a failed restore left there.
                 if created.swap(false, Ordering::SeqCst) && dir.exists() {
-                    std::fs::remove_dir_all(&dir)
+                    std::fs::remove_dir(&dir)
                         .context(format!("Failed to remove directory {}", dir.display()))?;
                 }
                 Ok(())

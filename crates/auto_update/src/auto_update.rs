@@ -1791,10 +1791,13 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            matches!(status, AutoUpdateStatus::Errored { .. }),
-            "{status:?}"
-        );
+        // The checksum comparison itself refused, not an earlier step such as a missing tool.
+        match &status {
+            AutoUpdateStatus::Errored { error } => {
+                assert!(format!("{error:#}").contains("does not match"), "{error:#}")
+            }
+            status => panic!("expected the checksum to fail, got {status:?}"),
+        }
         assert_eq!(installs.load(atomic::Ordering::SeqCst), 0);
     }
 

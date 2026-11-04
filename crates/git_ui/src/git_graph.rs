@@ -2506,7 +2506,12 @@ impl GitGraph {
     }
 
     fn set_log_source(&mut self, log_source: LogSource, cx: &mut Context<Self>) {
-        if self.log_source == log_source {
+        // A date filter chosen again reloads: its window has moved since it was read.
+        let has_moving_cutoff = matches!(
+            &log_source,
+            LogSource::Filtered(LogFilter { since: Some(_), .. })
+        );
+        if self.log_source == log_source && !has_moving_cutoff {
             return;
         }
         // "7 days ago" means another cutoff each time it is chosen, so a log cached for it

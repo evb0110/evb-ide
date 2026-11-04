@@ -401,6 +401,19 @@ pub(crate) fn resolve_branch(
                 .any(|remote| remote.name == "origin")
                 .then(|| "origin".into())
         });
+        // Fetch URLs go through `insteadOf` too, such as `gh:` for `https://github.com/`.
+        if configured {
+            for remote in &mut remotes {
+                let name = remote.name.clone();
+                if let Ok(url) = repository.update(cx, |repository, _| {
+                    repository.read_git_command(args(["remote", "get-url", "--", &name]))
+                }) && let Ok(Ok(url)) = url.await
+                    && !url.trim().is_empty()
+                {
+                    remote.url = Some(url.trim().to_string());
+                }
+            }
+        }
         if configured
             && let Some(name) = head_remote
             && let Ok(push_url) = repository.update(cx, |repository, _| {

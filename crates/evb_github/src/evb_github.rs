@@ -1629,7 +1629,9 @@ fn check_status(node: &CheckNode) -> CheckStatus {
 /// latest finished run wins. A check is its name together with the app and workflow reporting it,
 /// or a commit status: two apps' or two workflows' checks of one name are different checks.
 fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
-    let mut latest: Vec<(Check, CheckIdentity, Option<String>)> = Vec::new();
+    // The bool: whether the run is still going. A finished STALE run counts as pending, but a
+    // newer finished run replaces it.
+    let mut latest: Vec<(Check, CheckIdentity, Option<String>, bool)> = Vec::new();
     for node in nodes {
         let Some(name) = node
             .name
@@ -1641,6 +1643,13 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
             continue;
         };
         let status = check_status(&node);
+        let running =
+            node.status.as_deref().map(str::trim).is_some_and(|status| {
+                !status.is_empty() && !status.eq_ignore_ascii_case("COMPLETED")
+            }) || node
+                .state
+                .as_deref()
+                .is_some_and(|state| matches!(state.trim(), "PENDING" | "EXPECTED"));
         let identity = CheckIdentity {
             is_status: node.context.is_some() && node.name.is_none(),
             app: node
@@ -1672,15 +1681,14 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
             url: node.details_url.or(node.target_url),
             app_id,
         };
-        match latest.iter_mut().find(|(existing, existing_identity, _)| {
-            existing.name == check.name && *existing_identity == identity
-        }) {
-            Some((existing, _, existing_at)) => {
+        match latest
+            .iter_mut()
+            .find(|(existing, existing_identity, _, _)| {
+                existing.name == check.name && *existing_identity == identity
+            }) {
+            Some((existing, _, existing_at, existing_running)) => {
                 let required = existing.required || check.required;
-                let replaces = match (
-                    existing.status == CheckStatus::Pending,
-                    check.status == CheckStatus::Pending,
-                ) {
+                let replaces = match (*existing_running, running) {
                     (false, true) => true,
                     (true, false) => false,
                     _ => at > *existing_at,
@@ -1688,13 +1696,14 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
                 if replaces {
                     *existing = check;
                     *existing_at = at;
+                    *existing_running = running;
                 }
                 existing.required = required;
             }
-            None => latest.push((check, identity, at)),
+            None => latest.push((check, identity, at, running)),
         }
     }
-    latest.into_iter().map(|(check, _, _)| check).collect()
+    latest.into_iter().map(|(check, _, _, _)| check).collect()
 }
 
 /// Reruns of one check share this; two workflows' jobs of the same name do not.
@@ -2223,6 +2232,13 @@ mod tests {
                 json!({ "name": "test", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-31T12:00:00Z", "checkSuite": { "app": { "slug": "other-ci" } } }),
             ),
             check(json!({ "context": "test", "state": "PENDING" })),
+            // A newer run replaces a finished STALE one.
+            check(
+                json!({ "name": "deploy", "status": "COMPLETED", "conclusion": "STALE", "completedAt": "2026-10-31T09:00:00Z" }),
+            ),
+            check(
+                json!({ "name": "deploy", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": "2026-10-31T10:00:00Z" }),
+            ),
             // Another workflow's job of the same name is a different check too.
             check(
                 json!({ "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-31T12:00:00Z", "checkSuite": { "workflowRun": { "workflow": { "name": "Nightly" } } } }),
@@ -2262,6 +2278,13 @@ mod tests {
                 Check {
                     name: "test".into(),
                     status: CheckStatus::Pending,
+                    required: false,
+                    url: None,
+                    app_id: None,
+                },
+                Check {
+                    name: "deploy".into(),
+                    status: CheckStatus::Success,
                     required: false,
                     url: None,
                     app_id: None,
