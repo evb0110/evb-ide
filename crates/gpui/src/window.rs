@@ -1971,6 +1971,15 @@ impl Window {
                                     .window_profiler
                                     .record_frame_signal(request_frame_options.signal_at);
                                 if force_render {
+                                    #[cfg(target_os = "macos")]
+                                    if request_frame_options.require_presentation {
+                                        // AppKit requests the activation frame before this
+                                        // window receives a mouse event at the current pointer.
+                                        window.mouse_position =
+                                            window.platform_window.mouse_position();
+                                        window.mouse_hit_test =
+                                            window.rendered_frame.hit_test(window.mouse_position);
+                                    }
                                     // Bypass cached view reuse so we don't replay stale
                                     // atlas tile references after a GPU device recovery.
                                     window.refresh();
@@ -8251,6 +8260,100 @@ mod tests {
                 })
                 .expect("inspect presented frame");
             assert_eq!(callback_ran.get(), schedule_callback);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn test_activation_frame_uses_current_pointer_for_group_hover(cx: &mut TestAppContext) {
+        struct HoverTabs {
+            painted_buttons: Rc<RefCell<Vec<usize>>>,
+            painted_frames: Rc<RefCell<Vec<Vec<usize>>>>,
+        }
+
+        impl Render for HoverTabs {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let painted_buttons = self.painted_buttons.clone();
+                let painted_frames = self.painted_frames.clone();
+                div()
+                    .flex()
+                    .children((0..2).map(|index| {
+                        let painted_buttons = self.painted_buttons.clone();
+                        div()
+                            .id(("tab", index))
+                            .group("tab")
+                            .w(px(100.))
+                            .h(px(50.))
+                            .child(
+                                div()
+                                    .id(("close", index))
+                                    .size(px(10.))
+                                    .invisible()
+                                    .group_hover("tab", |style| style.visible())
+                                    .child(canvas(
+                                        |_, _, _| {},
+                                        move |_, _, _, _| painted_buttons.borrow_mut().push(index),
+                                    )),
+                            )
+                    }))
+                    .child(canvas(
+                        |_, _, _| {},
+                        move |_, _, _, _| painted_frames.borrow_mut().push(painted_buttons.take()),
+                    ))
+            }
+        }
+
+        cx.app.borrow_mut().mode = crate::app::GpuiMode::Production;
+        let painted_buttons = Rc::new(RefCell::new(Vec::new()));
+        let painted_frames = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let painted_buttons = painted_buttons.clone();
+            let painted_frames = painted_frames.clone();
+            move |_, _| HoverTabs {
+                painted_buttons,
+                painted_frames,
+            }
+        });
+        let platform_window = cx.test_window(window.into());
+        let activation_frame = || RequestFrameOptions {
+            force_render: true,
+            require_presentation: true,
+            ..Default::default()
+        };
+        platform_window.simulate_frame_request(activation_frame());
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: point(px(25.), px(25.)),
+                        pressed_button: None,
+                        modifiers: Default::default(),
+                    }),
+                    cx,
+                );
+            })
+            .expect("seed the destination window's previous hover");
+        platform_window.set_mouse_position(point(px(25.), px(25.)));
+        platform_window.simulate_frame_request(activation_frame());
+
+        // AppKit requests this frame before delivering the destination's activation
+        // callback or a mouse event, so its last event can point at another tab.
+        for (position, expected) in [
+            (point(px(125.), px(25.)), vec![1]),
+            (point(px(25.), px(25.)), vec![0]),
+            (point(px(250.), px(75.)), vec![]),
+        ] {
+            painted_frames.borrow_mut().clear();
+            platform_window.set_mouse_position(position);
+            platform_window.simulate_frame_request(activation_frame());
+            let frames = painted_frames.take();
+            assert!(!frames.is_empty(), "the activation frame must draw");
+            for frame in frames {
+                assert_eq!(
+                    frame, expected,
+                    "the first activation frame must paint only the currently hovered close button"
+                );
+            }
         }
     }
 

@@ -20,6 +20,7 @@ use std::{
 
 pub(crate) struct TestWindowState {
     pub(crate) bounds: Bounds<Pixels>,
+    mouse_position: Point<Pixels>,
     pub(crate) handle: AnyWindowHandle,
     display: Rc<dyn PlatformDisplay>,
     pub(crate) title: Option<String>,
@@ -123,6 +124,7 @@ impl TestWindow {
             display_changed_callback: None,
             appearance_change_callback: None,
             request_frame_callback: None,
+            mouse_position: Point::default(),
             frame_wake_count: Rc::new(Cell::new(0)),
             frame_scheduled: false,
             frame_callback_pending: false,
@@ -294,6 +296,11 @@ impl TestWindow {
         self.0.lock().request_frame_callback = Some(callback);
     }
 
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn set_mouse_position(&self, position: Point<Pixels>) {
+        self.0.lock().mouse_position = position;
+    }
+
     pub fn simulate_input(&mut self, event: PlatformInput) -> bool {
         let mut lock = self.0.lock();
         let Some(mut callback) = lock.input_callback.take() else {
@@ -376,7 +383,7 @@ impl PlatformWindow for TestWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        Point::default()
+        self.0.lock().mouse_position
     }
 
     fn modifiers(&self) -> crate::Modifiers {
