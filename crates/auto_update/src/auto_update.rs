@@ -250,10 +250,24 @@ fn evb_release_asset_name(version: &str) -> Result<String> {
     Ok(format!("EVB-IDE-{version}-{os}-{architecture}.{extension}"))
 }
 
+/// How long the update server may stay silent. A connection that stalls would otherwise keep the
+/// check pending for good, and no later check would start.
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn before_stall<T, E: Into<anyhow::Error>>(
+    future: impl std::future::Future<Output = std::result::Result<T, E>>,
+) -> Result<T> {
+    futures_lite::future::or(async { future.await.map_err(Into::into) }, async {
+        smol::Timer::after(STALL_TIMEOUT).await;
+        Err(anyhow::anyhow!("the update server stopped responding"))
+    })
+    .await
+}
+
 async fn fetch_github_release(client: &HttpClientWithUrl, url: &str) -> Result<GitHubRelease> {
-    let mut response = client.get(url, Default::default(), true).await?;
+    let mut response = before_stall(client.get(url, Default::default(), true)).await?;
     let mut body = Vec::new();
-    response.body_mut().read_to_end(&mut body).await?;
+    before_stall(response.body_mut().read_to_end(&mut body)).await?;
     anyhow::ensure!(
         response.status().is_success(),
         "failed to fetch release {url}: {} {:?}",
@@ -324,16 +338,15 @@ async fn fetch_expected_checksum(
     client: &HttpClientWithUrl,
     release: &EvbRelease,
 ) -> Result<String> {
-    let mut response = client
-        .get(&release.checksums_url, Default::default(), true)
-        .await?;
+    let mut response =
+        before_stall(client.get(&release.checksums_url, Default::default(), true)).await?;
     anyhow::ensure!(
         response.status().is_success(),
         "failed to download {EVB_CHECKSUMS_ASSET}: {:?}",
         response.status()
     );
     let mut checksums = String::new();
-    response.body_mut().read_to_string(&mut checksums).await?;
+    before_stall(response.body_mut().read_to_string(&mut checksums)).await?;
     expected_checksum(&checksums, &release.asset_name)
 }
 
@@ -680,7 +693,8 @@ impl AutoUpdater {
                 if let Err(error) = result {
                     let is_missing_dependency =
                         error.downcast_ref::<MissingDependencyError>().is_some();
-                    this.status = match check_type {
+                    // A manual check made while this one ran wants to see its failure too.
+                    this.status = match this.update_check_type {
                         UpdateCheckType::Automatic if is_missing_dependency => {
                             log::warn!("auto-update: {}", error);
                             AutoUpdateStatus::Errored {
@@ -1246,7 +1260,7 @@ async fn download_release(
 ) -> Result<()> {
     let mut target_file = File::create(&target_path).await?;
 
-    let mut response = client.get(&release.url, Default::default(), true).await?;
+    let mut response = before_stall(client.get(&release.url, Default::default(), true)).await?;
     anyhow::ensure!(
         response.status().is_success(),
         "failed to download update: {:?}",
@@ -1265,7 +1279,7 @@ async fn download_release(
     let mut buffer = [0u8; 8192];
     let body = response.body_mut();
     loop {
-        let bytes_read = body.read(&mut buffer).await?;
+        let bytes_read = before_stall(body.read(&mut buffer)).await?;
         if bytes_read == 0 {
             break;
         }

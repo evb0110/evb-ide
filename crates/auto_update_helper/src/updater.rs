@@ -2,7 +2,10 @@ use std::{
     ffi::{OsStr, OsString},
     os::windows::ffi::OsStrExt,
     path::Path,
-    sync::LazyLock,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -28,40 +31,38 @@ pub(crate) struct Job {
 
 impl Job {
     pub fn mkdir(name: &'static Path) -> Self {
-        Job {
-            apply: Box::new(move |app_dir| {
-                let dir = app_dir.join(name);
-                std::fs::create_dir_all(&dir)
-                    .context(format!("Failed to create directory {}", dir.display()))
-            }),
-            rollback: Box::new(move |app_dir| {
-                let dir = app_dir.join(name);
-                std::fs::remove_dir_all(&dir)
-                    .context(format!("Failed to remove directory {}", dir.display()))
-            }),
-        }
+        Self::mkdir_when(name, None)
     }
 
     pub fn mkdir_if_exists(name: &'static Path, check: &'static Path) -> Self {
-        Job {
-            apply: Box::new(move |app_dir| {
-                let dir = app_dir.join(name);
-                let check = app_dir.join(check);
+        Self::mkdir_when(name, Some(check))
+    }
 
-                if check.exists() {
+    /// Creates `name` (when `check` exists, if given). A rollback removes only a directory this
+    /// job created: removing one that was there before, such as x64 holding the installed
+    /// OpenConsole.exe, would delete files the rollback still has to put back.
+    fn mkdir_when(name: &'static Path, check: Option<&'static Path>) -> Self {
+        let created = Arc::new(AtomicBool::new(false));
+        Job {
+            apply: Box::new({
+                let created = created.clone();
+                move |app_dir| {
+                    let dir = app_dir.join(name);
+                    if check.is_some_and(|check| !app_dir.join(check).exists()) || dir.exists() {
+                        return Ok(());
+                    }
                     std::fs::create_dir_all(&dir)
-                        .context(format!("Failed to create directory {}", dir.display()))?
+                        .context(format!("Failed to create directory {}", dir.display()))?;
+                    created.store(true, Ordering::SeqCst);
+                    Ok(())
                 }
-                Ok(())
             }),
             rollback: Box::new(move |app_dir| {
                 let dir = app_dir.join(name);
-
-                if dir.exists() {
+                if created.swap(false, Ordering::SeqCst) && dir.exists() {
                     std::fs::remove_dir_all(&dir)
-                        .context(format!("Failed to remove directory {}", dir.display()))?
+                        .context(format!("Failed to remove directory {}", dir.display()))?;
                 }
-
                 Ok(())
             }),
         }
@@ -435,14 +436,21 @@ pub(crate) fn perform_update(
             anyhow::bail!("Autoupdate failed, nothing to rollback");
         };
 
+        // Every job is rolled back even after one fails, so the old executables are restored
+        // whatever else could not be.
+        let mut rollback_errors = Vec::new();
         for job in (0..=last_successful_job).rev() {
             let job = &JOBS[job];
-            if let Err(e) = (job.rollback)(app_dir) {
-                anyhow::bail!(
-                    "Job rollback failed, the app might be left in an inconsistent state: ({:?})",
-                    e
-                );
+            if let Err(error) = (job.rollback)(app_dir) {
+                log::error!("Job rollback failed: {error:?}");
+                rollback_errors.push(format!("{error:#}"));
             }
+        }
+        if !rollback_errors.is_empty() {
+            anyhow::bail!(
+                "Job rollback failed, the app might be left in an inconsistent state: {}",
+                rollback_errors.join("; ")
+            );
         }
 
         anyhow::bail!("Autoupdate failed, rollback successful");
