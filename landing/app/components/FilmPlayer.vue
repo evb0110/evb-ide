@@ -93,6 +93,20 @@ const duration = ref(0);
 
 const still = computed(() => reducedMotion.value === "reduce");
 
+// Turning on Reduce Motion while the film plays stops it on its still.
+watch(still, (isStill) => {
+  const element = video.value;
+  const info = film.variants[theme];
+  if (!isStill || !element) {
+    return;
+  }
+  element.pause();
+  if (info && element.readyState >= 1) {
+    element.currentTime = info.still / film.fps;
+    time.value = element.currentTime;
+  }
+});
+
 // The poster is the film's first paint; fetch the one for the visitor's color scheme early.
 useHead({
   link: (["light", "dark"] as const).map((scheme) => ({

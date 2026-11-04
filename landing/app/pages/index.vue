@@ -14,7 +14,13 @@
               <span class="installer-version-name">EVB IDE {{ release.tag.slice(1) }}</span>
               <time :datetime="release.publishedAt">{{ formatDate(release.publishedAt) }}</time>
             </p>
-            <div v-if="platforms.length > 1" class="installer-tabs" role="tablist" aria-label="Operating system">
+            <div
+              v-if="platforms.length > 1"
+              class="installer-tabs"
+              role="tablist"
+              aria-label="Operating system"
+              @keydown="onTabKey"
+            >
               <button
                 v-for="platform in platforms"
                 :key="platform"
@@ -22,6 +28,7 @@
                 role="tab"
                 class="installer-tab"
                 :aria-selected="platform === selectedPlatform"
+                :tabindex="platform === selectedPlatform ? 0 : -1"
                 @click="chosenPlatform = platform"
               >
                 {{ platformLabels[platform] }}
@@ -48,6 +55,10 @@
               </span>
               <span class="installer-icon"><UIcon name="i-lucide-download" /></span>
             </a>
+            <p v-if="unsupportedArchitecture" class="installer-note">
+              There is no build for {{ unsupportedArchitecture }} yet; the downloads below are for x64 and will not
+              run on it.
+            </p>
             <p class="installer-note">
               <span class="installer-requirement">{{ platformNote.requirement }}</span>
               <span v-if="platformNote.action"
@@ -189,6 +200,36 @@ function installerMeta(installer: IInstaller) {
     return `${installer.architecture === "arm64" ? "M-series Macs" : "Intel Macs"} · DMG`;
   }
   return `${installer.architecture === "x64" ? "Intel and AMD" : "ARM"} · ${installer.format}`;
+}
+
+/** The visitor's processor when no build is published for it, such as Linux on ARM. */
+const unsupportedArchitecture = computed(() => {
+  const agent = (userAgent ?? "").toLowerCase();
+  const arm = /aarch64|arm64|armv\d/.test(agent);
+  if (!arm || selectedPlatform.value !== "linux") {
+    return null;
+  }
+  return platformInstallers.value.some((installer) => installer.architecture !== "x64") ? null : "Linux on ARM";
+});
+
+// Arrow keys, Home and End move between the system tabs, as the tabs pattern expects.
+function onTabKey(event: KeyboardEvent) {
+  const index = platforms.value.indexOf(selectedPlatform.value);
+  const last = platforms.value.length - 1;
+  const next = { ArrowLeft: index - 1, ArrowRight: index + 1, Home: 0, End: last }[event.key];
+  if (next === undefined) {
+    return;
+  }
+  event.preventDefault();
+  const platform = platforms.value[(next + platforms.value.length) % platforms.value.length];
+  if (!platform) {
+    return;
+  }
+  chosenPlatform.value = platform;
+  nextTick(() => {
+    const tabs = (event.currentTarget as HTMLElement | null)?.querySelectorAll<HTMLElement>("[role=tab]");
+    tabs?.[platforms.value.indexOf(platform)]?.focus();
+  });
 }
 
 function platformOf(userAgent: string): TPlatform | null {

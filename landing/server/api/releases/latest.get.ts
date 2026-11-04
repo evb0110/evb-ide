@@ -31,5 +31,7 @@ export default defineCachedEventHandler(
       });
     }
   },
-  { maxAge: 300, swr: false },
+  // One cache entry for every request: the URL, query string included, is the default key, so
+  // `?x=1` would reach GitHub each time and spend the anonymous rate limit.
+  { maxAge: 300, swr: false, getKey: () => "latest-release" },
 );
