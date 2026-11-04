@@ -592,6 +592,8 @@ impl CopilotChat {
         // Load a previously-stored token (or the one from the environment) and
         // fetch models if we end up authenticated.
         let load_task = cx.spawn(async move |this, cx| {
+            // An environment token is a credential too: nothing is sent while AI is disabled.
+            language_model::wait_until_credentials_allowed(cx).await?;
             let (env_token, credentials_provider, configuration) =
                 this.read_with(cx, |this, _| {
                     (

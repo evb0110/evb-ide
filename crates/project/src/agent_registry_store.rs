@@ -12,7 +12,7 @@ use gpui::{
 };
 use http_client::{AsyncBody, HttpClient, StatusCode};
 use serde::Deserialize;
-use settings::Settings as _;
+use settings::{Settings as _, SettingsStore};
 use util::ResultExt;
 
 use crate::{AgentId, DisableAiSettings};
@@ -288,7 +288,21 @@ impl AgentRegistryStore {
             last_refresh: None,
         };
 
-        store.load_cached_registry(fs, store.http_client.clone(), cx);
+        store.load_cached_registry(fs.clone(), store.http_client.clone(), cx);
+
+        // Turning AI on loads what was skipped while it was off.
+        let mut was_disabled = DisableAiSettings::get_global(cx).disable_ai;
+        cx.observe_global::<SettingsStore>(move |store, cx| {
+            let disabled = DisableAiSettings::get_global(cx).disable_ai;
+            if was_disabled && !disabled {
+                store.load_cached_registry(fs.clone(), store.http_client.clone(), cx);
+                if store.agents.is_empty() {
+                    store.refresh(cx);
+                }
+            }
+            was_disabled = disabled;
+        })
+        .detach();
 
         store
     }

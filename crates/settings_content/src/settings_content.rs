@@ -397,6 +397,22 @@ impl std::ops::DerefMut for FeatureFlagsMap {
 }
 
 impl SettingsContent {
+    /// Whether AI is off: `disable_ai`, or (EVB IDE) the agent and edit predictions both turned
+    /// off. EVB IDE ships with both off, as `disable_ai` cannot be turned back on once a default
+    /// sets it; with nothing using AI, no AI service may be contacted.
+    pub fn ai_disabled(&self) -> bool {
+        let agent_disabled = self.agent.as_ref().and_then(|agent| agent.enabled) == Some(false);
+        let predictions_disabled = self
+            .project
+            .all_languages
+            .edit_predictions
+            .as_ref()
+            .and_then(|edit_predictions| edit_predictions.provider)
+            == Some(EditPredictionProvider::None);
+        self.project.disable_ai.is_some_and(|disabled| disabled.0)
+            || (agent_disabled && predictions_disabled)
+    }
+
     pub fn languages_mut(&mut self) -> &mut HashMap<String, LanguageSettingsContent> {
         &mut self.project.all_languages.languages.0
     }

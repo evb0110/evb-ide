@@ -58,6 +58,13 @@ pub async fn read_credentials(
     url: &str,
     cx: &AsyncApp,
 ) -> Result<Option<(String, Vec<u8>)>> {
+    wait_until_credentials_allowed(cx).await?;
+    provider.read_credentials(url, cx).await
+}
+
+/// Waits while AI is disabled, for callers that hold a credential from elsewhere, such as an
+/// environment variable, and must not use it either until AI is turned on.
+pub async fn wait_until_credentials_allowed(cx: &AsyncApp) -> Result<()> {
     while let Some((receiver, _subscription)) = cx.update(|cx| {
         let gate = *cx.try_global::<CredentialsReadGate>()?;
         if !(gate.is_disabled)(cx) {
@@ -69,7 +76,7 @@ pub async fn read_credentials(
     }) {
         receiver.await?;
     }
-    provider.read_credentials(url, cx).await
+    Ok(())
 }
 
 impl ApiKeyState {

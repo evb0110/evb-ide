@@ -141,13 +141,8 @@ pub fn init(user_store: Entity<UserStore>, client: Arc<Client>, cx: &mut App) {
 }
 
 fn ai_disabled(cx: &App) -> bool {
-    cx.try_global::<SettingsStore>().is_some_and(|store| {
-        store
-            .merged_settings()
-            .project
-            .disable_ai
-            .is_some_and(|disabled| disabled.0)
-    })
+    cx.try_global::<SettingsStore>()
+        .is_some_and(|store| store.merged_settings().ai_disabled())
 }
 
 #[derive(Default, PartialEq, Eq)]
