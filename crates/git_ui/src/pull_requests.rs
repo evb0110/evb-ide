@@ -170,15 +170,40 @@ fn parse_remote_config(output: &str) -> Vec<RemoteConfig> {
 }
 
 fn locate(registry: &Arc<GitHostingProviderRegistry>, url: &str) -> Option<RepositoryLocator> {
-    let (provider, parsed) = parse_git_remote_url(registry.clone(), url)?;
-    if !provider.is_github() {
-        return None;
-    }
-    Some(RepositoryLocator {
-        host: provider.base_url().host_str()?.to_string(),
-        owner: parsed.owner.to_string(),
-        name: parsed.repo.to_string(),
-    })
+    let (host, owner, name) = match parse_git_remote_url(registry.clone(), url) {
+        Some((provider, parsed)) => {
+            if !provider.is_github() {
+                return None;
+            }
+            (
+                provider.base_url().host_str()?.to_string(),
+                parsed.owner.to_string(),
+                parsed.repo.to_string(),
+            )
+        }
+        // Only origin's host gets a registered provider; a GitHub Enterprise remote that is not
+        // origin, such as the upstream of a fork, is recognized here instead.
+        None => {
+            use git::GitHostingProvider as _;
+            let provider = git_hosting_providers::Github::from_remote_url(url).ok()?;
+            let parsed = provider.parse_remote_url(url)?;
+            (
+                provider.base_url().host_str()?.to_string(),
+                parsed.owner.to_string(),
+                parsed.repo.to_string(),
+            )
+        }
+    };
+    // An HTTPS remote on another port serves the API on that port too.
+    let host = match url::Url::parse(url)
+        .ok()
+        .filter(|parsed| parsed.scheme() == "https")
+        .and_then(|parsed| parsed.port())
+    {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    };
+    Some(RepositoryLocator { host, owner, name })
 }
 
 /// The repository pull requests target and the remote pointing at it. `gh repo set-default`
@@ -337,12 +362,14 @@ pub(crate) fn resolve_branch(
         )
     });
     let registry = GitHostingProviderRegistry::default_global(cx);
-    cx.background_spawn(async move {
+    let repository = repository.downgrade();
+    cx.spawn(async move |cx| {
         // Remote projects cannot run git here; their origin and upstream URLs are known.
         let mut remotes = match config.await {
             Ok(Ok(output)) => parse_remote_config(&output),
             _ => Vec::new(),
         };
+        let configured = !remotes.is_empty();
         if remotes.is_empty() {
             for (name, url) in [("origin", origin_url), ("upstream", upstream_url)] {
                 if let Some(url) = url {
@@ -366,6 +393,24 @@ pub(crate) fn resolve_branch(
                 branch: Some(remote_branch),
             },
         };
+        // Where `git push` really sends: pushurl, then url, after `pushInsteadOf` and
+        // `insteadOf` rewrites, which the raw configuration does not apply.
+        let head_remote = push.remote.clone().or_else(|| {
+            remotes
+                .iter()
+                .any(|remote| remote.name == "origin")
+                .then(|| "origin".into())
+        });
+        if configured
+            && let Some(name) = head_remote
+            && let Ok(push_url) = repository.update(cx, |repository, _| {
+                repository.read_git_command(args(["remote", "get-url", "--push", "--", &name]))
+            })
+            && let Ok(Ok(push_url)) = push_url.await
+            && let Some(remote) = remotes.iter_mut().find(|remote| remote.name == name)
+        {
+            remote.push_url = Some(push_url.trim().to_string()).filter(|url| !url.is_empty());
+        }
         resolve_from_remotes(&remotes, &registry, local_branch, &push)
     })
 }
@@ -1681,6 +1726,20 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(resolved.head.target, locator("evb0110"));
         assert_eq!(resolved.head.selector(), "me:feature");
+
+        // A GitHub Enterprise remote without a registered provider, on its HTTPS port.
+        assert_eq!(
+            locate(&registry, "https://github.acme.test:8443/team/project.git"),
+            Some(RepositoryLocator {
+                host: "github.acme.test:8443".into(),
+                owner: "team".into(),
+                name: "project".into(),
+            })
+        );
+        assert_eq!(
+            locate(&registry, "git@github.acme.test:team/project.git").map(|located| located.host),
+            Some("github.acme.test".into())
+        );
 
         // A `gh-resolved` host must be a host name: it decides where the token goes.
         let crafted = [RemoteConfig {

@@ -251,9 +251,17 @@ impl SystemCredentials {
                 });
             }
         };
-        // gh exits non-zero with "no oauth token" when it has no login for the host.
+        // gh exits non-zero with "no oauth token" when it has no login for the host. Anything
+        // else (an expired login, a broken keyring) needs the user, so it is shown as it is.
         if !output.status.success() {
-            return Err(GitHubError::NotSignedIn { host });
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.to_lowercase().contains("no oauth token") || stderr.trim().is_empty() {
+                return Err(GitHubError::NotSignedIn { host });
+            }
+            return Err(GitHubError::CliFailed {
+                host,
+                detail: stderr.lines().next().unwrap_or_default().trim().to_string(),
+            });
         }
         let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if token.is_empty() {
@@ -361,7 +369,8 @@ pub struct GitHubClient {
     slots: async_lock::Semaphore,
     paused_until: Mutex<HashMap<String, SystemTime>>,
     default_branches: Mutex<HashMap<(String, String, String), (Instant, String)>>,
-    required_checks: Mutex<HashMap<(String, String, String, String), (Instant, Vec<String>)>>,
+    required_checks:
+        Mutex<HashMap<(String, String, String, String), (Instant, Vec<RequiredCheck>)>>,
 }
 
 impl GitHubClient {
@@ -744,10 +753,10 @@ impl GitHubClient {
                 }
             }
             let mut checks = collapse_checks(contexts);
-            let required_names = self.required_check_names(target, &pull.base.name).await;
-            add_required_checks(&mut checks, &required_names);
+            let (required, required_complete) = self.required_checks(target, &pull.base.name).await;
+            add_required_checks(&mut checks, &required);
             pull_request.checks = checks;
-            pull_request.checks_complete = complete && !partial;
+            pull_request.checks_complete = complete && !partial && required_complete;
         }
         Ok(BranchPullRequests {
             default_branch: Some(default_branch),
@@ -785,15 +794,15 @@ impl GitHubClient {
         Ok(read.default_branch)
     }
 
-    /// The names of the checks the base branch requires, from its rulesets and classic branch
-    /// protection. GitHub waits for a required check that never reports (a workflow skipped by a
-    /// path filter), which the pull request's own checks cannot show. A failed read leaves only
-    /// the checks that report themselves as required.
-    async fn required_check_names(
+    /// The checks the base branch requires, from its rulesets and classic branch protection, and
+    /// whether they could all be read. GitHub waits for a required check that never reports (a
+    /// workflow skipped by a path filter), which the pull request's own checks cannot show. Only
+    /// complete reads are kept for later; a server without these endpoints requires nothing.
+    async fn required_checks(
         &self,
         repository: &RepositoryLocator,
         branch: &str,
-    ) -> Vec<String> {
+    ) -> (Vec<RequiredCheck>, bool) {
         #[derive(Deserialize)]
         struct Rule {
             #[serde(rename = "type")]
@@ -804,11 +813,13 @@ impl GitHubClient {
         #[derive(Deserialize)]
         struct RuleParameters {
             #[serde(default)]
-            required_status_checks: Vec<RequiredCheck>,
+            required_status_checks: Vec<RuleCheck>,
         }
         #[derive(Deserialize)]
-        struct RequiredCheck {
+        struct RuleCheck {
             context: String,
+            #[serde(default)]
+            integration_id: Option<u64>,
         }
         #[derive(Deserialize)]
         struct Branch {
@@ -828,7 +839,17 @@ impl GitHubClient {
             enforcement_level: Option<String>,
             #[serde(default)]
             contexts: Vec<String>,
+            #[serde(default)]
+            checks: Vec<ProtectionCheck>,
         }
+        #[derive(Deserialize)]
+        struct ProtectionCheck {
+            context: String,
+            #[serde(default)]
+            app_id: Option<u64>,
+        }
+        const RULES_PER_PAGE: usize = 100;
+        const RULE_PAGES: usize = 10;
 
         let key = (
             normalize_host(&repository.host),
@@ -836,34 +857,53 @@ impl GitHubClient {
             repository.name.to_lowercase(),
             branch.to_string(),
         );
-        if let Some((read_at, names)) = self.required_checks.lock().get(&key)
+        if let Some((read_at, required)) = self.required_checks.lock().get(&key)
             && read_at.elapsed() < REQUIRED_CHECKS_TTL
         {
-            return names.clone();
+            return (required.clone(), true);
         }
         let branch_path = query_value(branch);
-        let mut names = Vec::new();
-        match self
-            .rest::<Vec<Rule>>(
-                &repository.host,
-                Method::GET,
-                &format!(
-                    "repos/{}/{}/rules/branches/{branch_path}",
-                    repository.owner, repository.name
-                ),
-                None,
-            )
-            .await
-        {
-            Ok(rules) => names.extend(
-                rules
-                    .into_iter()
-                    .filter(|rule| rule.kind == "required_status_checks")
-                    .filter_map(|rule| rule.parameters)
-                    .flat_map(|parameters| parameters.required_status_checks)
-                    .map(|check| check.context),
-            ),
-            Err(error) => log::warn!("Could not read the rules of {branch}: {error}"),
+        let mut required = Vec::new();
+        let mut complete = true;
+        for page in 1..=RULE_PAGES {
+            let rules = self
+                .rest::<Vec<Rule>>(
+                    &repository.host,
+                    Method::GET,
+                    &format!(
+                        "repos/{}/{}/rules/branches/{branch_path}?per_page={RULES_PER_PAGE}&page={page}",
+                        repository.owner, repository.name
+                    ),
+                    None,
+                )
+                .await;
+            match rules {
+                Ok(rules) => {
+                    let count = rules.len();
+                    required.extend(
+                        rules
+                            .into_iter()
+                            .filter(|rule| rule.kind == "required_status_checks")
+                            .filter_map(|rule| rule.parameters)
+                            .flat_map(|parameters| parameters.required_status_checks)
+                            .map(|check| RequiredCheck {
+                                name: check.context,
+                                app_id: check.integration_id,
+                            }),
+                    );
+                    if count < RULES_PER_PAGE {
+                        break;
+                    }
+                    complete &= page < RULE_PAGES;
+                }
+                // An older Enterprise server has no rulesets.
+                Err(GitHubError::NotFound { .. }) => break,
+                Err(error) => {
+                    log::warn!("Could not read the rules of {branch}: {error}");
+                    complete = false;
+                    break;
+                }
+            }
         }
         match self
             .rest::<Branch>(
@@ -884,17 +924,34 @@ impl GitHubClient {
                         required_status_checks: Some(checks),
                     }),
             }) if checks.enforcement_level.as_deref() != Some("off") => {
-                names.extend(checks.contexts)
+                if checks.checks.is_empty() {
+                    required.extend(
+                        checks
+                            .contexts
+                            .into_iter()
+                            .map(|name| RequiredCheck { name, app_id: None }),
+                    );
+                } else {
+                    required.extend(checks.checks.into_iter().map(|check| RequiredCheck {
+                        name: check.context,
+                        app_id: check.app_id,
+                    }));
+                }
             }
             Ok(_) => {}
-            Err(error) => log::warn!("Could not read the protection of {branch}: {error}"),
+            Err(error) => {
+                log::warn!("Could not read the protection of {branch}: {error}");
+                complete = false;
+            }
         }
-        names.sort();
-        names.dedup();
-        self.required_checks
-            .lock()
-            .insert(key, (Instant::now(), names.clone()));
-        names
+        required.sort();
+        required.dedup();
+        if complete {
+            self.required_checks
+                .lock()
+                .insert(key, (Instant::now(), required.clone()));
+        }
+        (required, complete)
     }
 
     pub async fn create_pull_request(
@@ -1218,6 +1275,16 @@ pub struct Check {
     pub status: CheckStatus,
     pub required: bool,
     pub url: Option<String>,
+    /// The GitHub App that reported the check; commit statuses have none.
+    pub app_id: Option<u64>,
+}
+
+/// A check the base branch requires: its name and, when the rule names one, the app that must
+/// report it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RequiredCheck {
+    pub name: String,
+    pub app_id: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1334,7 +1401,7 @@ query PullRequestStatus($owner: String!, $name: String!, $number: Int!, $after: 
                     detailsUrl
                     startedAt
                     completedAt
-                    checkSuite {{ app {{ slug }} }}
+                    checkSuite {{ app {{ slug databaseId }} }}
                     {required}
                   }}
                 }}
@@ -1408,6 +1475,10 @@ impl RestPull {
     }
 
     fn is_from(&self, branch: &BranchHead) -> bool {
+        // A pull request lives on the target's host, so a head on another host is never it.
+        if normalize_host(&branch.head.host) != normalize_host(&branch.target.host) {
+            return false;
+        }
         let head = format!("{}/{}", branch.head.owner, branch.head.name);
         self.head
             .repo
@@ -1489,8 +1560,10 @@ struct CheckSuite {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CheckApp {
     slug: Option<String>,
+    database_id: Option<u64>,
 }
 
 /// A `CheckRun` or a `StatusContext`; the other variant's fields stay empty.
@@ -1533,8 +1606,9 @@ fn check_status(node: &CheckNode) -> CheckStatus {
         Some("FAILURE" | "ERROR" | "TIMED_OUT" | "STARTUP_FAILURE") => CheckStatus::Failure,
         Some("CANCELLED") => CheckStatus::Cancelled,
         Some("SKIPPED") => CheckStatus::Skipped,
-        Some("PENDING" | "EXPECTED") => CheckStatus::Pending,
-        _ => CheckStatus::Neutral,
+        Some("NEUTRAL") => CheckStatus::Neutral,
+        // STALE waits for a new run, like gh shows it; an unknown result cannot count as passed.
+        _ => CheckStatus::Pending,
     }
 }
 
@@ -1568,11 +1642,17 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
             .flatten()
             .find(|at| at.as_str() != UNSET_TIMESTAMP)
             .cloned();
+        let app_id = node
+            .check_suite
+            .as_ref()
+            .and_then(|suite| suite.app.as_ref())
+            .and_then(|app| app.database_id);
         let check = Check {
             name,
             status,
             required: node.is_required.unwrap_or(false),
             url: node.details_url.or(node.target_url),
+            app_id,
         };
         match latest.iter_mut().find(|(existing, existing_identity, _)| {
             existing.name == check.name && *existing_identity == identity
@@ -1607,19 +1687,26 @@ struct CheckIdentity {
 
 /// Marks the checks the base branch requires, and adds the required ones that have not reported
 /// yet as pending, as GitHub waits for them.
-fn add_required_checks(checks: &mut Vec<Check>, required_names: &[String]) {
-    for name in required_names {
+fn add_required_checks(checks: &mut Vec<Check>, required: &[RequiredCheck]) {
+    for requirement in required {
         let mut found = false;
-        for check in checks.iter_mut().filter(|check| &check.name == name) {
+        // A rule naming an app is met only by that app's check of the name.
+        for check in checks.iter_mut().filter(|check| {
+            check.name == requirement.name
+                && requirement
+                    .app_id
+                    .is_none_or(|app_id| check.app_id == Some(app_id))
+        }) {
             check.required = true;
             found = true;
         }
         if !found {
             checks.push(Check {
-                name: name.clone(),
+                name: requirement.name.clone(),
                 status: CheckStatus::Pending,
                 required: true,
                 url: None,
+                app_id: requirement.app_id,
             });
         }
     }
@@ -2125,30 +2212,35 @@ mod tests {
                     status: CheckStatus::Success,
                     required: false,
                     url: None,
+                    app_id: None,
                 },
                 Check {
                     name: "lint".into(),
                     status: CheckStatus::Pending,
                     required: true,
                     url: None,
+                    app_id: None,
                 },
                 Check {
                     name: "ci/legacy".into(),
                     status: CheckStatus::Success,
                     required: false,
                     url: Some("https://ci.example.com/1".into()),
+                    app_id: None,
                 },
                 Check {
                     name: "test".into(),
                     status: CheckStatus::Failure,
                     required: false,
                     url: None,
+                    app_id: None,
                 },
                 Check {
                     name: "test".into(),
                     status: CheckStatus::Pending,
                     required: false,
                     url: None,
+                    app_id: None,
                 },
             ]
         );
@@ -2172,6 +2264,7 @@ mod tests {
             status,
             required,
             url: None,
+            app_id: None,
         };
         // The other app's failing `test` is not hidden by the first app's success.
         assert_eq!(pull_request(checks).checks_summary(), ChecksSummary::Failed);
@@ -2195,7 +2288,14 @@ mod tests {
         // A required check that never reported keeps the pull request pending, and a reported
         // one becomes required even when GitHub did not say so.
         let mut checks = vec![named("build", CheckStatus::Success, false)];
-        add_required_checks(&mut checks, &["build".to_string(), "security".to_string()]);
+        let requirement = |name: &str, app_id: Option<u64>| RequiredCheck {
+            name: name.into(),
+            app_id,
+        };
+        add_required_checks(
+            &mut checks,
+            &[requirement("build", None), requirement("security", None)],
+        );
         assert_eq!(
             checks,
             vec![
@@ -2203,6 +2303,18 @@ mod tests {
                 named("security", CheckStatus::Pending, true),
             ]
         );
+        assert_eq!(
+            pull_request(checks).checks_summary(),
+            ChecksSummary::Pending
+        );
+        // A rule naming an app is not met by another app's check of the same name.
+        let mut checks = vec![Check {
+            app_id: Some(9),
+            ..named("build", CheckStatus::Success, false)
+        }];
+        add_required_checks(&mut checks, &[requirement("build", Some(7))]);
+        assert_eq!(checks.len(), 2);
+        assert!(!checks[0].required);
         assert_eq!(
             pull_request(checks).checks_summary(),
             ChecksSummary::Pending
@@ -2353,7 +2465,7 @@ mod tests {
                 "https://api.github.com/repos/evb0110/evb-ide".to_string(),
                 "https://api.github.com/repos/evb0110/evb-ide/pulls?state=all&sort=updated&direction=desc&per_page=100&head=evb0110:feature%2Fone".to_string(),
                 json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "after": null }).to_string(),
-                "https://api.github.com/repos/evb0110/evb-ide/rules/branches/main".to_string(),
+                "https://api.github.com/repos/evb0110/evb-ide/rules/branches/main?per_page=100&page=1".to_string(),
                 "https://api.github.com/repos/evb0110/evb-ide/branches/main".to_string(),
                 "https://api.github.com/repos/evb0110/evb-ide/pulls?state=all&sort=updated&direction=desc&per_page=100&head=evb0110:feature%2Fone".to_string(),
                 json!({ "owner": "evb0110", "name": "evb-ide", "number": 12, "after": null }).to_string(),
