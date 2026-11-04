@@ -808,6 +808,11 @@ impl LocalRepositoryState {
             })
             .await?;
         backend.set_trusted(is_trusted);
+        // The project's shell environment applies to every git command of this repository, so
+        // variables routing git to another repository or index are left out of it.
+        let mut environment = environment;
+        environment
+            .retain(|name, _| !git::repository::GIT_ROUTING_VARIABLES.contains(&name.as_str()));
         Ok(LocalRepositoryState {
             backend,
             environment: Arc::new(environment),

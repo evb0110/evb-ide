@@ -3863,7 +3863,7 @@ pub(crate) struct GitBinary {
 
 /// Variables that route git to another repository, index or work tree than the one a command is
 /// for, as the IDE's or a project's environment may carry them.
-const GIT_ROUTING_VARIABLES: &[&str] = &[
+pub const GIT_ROUTING_VARIABLES: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",

@@ -1401,7 +1401,7 @@ query PullRequestStatus($owner: String!, $name: String!, $number: Int!, $after: 
                     detailsUrl
                     startedAt
                     completedAt
-                    checkSuite {{ app {{ slug databaseId }} workflowRun {{ workflow {{ name }} }} }}
+                    checkSuite {{ app {{ slug databaseId }} workflowRun {{ workflow {{ databaseId name }} }} }}
                     {required}
                   }}
                 }}
@@ -1568,7 +1568,9 @@ struct WorkflowRun {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Workflow {
+    database_id: Option<u64>,
     name: Option<String>,
 }
 
@@ -1662,7 +1664,13 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
                 .as_ref()
                 .and_then(|suite| suite.workflow_run.as_ref())
                 .and_then(|run| run.workflow.as_ref())
-                .and_then(|workflow| workflow.name.clone()),
+                // Two workflow files can share a display name; their IDs differ.
+                .and_then(|workflow| {
+                    workflow
+                        .database_id
+                        .map(|id| id.to_string())
+                        .or_else(|| workflow.name.clone())
+                }),
         };
         let at = [&node.completed_at, &node.started_at, &node.created_at]
             .into_iter()
@@ -2241,7 +2249,7 @@ mod tests {
             ),
             // Another workflow's job of the same name is a different check too.
             check(
-                json!({ "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-31T12:00:00Z", "checkSuite": { "workflowRun": { "workflow": { "name": "Nightly" } } } }),
+                json!({ "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-31T12:00:00Z", "checkSuite": { "workflowRun": { "workflow": { "databaseId": 2, "name": "CI" } } } }),
             ),
         ]);
         assert_eq!(

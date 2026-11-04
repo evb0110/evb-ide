@@ -789,10 +789,13 @@ impl RunController {
         cx: &mut Context<Self>,
     ) {
         // Rerun replaces a debug session of the configuration as well as a run.
-        if self.is_running(&configuration.id) || !self.debug_sessions(&configuration, cx).is_empty()
+        let debug_shutdowns = if self.is_running(&configuration.id)
+            || !self.debug_sessions(&configuration, cx).is_empty()
         {
-            self.stop(&configuration.id, cx);
-        }
+            self.stop_with_debug_shutdowns(&configuration.id, cx)
+        } else {
+            Vec::new()
+        };
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -820,6 +823,9 @@ impl RunController {
         let previous_launch = self.latest_launch.get(&configuration.id).cloned();
         let configuration_id = configuration.id.clone();
         let launch = cx.spawn_in(window, async move |this, cx| {
+            for shutdown in debug_shutdowns {
+                shutdown.await.log_err();
+            }
             if let Some(previous_launch) = previous_launch {
                 previous_launch.await;
             }
@@ -1011,6 +1017,18 @@ impl RunController {
     /// launch is told not to start it (a save already under way still
     /// finishes); afterwards exactly its terminal is killed, as soon as it exists.
     pub fn stop(&mut self, configuration_id: &str, cx: &mut Context<Self>) {
+        for shutdown in self.stop_with_debug_shutdowns(configuration_id, cx) {
+            shutdown.detach_and_log_err(cx);
+        }
+    }
+
+    /// Like `stop`, returning the shutdowns of the configuration's debug sessions, which a rerun
+    /// waits for: a debug server still stopping can hold the port the new run needs.
+    fn stop_with_debug_shutdowns(
+        &mut self,
+        configuration_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<Task<anyhow::Result<()>>> {
         // Debug launches its own session, which the debugger names after the configuration.
         let debug_sessions = self
             .configurations
@@ -1018,28 +1036,27 @@ impl RunController {
             .find(|configuration| configuration.id.as_ref() == configuration_id)
             .map(|configuration| self.debug_sessions(configuration, cx))
             .unwrap_or_default();
+        let mut shutdowns = Vec::new();
         if !debug_sessions.is_empty() {
             let dap_store = self.project.read(cx).dap_store();
             dap_store.update(cx, |dap_store, cx| {
                 for session_id in debug_sessions {
-                    dap_store
-                        .shutdown_session(session_id, cx)
-                        .detach_and_log_err(cx);
+                    shutdowns.push(dap_store.shutdown_session(session_id, cx));
                 }
             });
             cx.notify();
         }
         let Some(run) = self.runs.get_mut(configuration_id) else {
-            return;
+            return shutdowns;
         };
         if run.status != RunStatus::Running {
-            return;
+            return shutdowns;
         }
         run.stop_requested = true;
         if !run.spawning {
             run.status = RunStatus::Failed;
             cx.notify();
-            return;
+            return shutdowns;
         }
         if let Some(terminal) = run
             .terminal
@@ -1048,6 +1065,7 @@ impl RunController {
         {
             terminal.update(cx, |terminal, _| terminal.kill_active_task());
         }
+        shutdowns
     }
 
     /// The live debug sessions of `configuration`.

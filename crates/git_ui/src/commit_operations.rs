@@ -477,6 +477,11 @@ async fn ensure_rewrite_keeps_local_work(
         .split('\0')
         .filter(|path| !path.is_empty())
         .collect::<Vec<_>>();
+    // Git's output reaches here decoded as UTF-8; a name that is not cannot be checked.
+    anyhow::ensure!(
+        !touched.iter().any(|path| path.contains('\u{FFFD}')),
+        "The commits to rewrite touch a file whose name is not UTF-8; rewrite them from the terminal."
+    );
     touched.sort_unstable();
     touched.dedup();
     let mut ignored = Vec::new();
@@ -2184,8 +2189,9 @@ pub(crate) mod tests {
         let tree = TempTree::new(json!({}));
         let root = tree.path();
         let shas = create_repository(root);
-        // `local-data` was committed once and then untracked; the local copy is ignored now.
-        // A name git quotes in its line output.
+        // `local-data` and `данные.txt` (a name git quotes in its line output) were each
+        // committed once and then untracked; the local copies are ignored now. The quoted name
+        // comes last, so rewriting its commit replays nothing that touches `local-data`.
         commit_file(
             root,
             ".gitignore",
@@ -2193,6 +2199,12 @@ pub(crate) mod tests {
             "Ignore local data",
         );
         std::fs::write(root.join("local-data"), "old\n").expect("writing a fixture file");
+        run_git(root, &["add", "-f", "local-data"]);
+        run_git(root, &["commit", "-q", "-m", "Add local data"]);
+        let with_data = run_git(root, &["rev-parse", "HEAD"]);
+        run_git(root, &["rm", "-q", "--cached", "local-data"]);
+        run_git(root, &["commit", "-q", "-m", "Stop tracking local data"]);
+        std::fs::write(root.join("local-data"), "valuable\n").expect("writing a fixture file");
         std::fs::write(root.join("данные.txt"), "old\n").expect("writing a fixture file");
         run_git(root, &["add", "-f", "данные.txt"]);
         run_git(root, &["commit", "-q", "-m", "Add quoted data"]);
@@ -2200,43 +2212,43 @@ pub(crate) mod tests {
         run_git(root, &["rm", "-q", "--cached", "данные.txt"]);
         run_git(root, &["commit", "-q", "-m", "Stop tracking quoted data"]);
         std::fs::write(root.join("данные.txt"), "valuable\n").expect("writing a fixture file");
-        run_git(root, &["add", "-f", "local-data"]);
-        run_git(root, &["commit", "-q", "-m", "Add local data"]);
-        let with_data = run_git(root, &["rev-parse", "HEAD"]);
-        run_git(root, &["rm", "-q", "--cached", "local-data"]);
-        run_git(root, &["commit", "-q", "-m", "Stop tracking local data"]);
-        std::fs::write(root.join("local-data"), "valuable\n").expect("writing a fixture file");
         let (mut cx, repository, workspace) = open(root, cx).await;
 
-        // Rewriting the commit that wrote `local-data` would overwrite, then delete, it.
-        cx.update(|window, cx| {
-            reword(
-                target(&with_data, &repository, &workspace),
-                head_state(root),
-                "Edited".into(),
-                window,
-                cx,
-            )
-        });
-        wait_for_prompt(&mut cx, "OK");
-        assert_eq!(
-            std::fs::read_to_string(root.join("local-data")).unwrap(),
-            "valuable\n"
-        );
-        cx.update(|window, cx| {
-            reword(
-                target(&with_quoted_data, &repository, &workspace),
-                head_state(root),
-                "Edited".into(),
-                window,
-                cx,
-            )
-        });
-        wait_for_prompt(&mut cx, "OK");
-        assert_eq!(
-            std::fs::read_to_string(root.join("данные.txt")).unwrap(),
-            "valuable\n"
-        );
+        // Rewriting a commit that wrote an ignored file would overwrite, then delete, it; the
+        // refusal names the file.
+        for (sha, file) in [
+            (&with_quoted_data, "данные.txt"),
+            (&with_data, "local-data"),
+        ] {
+            cx.update(|window, cx| {
+                reword(
+                    target(sha, &repository, &workspace),
+                    head_state(root),
+                    "Edited".into(),
+                    window,
+                    cx,
+                )
+            });
+            let mut prompt = None;
+            for _ in 0..3000 {
+                cx.run_until_parked();
+                if let Some((message, detail)) = cx.pending_prompt() {
+                    prompt = Some(format!("{message} {detail}"));
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let prompt = prompt.expect("the rewrite should be refused with a prompt");
+            assert!(
+                prompt.contains(file),
+                "the refusal should name {file}: {prompt}"
+            );
+            cx.simulate_prompt_answer("OK");
+            assert_eq!(
+                std::fs::read_to_string(root.join(file)).unwrap(),
+                "valuable\n"
+            );
+        }
 
         // A staged change would come back unstaged, losing what was staged.
         std::fs::write(root.join("a.txt"), "staged\n").expect("writing a fixture file");
