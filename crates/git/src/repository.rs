@@ -1672,7 +1672,28 @@ impl GitRepository for RealGitRepository {
         let git = self.git_binary_in_worktree();
         async move {
             let git = git?;
-            let output = git.build_command(&args).envs(env.iter()).output().await?;
+            // These would point git at another repository, index or work tree than this one's,
+            // from the IDE's or the project's environment.
+            const ROUTING_VARIABLES: &[&str] = &[
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_COMMON_DIR",
+                "GIT_NAMESPACE",
+            ];
+            let mut command = git.build_command(&args);
+            for name in ROUTING_VARIABLES {
+                command.env_remove(name);
+            }
+            let output = command
+                .envs(
+                    env.iter()
+                        .filter(|(name, _)| !ROUTING_VARIABLES.contains(&name.as_str())),
+                )
+                .output()
+                .await?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -6749,6 +6770,39 @@ mod tests {
             "untracked"
         );
         assert!(!path.join("deleted").exists());
+    }
+
+    #[gpui::test]
+    async fn test_run_command_ignores_git_routing_variables(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+        let this_dir = tempfile::tempdir().unwrap();
+        let other_dir = tempfile::tempdir().unwrap();
+        git_init_repo(this_dir.path());
+        git_init_repo(other_dir.path());
+        let repository = RealGitRepository::new(
+            &this_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+        // The project's environment names another repository; commands still run in this one.
+        let env = HashMap::from_iter([(
+            "GIT_DIR".to_string(),
+            other_dir.path().join(".git").to_string_lossy().into_owned(),
+        )]);
+        let git_dir = repository
+            .run_command(
+                vec!["rev-parse".into(), "--absolute-git-dir".into()],
+                Arc::new(env),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::path::Path::new(git_dir.trim()).canonicalize().unwrap(),
+            this_dir.path().join(".git").canonicalize().unwrap()
+        );
     }
 
     #[gpui::test]
