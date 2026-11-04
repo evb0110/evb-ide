@@ -459,8 +459,10 @@ async fn ensure_rewrite_keeps_local_work(
     let touched = git(
         repository,
         "Checking local changes",
+        // NUL-separated: in its line output git quotes names with unusual characters.
         args([
             "log",
+            "-z",
             "--format=",
             "--name-only",
             "--no-renames",
@@ -472,8 +474,7 @@ async fn ensure_rewrite_keeps_local_work(
     )
     .await?;
     let mut touched = touched
-        .lines()
-        .map(str::trim)
+        .split('\0')
         .filter(|path| !path.is_empty())
         .collect::<Vec<_>>();
     touched.sort_unstable();
@@ -482,6 +483,7 @@ async fn ensure_rewrite_keeps_local_work(
     for paths in touched.chunks(500) {
         let mut command = args([
             "ls-files",
+            "-z",
             "--others",
             "--ignored",
             "--exclude-standard",
@@ -496,7 +498,12 @@ async fn ensure_rewrite_keeps_local_work(
             cx,
         )
         .await?;
-        ignored.extend(output.lines().map(str::to_string));
+        ignored.extend(
+            output
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .map(str::to_string),
+        );
     }
     if let Some(first) = ignored.first() {
         anyhow::bail!(
@@ -2178,8 +2185,21 @@ pub(crate) mod tests {
         let root = tree.path();
         let shas = create_repository(root);
         // `local-data` was committed once and then untracked; the local copy is ignored now.
-        commit_file(root, ".gitignore", "local-data\n", "Ignore local data");
+        // A name git quotes in its line output.
+        commit_file(
+            root,
+            ".gitignore",
+            "local-data\nданные.txt\n",
+            "Ignore local data",
+        );
         std::fs::write(root.join("local-data"), "old\n").expect("writing a fixture file");
+        std::fs::write(root.join("данные.txt"), "old\n").expect("writing a fixture file");
+        run_git(root, &["add", "-f", "данные.txt"]);
+        run_git(root, &["commit", "-q", "-m", "Add quoted data"]);
+        let with_quoted_data = run_git(root, &["rev-parse", "HEAD"]);
+        run_git(root, &["rm", "-q", "--cached", "данные.txt"]);
+        run_git(root, &["commit", "-q", "-m", "Stop tracking quoted data"]);
+        std::fs::write(root.join("данные.txt"), "valuable\n").expect("writing a fixture file");
         run_git(root, &["add", "-f", "local-data"]);
         run_git(root, &["commit", "-q", "-m", "Add local data"]);
         let with_data = run_git(root, &["rev-parse", "HEAD"]);
@@ -2201,6 +2221,20 @@ pub(crate) mod tests {
         wait_for_prompt(&mut cx, "OK");
         assert_eq!(
             std::fs::read_to_string(root.join("local-data")).unwrap(),
+            "valuable\n"
+        );
+        cx.update(|window, cx| {
+            reword(
+                target(&with_quoted_data, &repository, &workspace),
+                head_state(root),
+                "Edited".into(),
+                window,
+                cx,
+            )
+        });
+        wait_for_prompt(&mut cx, "OK");
+        assert_eq!(
+            std::fs::read_to_string(root.join("данные.txt")).unwrap(),
             "valuable\n"
         );
 

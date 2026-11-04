@@ -7518,7 +7518,8 @@ pub mod test {
             register_settings(cx);
             let app_state = AppState::test(cx);
             AppState::set_global(app_state.clone(), cx);
-            let settings = r#"{"language_models":{"openai_compatible":{
+            // EVB IDE ships with AI off, which leaves credentials unread; turn it on as a user would.
+            let settings = r#"{"agent":{"enabled":true},"language_models":{"openai_compatible":{
                 "settings-retry":{"api_url":"https://settings-provider.example/v1",
                 "available_models":[]}
             }}}"#;
