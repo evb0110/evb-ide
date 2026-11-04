@@ -1733,22 +1733,6 @@ pub(crate) mod tests {
     }
 
     /// Waits until the operation started last has stopped changing the repository.
-    fn settle_operation(cx: &mut VisualTestContext, directory: &Path) {
-        let mut previous = None;
-        for _ in 0..50 {
-            cx.run_until_parked();
-            let state = (
-                try_run_git(directory, &["rev-parse", "HEAD"]).ok(),
-                try_run_git(directory, &["status", "--porcelain"]).ok(),
-            );
-            if previous.as_ref() == Some(&state) {
-                return;
-            }
-            previous = Some(state);
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-
     fn target(
         sha: &str,
         repository: &Entity<Repository>,
@@ -1964,6 +1948,7 @@ pub(crate) mod tests {
             upstream: None,
             most_recent_commit: None,
         };
+        // Each operation must refuse, with its error, before anything is checked.
         cx.update(|window, cx| {
             rebase_onto(
                 &target(&shas[2], &repository, &workspace),
@@ -1973,8 +1958,9 @@ pub(crate) mod tests {
                 cx,
             )
         });
+        wait_for_prompt(&mut cx, "OK");
         cx.update(|window, cx| drop_commit(&target(&shas[1], &repository, &workspace), window, cx));
-        settle_operation(&mut cx, root);
+        wait_for_prompt(&mut cx, "OK");
         assert!(
             root.join(".git/rebase-merge").exists(),
             "the stopped rebase must not be aborted"

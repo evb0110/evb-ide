@@ -353,9 +353,20 @@ async fn test_opening_an_open_project_in_new_window_activates_its_window(cx: &mu
             .unwrap()
     };
 
+    window_b
+        .update(cx, |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.active_window()), Some(window_b.into()));
     let opened = open_from_window_b(path!("/project_a"), cx).await.unwrap();
     assert_eq!(opened, workspace_a);
     assert_eq!(cx.update(|cx| cx.windows().len()), 2);
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| cx.active_window()),
+        Some(window_a.into()),
+        "the open project's window comes to the front"
+    );
 
     // A symlink to an open project is the same project.
     fs.insert_symlink(path!("/link_a"), PathBuf::from(path!("/project_a")))

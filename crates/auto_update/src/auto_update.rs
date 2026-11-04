@@ -1533,7 +1533,7 @@ mod tests {
         rc::Rc,
         sync::{
             Arc,
-            atomic::{self, AtomicBool},
+            atomic::{self, AtomicBool, AtomicUsize},
         },
     };
     use tempfile::tempdir;
@@ -1690,6 +1690,72 @@ mod tests {
         let path = path.unwrap();
         assert_eq!(path, tmp_dir.path().join("zed"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), update_contents);
+    }
+
+    #[gpui::test]
+    async fn test_auto_update_refuses_a_download_that_fails_its_checksum(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        zlog::init_test();
+        let installed_version = evb_version().unwrap();
+        let mut new_version = installed_version.clone();
+        new_version.patch += 1;
+        let installs = Arc::new(AtomicUsize::new(0));
+
+        cx.update(|cx| {
+            settings::init(cx);
+            release_channel::init_test(semver::Version::new(1, 0, 0), ReleaseChannel::Stable, cx);
+            let asset_name = evb_release_asset_name(&new_version.to_string()).unwrap();
+            let release = format!(
+                r#"{{"tag_name":"v{new_version}","assets":[{{"name":"{asset_name}","browser_download_url":"https://test.example/new-download"}},{{"name":"SHA256SUMS","browser_download_url":"https://test.example/SHA256SUMS"}}]}}"#
+            );
+            // SHA256SUMS lists other bytes than the download carries.
+            let checksums = {
+                use sha2::Digest as _;
+                let checksum = sha2::Sha256::digest(b"<the published update>");
+                format!("{checksum:x}  {asset_name}\n")
+            };
+            let fake_client_http = FakeHttpClient::create(move |req| {
+                let release = release.clone();
+                let checksums = checksums.clone();
+                async move {
+                    let body = match req.uri().path() {
+                        "/repos/evb0110/evb-ide/releases/latest" => release,
+                        "/SHA256SUMS" => checksums,
+                        "/new-download" => "<a substituted update>".to_string(),
+                        _ => return Ok(Response::builder().status(404).body("".into()).unwrap()),
+                    };
+                    Ok(Response::builder().status(200).body(body.into()).unwrap())
+                }
+            });
+            let client = Client::new(Arc::new(FakeSystemClock::new()), fake_client_http, cx);
+            crate::init(client, cx);
+            let installs = installs.clone();
+            cx.set_global(InstallOverride(Rc::new(move |_, _| {
+                installs.fetch_add(1, atomic::Ordering::SeqCst);
+                Ok(None)
+            })));
+        });
+
+        let auto_updater = cx.update(|cx| AutoUpdater::get(cx).expect("auto updater should exist"));
+        // A manual check reports its failure; an automatic one stays quiet.
+        auto_updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
+        let mut status = AutoUpdateStatus::Idle;
+        for _ in 0..1000 {
+            cx.background_executor.timer(Duration::from_millis(0)).await;
+            cx.run_until_parked();
+            status = auto_updater.read_with(cx, |updater, _| updater.status());
+            if matches!(
+                status,
+                AutoUpdateStatus::Errored { .. } | AutoUpdateStatus::Updated { .. }
+            ) {
+                break;
+            }
+        }
+        assert!(
+            matches!(status, AutoUpdateStatus::Errored { .. }),
+            "{status:?}"
+        );
+        assert_eq!(installs.load(atomic::Ordering::SeqCst), 0);
     }
 
     #[cfg(target_os = "linux")]
