@@ -578,7 +578,10 @@ fn appearance_page() -> SettingsPage {
                                 settings_content.theme.theme = None;
                                 return;
                             };
-                            let settings_value = settings_content.theme.theme.get_or_insert_default();
+                            let settings_value = settings_content
+                                .theme
+                                .theme
+                                .get_or_insert_with(|| theme_selection_in_effect(app));
                             *settings_value = match value {
                                 settings::ThemeSelectionDiscriminants::Static => {
                                     let name = match settings_value {
@@ -635,13 +638,13 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value, _| {
+                                    write: |settings_content, value, app: &App| {
                                         let Some(value) = value else {
                                             return;
                                         };
                                         match settings_content
                                             .theme
-                                            .theme.get_or_insert_default() {
+                                            .theme.get_or_insert_with(|| theme_selection_in_effect(app)) {
                                                 settings::ThemeSelection::Static(theme_name) => *theme_name = value,
                                                 _ => return
                                             }
@@ -664,13 +667,13 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value, _| {
+                                    write: |settings_content, value, app: &App| {
                                         let Some(value) = value else {
                                             return;
                                         };
                                         match settings_content
                                             .theme
-                                            .theme.get_or_insert_default() {
+                                            .theme.get_or_insert_with(|| theme_selection_in_effect(app)) {
                                                 settings::ThemeSelection::Dynamic{ mode, ..} => *mode = value,
                                                 _ => return
                                             }
@@ -691,13 +694,13 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value, _| {
+                                    write: |settings_content, value, app: &App| {
                                         let Some(value) = value else {
                                             return;
                                         };
                                         match settings_content
                                             .theme
-                                            .theme.get_or_insert_default() {
+                                            .theme.get_or_insert_with(|| theme_selection_in_effect(app)) {
                                                 settings::ThemeSelection::Dynamic{ light, ..} => *light = value,
                                                 _ => return
                                             }
@@ -718,13 +721,13 @@ fn appearance_page() -> SettingsPage {
                                             _ => None
                                         }
                                     },
-                                    write: |settings_content, value, _| {
+                                    write: |settings_content, value, app: &App| {
                                         let Some(value) = value else {
                                             return;
                                         };
                                         match settings_content
                                             .theme
-                                            .theme.get_or_insert_default() {
+                                            .theme.get_or_insert_with(|| theme_selection_in_effect(app)) {
                                                 settings::ThemeSelection::Dynamic{ dark, ..} => *dark = value,
                                                 _ => return
                                             }
@@ -11600,4 +11603,16 @@ mod tests {
         assert_eq!(settings.vim_mode, Some(true));
         assert_eq!(settings.helix_mode, Some(false));
     }
+}
+
+/// The theme selection in effect. A theme field changed for the first time starts from it rather
+/// than from Zed's default pair, which EVB IDE's defaults replace, so changing one theme does not
+/// also switch the other one to Zed's.
+fn theme_selection_in_effect(app: &App) -> settings::ThemeSelection {
+    app.global::<settings::SettingsStore>()
+        .merged_settings()
+        .theme
+        .theme
+        .clone()
+        .unwrap_or_default()
 }

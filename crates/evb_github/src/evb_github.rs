@@ -1401,7 +1401,7 @@ query PullRequestStatus($owner: String!, $name: String!, $number: Int!, $after: 
                     detailsUrl
                     startedAt
                     completedAt
-                    checkSuite {{ app {{ slug databaseId }} }}
+                    checkSuite {{ app {{ slug databaseId }} workflowRun {{ workflow {{ name }} }} }}
                     {required}
                   }}
                 }}
@@ -1555,8 +1555,21 @@ struct CheckContexts {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CheckSuite {
     app: Option<CheckApp>,
+    #[serde(default)]
+    workflow_run: Option<WorkflowRun>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct WorkflowRun {
+    workflow: Option<Workflow>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct Workflow {
+    name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1612,10 +1625,9 @@ fn check_status(node: &CheckNode) -> CheckStatus {
     }
 }
 
-/// One entry per check: a run still going outranks finished runs of the same check (a push and a
-/// pull request workflow can both report it), else the latest finished run wins. A check is its
-/// name together with the app reporting it, or a commit status: two apps' checks of one name are
-/// different checks.
+/// One entry per check: a run still going outranks finished runs of the same check, else the
+/// latest finished run wins. A check is its name together with the app and workflow reporting it,
+/// or a commit status: two apps' or two workflows' checks of one name are different checks.
 fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
     let mut latest: Vec<(Check, CheckIdentity, Option<String>)> = Vec::new();
     for node in nodes {
@@ -1636,6 +1648,12 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
                 .as_ref()
                 .and_then(|suite| suite.app.as_ref())
                 .and_then(|app| app.slug.clone()),
+            workflow: node
+                .check_suite
+                .as_ref()
+                .and_then(|suite| suite.workflow_run.as_ref())
+                .and_then(|run| run.workflow.as_ref())
+                .and_then(|workflow| workflow.name.clone()),
         };
         let at = [&node.completed_at, &node.started_at, &node.created_at]
             .into_iter()
@@ -1679,10 +1697,12 @@ fn collapse_checks(nodes: Vec<CheckNode>) -> Vec<Check> {
     latest.into_iter().map(|(check, _, _)| check).collect()
 }
 
+/// Reruns of one check share this; two workflows' jobs of the same name do not.
 #[derive(PartialEq)]
 struct CheckIdentity {
     is_status: bool,
     app: Option<String>,
+    workflow: Option<String>,
 }
 
 /// Marks the checks the base branch requires, and adds the required ones that have not reported
@@ -2203,6 +2223,10 @@ mod tests {
                 json!({ "name": "test", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-31T12:00:00Z", "checkSuite": { "app": { "slug": "other-ci" } } }),
             ),
             check(json!({ "context": "test", "state": "PENDING" })),
+            // Another workflow's job of the same name is a different check too.
+            check(
+                json!({ "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-10-31T12:00:00Z", "checkSuite": { "workflowRun": { "workflow": { "name": "Nightly" } } } }),
+            ),
         ]);
         assert_eq!(
             checks,
@@ -2238,6 +2262,13 @@ mod tests {
                 Check {
                     name: "test".into(),
                     status: CheckStatus::Pending,
+                    required: false,
+                    url: None,
+                    app_id: None,
+                },
+                Check {
+                    name: "lint".into(),
+                    status: CheckStatus::Failure,
                     required: false,
                     url: None,
                     app_id: None,

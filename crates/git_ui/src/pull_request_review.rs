@@ -328,7 +328,13 @@ fn refresh_blocks(editor: &mut Editor, force: bool, cx: &mut Context<Editor>) {
     // Threads on deleted lines count the base commit's lines, and outdated ones have none; both
     // stay in the status bar list, which opens them on GitHub.
     let mut threads: Vec<(ReviewThread, u32)> = Vec::new();
+    // Mapping diffs the whole file against its head version, so files without threads skip it.
     if let Some((work_directory, relative, review)) = &found
+        && review
+            .review
+            .threads
+            .iter()
+            .any(|thread| &thread.path == relative && thread.on_head && thread.line.is_some())
         && let Some(sha) = review.review.head_sha.clone()
         && let Some(head) = ensure_head_text(editor, work_directory, relative, &sha, cx)
         && let Some(text) = buffer_text(editor, cx)

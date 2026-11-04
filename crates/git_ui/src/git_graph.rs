@@ -1114,6 +1114,9 @@ pub(crate) fn decode_log_filter(encoded: &str) -> Option<LogFilter> {
     })
 }
 
+/// How long a commit stays selected before the branches containing it are looked up.
+const SELECTED_COMMIT_BRANCHES_DELAY: Duration = Duration::from_millis(150);
+
 const DATE_FILTERS: &[(&str, &str)] = &[
     ("Last 24 Hours", "24 hours ago"),
     ("Last 7 Days", "7 days ago"),
@@ -2565,21 +2568,25 @@ impl GitGraph {
         if !self.git_store.read(cx).is_local() {
             return;
         }
-        let branches = repository.update(cx, |repository, cx| {
-            repository.run_git_command(
-                None,
-                vec![
+        let repository = repository.downgrade();
+        self._selected_commit_branches_task = Some(cx.spawn(async move |this, cx| {
+            // Walking through commits quickly replaces this task before the delay ends, so only
+            // the commit the selection stops on is looked up; the lookup changes nothing, so it
+            // takes the read-only path that schedules no rescan.
+            cx.background_executor()
+                .timer(SELECTED_COMMIT_BRANCHES_DELAY)
+                .await;
+            let Ok(branches) = repository.update(cx, |repository, _| {
+                repository.read_git_command(vec![
                     "branch".into(),
                     "--all".into(),
                     "--contains".into(),
                     sha.to_string(),
                     "--format=%(refname:short)".into(),
-                ],
-                HashMap::default(),
-                cx,
-            )
-        });
-        self._selected_commit_branches_task = Some(cx.spawn(async move |this, cx| {
+                ])
+            }) else {
+                return;
+            };
             let Some(output) = branches.await.ok().and_then(Result::ok) else {
                 return;
             };

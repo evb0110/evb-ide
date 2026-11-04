@@ -598,7 +598,10 @@ impl Render for SystemWindowTabs {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
-                    if let Some(tab) = this.last_dragged_tab.take() {
+                    // A drag cancelled with Escape is no longer active by the time it is let go.
+                    if let Some(tab) = this.last_dragged_tab.take()
+                        && cx.has_active_drag()
+                    {
                         SystemWindowTabController::move_tab_to_new_window(cx, tab.id);
                         if tab.id == window.window_handle().window_id() {
                             window.move_tab_to_new_window();
