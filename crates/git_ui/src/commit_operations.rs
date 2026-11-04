@@ -978,11 +978,24 @@ pub(crate) fn push_up_to(target: &CommitTarget, window: &mut Window, cx: &mut Ap
             )
             .await
             .unwrap_or_default();
-            let push_refspec_count = push_refspecs.lines().filter(|line| !line.trim().is_empty()).count();
-            // Configured push refspecs decide alone; a branch they leave out, or send to several
-            // places, is not pushed to an invented destination.
+            // Configured push refspecs decide alone: a branch they leave out, or send to several places,
+            // is not pushed to an invented destination. Refspecs for other branches do not matter.
+            let branch_ref = format!("refs/heads/{branch}");
+            let matching_refspecs = push_refspecs
+                .lines()
+                .map(|refspec| refspec.trim().trim_start_matches('+'))
+                .filter(|refspec| !refspec.is_empty())
+                .filter(|refspec| {
+                    let source = refspec.split(':').next().unwrap_or_default();
+                    match source.strip_suffix('*') {
+                        Some(prefix) => branch_ref.starts_with(prefix) || branch.starts_with(prefix),
+                        None => source == branch_ref || source == branch,
+                    }
+                })
+                .count();
+            let has_refspecs = push_refspecs.lines().any(|line| !line.trim().is_empty());
             anyhow::ensure!(
-                push_refspec_count == 0 || (push_refspec_count == 1 && !mapped_ref.is_empty()),
+                !has_refspecs || (matching_refspecs == 1 && !mapped_ref.is_empty()),
                 "The push settings of {remote} (remote.{remote}.push) do not send '{branch}' to one \
                  branch; push it from the terminal."
             );

@@ -99,8 +99,15 @@ pub fn init(cx: &mut App) {
                     let controller = controller.clone();
                     move |_, _: &Stop, window, cx| {
                         let controller = controller.clone();
-                        window.defer(cx, move |_, cx| {
-                            controller.update(cx, |controller, cx| controller.stop_selected(cx))
+                        window.defer(cx, move |window, cx| {
+                            let stopped = controller
+                                .update(cx, |controller, cx| controller.stop_selected(cx));
+                            // The same key stops a debug session started outside the widget, as
+                            // the base keymap's debugger::Stop did before EVB IDE claimed it.
+                            if !stopped && let Ok(action) = cx.build_action("debugger::Stop", None)
+                            {
+                                window.dispatch_action(action, cx);
+                            }
                         });
                     }
                 })
@@ -1007,10 +1014,17 @@ impl RunController {
         }
     }
 
-    fn stop_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(selected) = self.selected.clone() {
-            self.stop(&selected, cx);
-        }
+    /// Stops the selected configuration, returning whether it had anything to stop.
+    fn stop_selected(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(selected) = self.selected.clone() else {
+            return false;
+        };
+        let running = self.is_running(&selected)
+            || self
+                .selected_configuration()
+                .is_some_and(|configuration| !self.debug_sessions(configuration, cx).is_empty());
+        self.stop(&selected, cx);
+        running
     }
 
     /// Stops the configuration's run. Before its terminal is being created the

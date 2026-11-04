@@ -29,6 +29,7 @@ const GH_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_RATE_LIMIT_PAUSE: Duration = Duration::from_secs(60);
 const DEFAULT_BRANCH_TTL: Duration = Duration::from_secs(60 * 60);
 const REQUIRED_CHECKS_TTL: Duration = Duration::from_secs(10 * 60);
+const INCOMPLETE_REQUIRED_CHECKS_TTL: Duration = Duration::from_secs(2 * 60);
 const API_VERSION: &str = "2022-11-28";
 const USER_AGENT: &str = "evb-ide";
 
@@ -134,6 +135,8 @@ pub fn is_valid_host(host: &str) -> bool {
     let valid_port = port.is_none_or(|port| {
         !port.is_empty() && port.len() <= 5 && port.bytes().all(|byte| byte.is_ascii_digit())
     });
+    // A fully qualified name may end in the root's dot; internal hosts may use underscores.
+    let name = name.strip_suffix('.').unwrap_or(name);
     let valid_name = !name.is_empty()
         && name.split('.').all(|label| {
             !label.is_empty()
@@ -142,7 +145,7 @@ pub fn is_valid_host(host: &str) -> bool {
                 && !label.ends_with('-')
                 && label
                     .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
         });
     valid_port && valid_name
 }
@@ -370,7 +373,7 @@ pub struct GitHubClient {
     paused_until: Mutex<HashMap<String, SystemTime>>,
     default_branches: Mutex<HashMap<(String, String, String), (Instant, String)>>,
     required_checks:
-        Mutex<HashMap<(String, String, String, String), (Instant, Vec<RequiredCheck>)>>,
+        Mutex<HashMap<(String, String, String, String), (Instant, Vec<RequiredCheck>, bool)>>,
 }
 
 impl GitHubClient {
@@ -857,10 +860,16 @@ impl GitHubClient {
             repository.name.to_lowercase(),
             branch.to_string(),
         );
-        if let Some((read_at, required)) = self.required_checks.lock().get(&key)
-            && read_at.elapsed() < REQUIRED_CHECKS_TTL
+        // A read that failed is retried sooner, but not on every refresh.
+        if let Some((read_at, required, complete)) = self.required_checks.lock().get(&key)
+            && read_at.elapsed()
+                < if *complete {
+                    REQUIRED_CHECKS_TTL
+                } else {
+                    INCOMPLETE_REQUIRED_CHECKS_TTL
+                }
         {
-            return (required.clone(), true);
+            return (required.clone(), *complete);
         }
         let branch_path = query_value(branch);
         let mut required = Vec::new();
@@ -946,11 +955,9 @@ impl GitHubClient {
         }
         required.sort();
         required.dedup();
-        if complete {
-            self.required_checks
-                .lock()
-                .insert(key, (Instant::now(), required.clone()));
-        }
+        self.required_checks
+            .lock()
+            .insert(key, (Instant::now(), required.clone(), complete));
         (required, complete)
     }
 
@@ -2088,6 +2095,8 @@ mod tests {
             "GitHub.com",
             "acme.ghe.com",
             "git.example.com:8443",
+            "git_hub.corp.example",
+            "github.example.com.",
         ] {
             assert!(is_valid_host(host), "{host}");
         }
