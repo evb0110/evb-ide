@@ -307,7 +307,24 @@ fn quote_script_name(
         _ => spawn_in_terminal.shell.clone(),
     };
     let shell_kind = util::shell_builder::ShellBuilder::new(&shell, is_windows).kind();
+    // On Windows the package managers are `.cmd` shims; PowerShell would pick `npm.ps1` instead,
+    // which its default execution policy refuses to run. Debug keeps the plain name, which the
+    // Node debugger expects.
+    if is_windows
+        && let RunConfigurationKind::PackageScript(
+            PackageManager::Npm | PackageManager::Pnpm | PackageManager::Yarn,
+        ) = configuration.kind
+        && let Some(command) = spawn_in_terminal.command.as_mut()
+        && !command.ends_with(".cmd")
+    {
+        command.push_str(".cmd");
+    }
     if let Some(script) = spawn_in_terminal.args.last_mut() {
+        // The terminal turns `$NAME` into a variable for some shells even inside quotes.
+        anyhow::ensure!(
+            !script.contains('$'),
+            "a script name containing `$` can only be run from the terminal"
+        );
         let quoted = shell_kind
             .try_quote(script)
             .ok_or_else(|| anyhow::anyhow!("the shell cannot quote the script name {script:?}"))?
@@ -704,6 +721,18 @@ impl RunController {
             }
 
             this.update(cx, |this, cx| {
+                // A configuration that is still running stays listed, even when its script was
+                // renamed or removed, so it can still be stopped.
+                let mut configurations = configurations;
+                for configuration in &this.configurations {
+                    if this.is_running(&configuration.id)
+                        && !configurations
+                            .iter()
+                            .any(|listed| listed.id == configuration.id)
+                    {
+                        configurations.push(configuration.clone());
+                    }
+                }
                 this.configurations = configurations;
                 let selection_is_valid = |id: &str| {
                     this.configurations
@@ -1162,7 +1191,8 @@ fn task_context_for<'a>(
 
 async fn load_manifest(fs: &dyn Fs, path: &Path) -> Option<serde_json::Value> {
     let text = fs.load(path).await.log_err()?;
-    serde_json::from_str(&text)
+    // npm and composer accept a byte order mark at the start; serde_json does not.
+    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text))
         .map_err(|error| anyhow::anyhow!("parsing {}: {error}", path.display()))
         .log_err()
 }
@@ -1414,6 +1444,17 @@ mod tests {
             )
             .unwrap();
             assert_eq!(quoted.args, vec!["run", "'qa; touch injected'"]);
+            let mut with_variable = spawn("/bin/sh");
+            with_variable.args = vec!["run".into(), "check:$HOME".into()];
+            assert!(
+                quote_script_name(
+                    &configuration(RunConfigurationKind::PackageScript(PackageManager::Npm)),
+                    with_variable,
+                    &project,
+                    cx,
+                )
+                .is_err()
+            );
             // A hand-written task keeps its shell syntax.
             let task = quote_script_name(
                 &configuration(RunConfigurationKind::Task),
