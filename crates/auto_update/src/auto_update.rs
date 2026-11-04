@@ -255,19 +255,24 @@ fn evb_release_asset_name(version: &str) -> Result<String> {
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn before_stall<T, E: Into<anyhow::Error>>(
+    executor: &BackgroundExecutor,
     future: impl std::future::Future<Output = std::result::Result<T, E>>,
 ) -> Result<T> {
     futures_lite::future::or(async { future.await.map_err(Into::into) }, async {
-        smol::Timer::after(STALL_TIMEOUT).await;
+        executor.timer(STALL_TIMEOUT).await;
         Err(anyhow::anyhow!("the update server stopped responding"))
     })
     .await
 }
 
-async fn fetch_github_release(client: &HttpClientWithUrl, url: &str) -> Result<GitHubRelease> {
-    let mut response = before_stall(client.get(url, Default::default(), true)).await?;
+async fn fetch_github_release(
+    client: &HttpClientWithUrl,
+    executor: &BackgroundExecutor,
+    url: &str,
+) -> Result<GitHubRelease> {
+    let mut response = before_stall(executor, client.get(url, Default::default(), true)).await?;
     let mut body = Vec::new();
-    before_stall(response.body_mut().read_to_end(&mut body)).await?;
+    before_stall(executor, response.body_mut().read_to_end(&mut body)).await?;
     anyhow::ensure!(
         response.status().is_success(),
         "failed to fetch release {url}: {} {:?}",
@@ -313,10 +318,15 @@ fn evb_release_for_this_system(release: GitHubRelease) -> Result<EvbRelease> {
 /// Fetches the release notes of an EVB IDE version from its GitHub release.
 pub async fn fetch_evb_release_notes(
     client: &HttpClientWithUrl,
+    executor: &BackgroundExecutor,
     version: &Version,
 ) -> Result<EvbReleaseNotes> {
-    let release =
-        fetch_github_release(client, &format!("{EVB_RELEASES_API_URL}/tags/v{version}")).await?;
+    let release = fetch_github_release(
+        client,
+        executor,
+        &format!("{EVB_RELEASES_API_URL}/tags/v{version}"),
+    )
+    .await?;
     Ok(EvbReleaseNotes {
         title: format!("EVB IDE {version}"),
         notes: release.body.unwrap_or_default(),
@@ -336,17 +346,21 @@ fn expected_checksum(checksums: &str, asset_name: &str) -> Result<String> {
 
 async fn fetch_expected_checksum(
     client: &HttpClientWithUrl,
+    executor: &BackgroundExecutor,
     release: &EvbRelease,
 ) -> Result<String> {
-    let mut response =
-        before_stall(client.get(&release.checksums_url, Default::default(), true)).await?;
+    let mut response = before_stall(
+        executor,
+        client.get(&release.checksums_url, Default::default(), true),
+    )
+    .await?;
     anyhow::ensure!(
         response.status().is_success(),
         "failed to download {EVB_CHECKSUMS_ASSET}: {:?}",
         response.status()
     );
     let mut checksums = String::new();
-    before_stall(response.body_mut().read_to_string(&mut checksums)).await?;
+    before_stall(executor, response.body_mut().read_to_string(&mut checksums)).await?;
     expected_checksum(&checksums, &release.asset_name)
 }
 
@@ -909,7 +923,12 @@ impl AutoUpdater {
         });
 
         let fetched_release = evb_release_for_this_system(
-            fetch_github_release(&client, &format!("{EVB_RELEASES_API_URL}/latest")).await?,
+            fetch_github_release(
+                &client,
+                cx.background_executor(),
+                &format!("{EVB_RELEASES_API_URL}/latest"),
+            )
+            .await?,
         )?;
         let fetched_release_data = fetched_release.asset.clone();
         let fetched_version = fetched_release_data.clone().version;
@@ -953,13 +972,15 @@ impl AutoUpdater {
             .await
             .context("Failed to create installer dir")?;
         let target_path = Self::target_path(&installer_dir).await?;
-        let expected_checksum = fetch_expected_checksum(&client, &fetched_release).await?;
+        let expected_checksum =
+            fetch_expected_checksum(&client, cx.background_executor(), &fetched_release).await?;
         let progress_entity = this.clone();
         let mut progress_cx = cx.clone();
         download_release(
             &target_path,
             fetched_release_data,
             client,
+            cx.background_executor().clone(),
             move |progress| {
                 progress_entity.update(&mut progress_cx, |this, cx| {
                     if let AutoUpdateStatus::Downloading {
@@ -1256,11 +1277,16 @@ async fn download_release(
     target_path: &Path,
     release: ReleaseAsset,
     client: Arc<HttpClientWithUrl>,
+    executor: BackgroundExecutor,
     mut on_progress: impl FnMut(Option<f32>),
 ) -> Result<()> {
     let mut target_file = File::create(&target_path).await?;
 
-    let mut response = before_stall(client.get(&release.url, Default::default(), true)).await?;
+    let mut response = before_stall(
+        &executor,
+        client.get(&release.url, Default::default(), true),
+    )
+    .await?;
     anyhow::ensure!(
         response.status().is_success(),
         "failed to download update: {:?}",
@@ -1279,7 +1305,7 @@ async fn download_release(
     let mut buffer = [0u8; 8192];
     let body = response.body_mut();
     loop {
-        let bytes_read = before_stall(body.read(&mut buffer)).await?;
+        let bytes_read = before_stall(&executor, body.read(&mut buffer)).await?;
         if bytes_read == 0 {
             break;
         }
@@ -1916,7 +1942,7 @@ mod tests {
         };
 
         let reported = Rc::new(std::cell::RefCell::new(Vec::<f32>::new()));
-        download_release(&target_path, release, client, {
+        download_release(&target_path, release, client, cx.executor(), {
             let reported = reported.clone();
             move |fraction| {
                 if let Some(fraction) = fraction {
@@ -1976,7 +2002,7 @@ mod tests {
         };
 
         let reported = Rc::new(std::cell::RefCell::new(Vec::<Option<f32>>::new()));
-        download_release(&target_path, release, client, {
+        download_release(&target_path, release, client, cx.executor(), {
             let reported = reported.clone();
             move |fraction| {
                 reported.borrow_mut().push(fraction);

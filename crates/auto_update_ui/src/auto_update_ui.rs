@@ -108,7 +108,8 @@ fn view_release_notes_locally(
 
     cx.spawn_in(window, async move |workspace, cx| {
         let markdown = markdown.await.log_err();
-        let release_notes = fetch_evb_release_notes(&client, &version).await;
+        let release_notes =
+            fetch_evb_release_notes(&client, cx.background_executor(), &version).await;
 
         let res: Option<()> = maybe!(async {
             let release_notes = release_notes.log_err()?;
