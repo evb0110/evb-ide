@@ -426,20 +426,108 @@ async fn stopped_rebase_started_from(
     Ok(false)
 }
 
+/// The commits a rewrite from `base` (a commit, or `--root`) replays up to `head_sha`.
+fn replayed_range(base: &str, head_sha: &str) -> String {
+    if base == "--root" {
+        head_sha.to_string()
+    } else {
+        format!("{base}..{head_sha}")
+    }
+}
+
+/// Refuses a rewrite that would lose local work `--autostash` does not protect: staged changes,
+/// which its restore puts back as unstaged only, and ignored files at paths that the replayed
+/// commits (`replayed`, a revision range) write or delete, which git overwrites silently.
+async fn ensure_rewrite_keeps_local_work(
+    repository: &Entity<Repository>,
+    replayed: &str,
+    cx: &mut AsyncWindowContext,
+) -> Result<()> {
+    git(
+        repository,
+        "Checking local changes",
+        args(["diff", "--cached", "--quiet"]),
+        HashMap::default(),
+        cx,
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Commit or unstage your staged changes first: rewriting history would not keep them staged."
+        )
+    })?;
+    let touched = git(
+        repository,
+        "Checking local changes",
+        args([
+            "log",
+            "--format=",
+            "--name-only",
+            "--no-renames",
+            replayed,
+            "--",
+        ]),
+        HashMap::default(),
+        cx,
+    )
+    .await?;
+    let mut touched = touched
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    touched.sort_unstable();
+    touched.dedup();
+    let mut ignored = Vec::new();
+    for paths in touched.chunks(500) {
+        let mut command = args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+        ]);
+        command.extend(paths.iter().map(|path| format!(":(literal){path}")));
+        let output = git(
+            repository,
+            "Checking local changes",
+            command,
+            HashMap::default(),
+            cx,
+        )
+        .await?;
+        ignored.extend(output.lines().map(str::to_string));
+    }
+    if let Some(first) = ignored.first() {
+        anyhow::bail!(
+            "Rewriting history would replace ignored local files ({first}{}). Move them aside first.",
+            if ignored.len() > 1 {
+                format!(" and {} more", ignored.len() - 1)
+            } else {
+                String::new()
+            }
+        );
+    }
+    Ok(())
+}
+
 /// Runs a rebase of `head`, the HEAD the user confirmed, and aborts it when it
 /// fails, so a failed rewrite leaves the branch as it was. It refuses to start
-/// while another operation is stopped, and only aborts a stopped rebase that
-/// started from `head`.
+/// while another operation is stopped, or when it would lose local work, and
+/// only aborts a stopped rebase that started from `head`. `replayed` is the
+/// revision range whose commits the rebase writes into the working tree.
 async fn rebase(
     repository: &Entity<Repository>,
     status: &str,
     rebase_args: Vec<String>,
     env: HashMap<String, String>,
     head: &HeadState,
+    replayed: &str,
     cx: &mut AsyncWindowContext,
 ) -> Result<()> {
     ensure_no_operation_in_progress(repository, cx).await?;
     ensure_head_unchanged(repository, head, cx).await?;
+    ensure_rewrite_keeps_local_work(repository, replayed, cx).await?;
     let mut command = args([
         "-c",
         "commit.cleanup=whitespace",
@@ -468,6 +556,21 @@ async fn rebase(
                  progress; finish or abort it with git. Abort error: {abort_error:#}"
             )),
         });
+    }
+    // Git reports success even when putting the stashed local changes back conflicts.
+    let conflicted = git(
+        repository,
+        "Checking local changes",
+        args(["diff", "--name-only", "--diff-filter=U"]),
+        HashMap::default(),
+        cx,
+    )
+    .await?;
+    if let Some(first) = conflicted.lines().next() {
+        anyhow::bail!(
+            "History was rewritten, but your local changes conflicted when they were put back \
+             (in {first}). Resolve the conflicts; your changes are also kept in `git stash list`."
+        );
     }
     Ok(())
 }
@@ -670,12 +773,9 @@ pub(crate) fn drop_commit(target: &CommitTarget, window: &mut Window, cx: &mut A
                 "Only a commit with one parent can be dropped."
             );
             let head = read_head(&repository, cx).await?;
-            if prepare_history_rewrite(&target, &repository, &head, cx)
-                .await?
-                .is_none()
-            {
+            let Some(base) = prepare_history_rewrite(&target, &repository, &head, cx).await? else {
                 return Ok(());
-            }
+            };
             if !confirm(
                 PromptLevel::Warning,
                 format!("Drop {}?", target.short_sha()),
@@ -700,6 +800,7 @@ pub(crate) fn drop_commit(target: &CommitTarget, window: &mut Window, cx: &mut A
                 ]),
                 HashMap::default(),
                 &head,
+                &replayed_range(&base, &head.sha),
                 cx,
             )
             .await?;
@@ -778,6 +879,7 @@ pub(crate) fn fixup(target: &CommitTarget, window: &mut Window, cx: &mut App) {
                 ]),
                 HashMap::default(),
                 &after_fixup,
+                &replayed_range(&base, &after_fixup.sha),
                 cx,
             )
             .await
@@ -855,6 +957,23 @@ pub(crate) fn push_up_to(target: &CommitTarget, window: &mut Window, cx: &mut Ap
                 "'{branch}' has no remote to push to; push it once first."
             );
             let remote = remote.to_string();
+            let push_refspecs = git(
+                &repository,
+                "Reading push settings",
+                args(["config", "--get-all", &format!("remote.{remote}.push")]),
+                HashMap::default(),
+                cx,
+            )
+            .await
+            .unwrap_or_default();
+            let push_refspec_count = push_refspecs.lines().filter(|line| !line.trim().is_empty()).count();
+            // Configured push refspecs decide alone; a branch they leave out, or send to several
+            // places, is not pushed to an invented destination.
+            anyhow::ensure!(
+                push_refspec_count == 0 || (push_refspec_count == 1 && !mapped_ref.is_empty()),
+                "The push settings of {remote} (remote.{remote}.push) do not send '{branch}' to one \
+                 branch; push it from the terminal."
+            );
             // Without a refspec, git's default pushes to the tracked branch on
             // the remote it pulls from and to the same name elsewhere.
             let merge_ref = if !mapped_ref.is_empty() {
@@ -1044,6 +1163,7 @@ fn reword(
                     ]),
                     env,
                     &head,
+                    &replayed_range(&base, &head.sha),
                     cx,
                 )
                 .await?;
@@ -1175,7 +1295,18 @@ fn rebase_onto(
                 .upgrade()
                 .context("the repository was closed")?;
             let head = read_head(&repository, cx).await?;
-            let replayed = format!("{ref_name}..{}", head.sha);
+            // Resolved once: the checks and the rebase must see the same destination.
+            let onto = git(
+                &repository,
+                "Checking history",
+                args(["rev-parse", "--verify", &format!("{ref_name}^{{commit}}")]),
+                HashMap::default(),
+                cx,
+            )
+            .await?
+            .trim()
+            .to_string();
+            let replayed = format!("{onto}..{}", head.sha);
             let merges = git(
                 &repository,
                 "Checking history",
@@ -1205,9 +1336,11 @@ fn rebase_onto(
             rebase(
                 &repository,
                 &format!("Rebasing onto {name}"),
-                args(["--autostash", &ref_name]),
+                args(["--autostash", &onto]),
                 HashMap::default(),
                 &head,
+                // Both sides: the destination's commits are checked out too.
+                &format!("{onto}...{}", head.sha),
                 cx,
             )
             .await?;
@@ -1356,7 +1489,8 @@ fn delete_branch(target: &CommitTarget, name: &str, window: &mut Window, cx: &mu
                 &repository,
                 &format!("Deleting {name}"),
                 args(["branch", "-d", "--", &name]),
-                HashMap::default(),
+                // Its message is matched below, so it must not be translated.
+                HashMap::from_iter([("LC_ALL".to_string(), "C".to_string())]),
                 cx,
             )
             .await;
@@ -2034,6 +2168,58 @@ pub(crate) mod tests {
         wait_for_prompt(&mut cx, "OK");
         assert_eq!(run_git(root, &["rev-parse", "main"]), d);
         assert_eq!(run_git(root, &["rev-parse", "other"]), shas[0]);
+    }
+
+    #[gpui::test]
+    async fn test_rewrites_keep_staged_changes_and_ignored_files(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let tree = TempTree::new(json!({}));
+        let root = tree.path();
+        let shas = create_repository(root);
+        // `local-data` was committed once and then untracked; the local copy is ignored now.
+        commit_file(root, ".gitignore", "local-data\n", "Ignore local data");
+        std::fs::write(root.join("local-data"), "old\n").expect("writing a fixture file");
+        run_git(root, &["add", "-f", "local-data"]);
+        run_git(root, &["commit", "-q", "-m", "Add local data"]);
+        let with_data = run_git(root, &["rev-parse", "HEAD"]);
+        run_git(root, &["rm", "-q", "--cached", "local-data"]);
+        run_git(root, &["commit", "-q", "-m", "Stop tracking local data"]);
+        std::fs::write(root.join("local-data"), "valuable\n").expect("writing a fixture file");
+        let (mut cx, repository, workspace) = open(root, cx).await;
+
+        // Rewriting the commit that wrote `local-data` would overwrite, then delete, it.
+        cx.update(|window, cx| {
+            reword(
+                target(&with_data, &repository, &workspace),
+                head_state(root),
+                "Edited".into(),
+                window,
+                cx,
+            )
+        });
+        wait_for_prompt(&mut cx, "OK");
+        assert_eq!(
+            std::fs::read_to_string(root.join("local-data")).unwrap(),
+            "valuable\n"
+        );
+
+        // A staged change would come back unstaged, losing what was staged.
+        std::fs::write(root.join("a.txt"), "staged\n").expect("writing a fixture file");
+        run_git(root, &["add", "a.txt"]);
+        std::fs::write(root.join("a.txt"), "unstaged\n").expect("writing a fixture file");
+        cx.update(|window, cx| {
+            reword(
+                target(&shas[1], &repository, &workspace),
+                head_state(root),
+                "B edited".into(),
+                window,
+                cx,
+            )
+        });
+        wait_for_prompt(&mut cx, "OK");
+        assert_eq!(run_git(root, &["show", ":a.txt"]), "staged");
+        assert!(!subjects(root).contains(&"B edited".to_string()));
     }
 
     #[gpui::test]
