@@ -325,6 +325,8 @@ impl SystemWindowTabs {
             .flex_none()
             .h(Tab::container_height(cx))
             .max_w(rems(18.))
+            .border_x_1()
+            .border_color(gpui::transparent_black())
             .gap_1()
             .pl(DynamicSpacing::Base12.px(cx))
             .pr(if has_close_button {
@@ -343,7 +345,6 @@ impl SystemWindowTabs {
             .map(|tab| {
                 if is_active {
                     tab.bg(colors.tab_bar_background)
-                        .border_x_1()
                         .border_color(border_color)
                         .child(
                             div()
