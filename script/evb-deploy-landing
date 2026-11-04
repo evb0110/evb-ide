@@ -7,6 +7,17 @@ mkdir -p "$repo_root/.devkit"
 deployment_root="$(mktemp -d "${TMPDIR:-$repo_root/.devkit}/evb-landing.XXXXXX")"
 trap 'rm -rf "$deployment_root"' EXIT
 
+if ! command -v vercel >/dev/null 2>&1; then
+    # Global npm packages live per nvm Node version, so vercel may sit under another one.
+    for candidate in "$HOME"/.nvm/versions/node/*/bin/vercel; do
+        [[ -x "$candidate" ]] && PATH="$(dirname "$candidate"):$PATH" && break
+    done
+fi
+if ! command -v vercel >/dev/null 2>&1; then
+    echo 'vercel CLI not found: npm install -g vercel' >&2
+    exit 1
+fi
+
 if [[ ! -f landing/.vercel/project.json ]]; then
     echo 'Link landing to the EVB IDE Vercel project first: cd landing && vercel link' >&2
     exit 1
