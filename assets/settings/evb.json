@@ -81,7 +81,6 @@
   },
   "file_types": {
     "Blade": ["*.blade.php"],
-    "Dockerfile": ["Dockerfile.*", "Dockerfile-*", "Containerfile.*", "Containerfile-*"],
     // This layer replaces the default list, so it repeats it and adds EVB IDE's config
     // directories, whose settings, keymap, tasks and debug files take comments too.
     "JSONC": [
