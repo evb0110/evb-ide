@@ -2610,6 +2610,63 @@ impl Pane {
         &self.toolbar
     }
 
+    fn tab_split_menu_entries(
+        mut menu: ContextMenu,
+        pane: &Entity<Self>,
+        item_id: EntityId,
+        window: &mut Window,
+        cx: &App,
+    ) -> ContextMenu {
+        let can_clone = pane
+            .read(cx)
+            .items
+            .iter()
+            .find(|item| item.item_id() == item_id)
+            .is_some_and(|item| item.can_split(cx));
+
+        menu = menu.separator();
+        for (label, action, direction, mode) in [
+            (
+                "Move to Split Right",
+                SplitAndMoveRight.boxed_clone(),
+                SplitDirection::Right,
+                SplitMode::MovePane,
+            ),
+            (
+                "Move to Split Down",
+                SplitAndMoveDown.boxed_clone(),
+                SplitDirection::Down,
+                SplitMode::MovePane,
+            ),
+            (
+                "Split Right",
+                SplitRight::default().boxed_clone(),
+                SplitDirection::Right,
+                SplitMode::ClonePane,
+            ),
+            (
+                "Split Down",
+                SplitDown::default().boxed_clone(),
+                SplitDirection::Down,
+                SplitMode::ClonePane,
+            ),
+        ] {
+            menu = menu.item(ContextMenuItem::Entry(
+                ContextMenuEntry::new(label)
+                    .action(action)
+                    .disabled(mode == SplitMode::ClonePane && !can_clone)
+                    .handler(window.handler_for(pane, move |pane, window, cx| {
+                        let Some(index) = pane.index_for_item_id(item_id) else {
+                            return;
+                        };
+                        pane.activate_item(index, true, true, window, cx);
+                        pane.split(direction, mode, window, cx);
+                    })),
+            ));
+        }
+        menu
+    }
+
     pub fn remove_navigation_history_paths(
         &mut self,
         project_paths: &HashSet<ProjectPath>,
@@ -3260,6 +3317,8 @@ impl Pane {
                                         .detach_and_log_err(cx)
                                 }),
                             );
+
+                        menu = Self::tab_split_menu_entries(menu, &pane, item_id, window, cx);
 
                         let pin_tab_entries = |menu: ContextMenu| {
                             menu.separator().map(|this| {
@@ -9124,6 +9183,231 @@ mod tests {
         for split_direction in SplitDirection::all() {
             test_single_pane_split(["A"], split_direction, SplitMode::EmptyPane, cx).await;
         }
+    }
+
+    fn tab_split_context_menu(
+        pane: &Entity<Pane>,
+        item_id: EntityId,
+        cx: &mut VisualTestContext,
+    ) -> Entity<ContextMenu> {
+        cx.update(|window, cx| {
+            ContextMenu::build(window, cx, |menu, window, cx| {
+                Pane::tab_split_menu_entries(menu, pane, item_id, window, cx)
+            })
+        })
+    }
+
+    fn confirm_tab_split_context_menu(
+        menu: &Entity<ContextMenu>,
+        label: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        menu.update_in(cx, |menu, window, cx| {
+            let labels = menu.item_labels();
+            menu.select_first(&menu::SelectFirst, window, cx);
+            for _ in 0..labels.len() {
+                if menu
+                    .selected_index()
+                    .and_then(|index| labels.get(index))
+                    .and_then(Option::as_ref)
+                    .is_some_and(|selected| selected.as_ref() == label)
+                {
+                    menu.confirm(&menu::Confirm, window, cx);
+                    return;
+                }
+                menu.select_next(&menu::SelectNext, window, cx);
+            }
+            panic!("context menu command is not selectable: {label}");
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_tab_split_context_menu_targets_clicked_tab(cx: &mut TestAppContext) {
+        for (label, direction, mode) in [
+            (
+                "Move to Split Right",
+                SplitDirection::Right,
+                SplitMode::MovePane,
+            ),
+            (
+                "Move to Split Down",
+                SplitDirection::Down,
+                SplitMode::MovePane,
+            ),
+            ("Split Right", SplitDirection::Right, SplitMode::ClonePane),
+            ("Split Down", SplitDirection::Down, SplitMode::ClonePane),
+        ] {
+            init_test(cx);
+            let project = Project::test(FakeFs::new(cx.executor()), None, cx).await;
+            let (workspace, cx) =
+                cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+            let source = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+            let [clicked_item, active_item] = set_labeled_items(&source, ["A", "B*"], cx);
+            let menu = tab_split_context_menu(&source, clicked_item.item_id(), cx);
+
+            source.update_in(cx, |pane, window, cx| {
+                pane.add_item(clicked_item.clone(), false, false, Some(2), window, cx);
+                let active_index = pane
+                    .index_for_item_id(active_item.item_id())
+                    .expect("previously active tab remains open");
+                pane.activate_item(active_index, false, false, window, cx);
+            });
+            assert_item_labels(&source, ["B*", "A"], cx);
+
+            confirm_tab_split_context_menu(&menu, label, cx);
+            let destination =
+                workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+            assert_ne!(source, destination);
+            assert_item_labels(&destination, ["A*"], cx);
+            let destination_item_id = destination.read_with(cx, |pane, _| {
+                pane.active_item()
+                    .expect("split contains clicked tab")
+                    .item_id()
+            });
+            if mode == SplitMode::MovePane {
+                assert_eq!(destination_item_id, clicked_item.item_id());
+                assert_item_labels(&source, ["B*"], cx);
+            } else {
+                assert_ne!(destination_item_id, clicked_item.item_id());
+                assert_item_labels(&source, ["B", "A*"], cx);
+            }
+            let axis = match direction {
+                SplitDirection::Right | SplitDirection::Left => Axis::Horizontal,
+                SplitDirection::Down | SplitDirection::Up => Axis::Vertical,
+            };
+            assert_pane_ids_on_axis(
+                &workspace,
+                [&source.entity_id(), &destination.entity_id()],
+                axis,
+                cx,
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_tab_split_context_menu_moves_only_tab(cx: &mut TestAppContext) {
+        for (label, axis) in [
+            ("Move to Split Right", Axis::Horizontal),
+            ("Move to Split Down", Axis::Vertical),
+        ] {
+            init_test(cx);
+            let project = Project::test(FakeFs::new(cx.executor()), None, cx).await;
+            let (workspace, cx) =
+                cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+            let source = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+            let [clicked_item] = set_labeled_items(&source, ["A*"], cx);
+            let menu = tab_split_context_menu(&source, clicked_item.item_id(), cx);
+
+            confirm_tab_split_context_menu(&menu, label, cx);
+
+            let empty = workspace.read_with(cx, |workspace, _| {
+                assert_eq!(workspace.active_pane(), &source);
+                workspace
+                    .panes()
+                    .iter()
+                    .find(|pane| *pane != &source)
+                    .expect("an empty split remains behind the moved tab")
+                    .clone()
+            });
+            assert_item_labels(&source, ["A*"], cx);
+            assert_item_labels(&empty, [], cx);
+            assert_pane_ids_on_axis(
+                &workspace,
+                [&empty.entity_id(), &source.entity_id()],
+                axis,
+                cx,
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_tab_split_context_menu_targets_inactive_pane(cx: &mut TestAppContext) {
+        init_test(cx);
+        let project = Project::test(FakeFs::new(cx.executor()), None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let source = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let [clicked_item, _] = set_labeled_items(&source, ["A", "B*"], cx);
+        let other = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_pane(source.clone(), SplitDirection::Down, window, cx)
+        });
+        set_labeled_items(&other, ["C*"], cx);
+        other.update_in(cx, |pane, window, cx| {
+            pane.activate_item(0, true, true, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.active_pane(), &other)
+        });
+
+        let menu = tab_split_context_menu(&source, clicked_item.item_id(), cx);
+        confirm_tab_split_context_menu(&menu, "Move to Split Right", cx);
+
+        let destination = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        assert_ne!(destination, source);
+        assert_ne!(destination, other);
+        assert_item_labels(&source, ["B*"], cx);
+        assert_item_labels(&other, ["C*"], cx);
+        assert_item_labels(&destination, ["A*"], cx);
+        destination.update_in(cx, |pane, window, cx| {
+            let item = pane.active_item().expect("moved tab");
+            assert_eq!(item.item_id(), clicked_item.item_id());
+            assert_eq!(window.focused(cx), Some(item.item_focus_handle(cx)));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_tab_split_context_menu_ignores_closed_tab(cx: &mut TestAppContext) {
+        init_test(cx);
+        let project = Project::test(FakeFs::new(cx.executor()), None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let [clicked_item, _] = set_labeled_items(&pane, ["A", "B*"], cx);
+        let menu = tab_split_context_menu(&pane, clicked_item.item_id(), cx);
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(clicked_item.item_id(), false, false, window, cx);
+        });
+
+        confirm_tab_split_context_menu(&menu, "Move to Split Right", cx);
+
+        workspace.read_with(cx, |workspace, _| assert_eq!(workspace.panes().len(), 1));
+        assert_item_labels(&pane, ["B*"], cx);
+    }
+
+    #[gpui::test]
+    async fn test_tab_split_context_menu_disables_unsupported_cloning(cx: &mut TestAppContext) {
+        init_test(cx);
+        let project = Project::test(FakeFs::new(cx.executor()), None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let item_id = pane.update_in(cx, |pane, window, cx| {
+            let item = cx.new(CustomDropHandlingItem::new);
+            let item_id = item.entity_id();
+            pane.add_item(Box::new(item), true, true, None, window, cx);
+            item_id
+        });
+        let menu = tab_split_context_menu(&pane, item_id, cx);
+
+        menu.update_in(cx, |menu, window, cx| {
+            let labels = menu.item_labels();
+            menu.select_first(&menu::SelectFirst, window, cx);
+            for expected in [
+                "Move to Split Right",
+                "Move to Split Down",
+                "Move to Split Right",
+            ] {
+                let selected = menu
+                    .selected_index()
+                    .and_then(|index| labels.get(index))
+                    .and_then(Option::as_ref)
+                    .expect("a move command is selectable");
+                assert_eq!(selected.as_ref(), expected);
+                menu.select_next(&menu::SelectNext, window, cx);
+            }
+        });
     }
 
     #[gpui::test]
