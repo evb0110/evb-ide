@@ -6310,12 +6310,13 @@ mod tests {
     #[gpui::test]
     fn test_evb_run_keys_resolve_where_webstorm_has_them(cx: &mut App) {
         use gpui::{KeyContext, Keymap, Keystroke};
-        fn keymap(paths: [&'static str; 3], cx: &mut App) -> Keymap {
+        fn keymap(paths: [&'static str; 4], cx: &mut App) -> Keymap {
             let mut keymap = Keymap::default();
             for (path, source) in paths.into_iter().zip([
                 KeybindSource::Default,
                 KeybindSource::Base,
                 KeybindSource::Base,
+                KeybindSource::Default,
             ]) {
                 keymap.add_bindings(
                     KeymapFile::load_asset(path, Some(source), cx)
@@ -6329,8 +6330,11 @@ mod tests {
                 .iter()
                 .map(|context| KeyContext::parse(context).unwrap())
                 .collect::<Vec<_>>();
-            let (bindings, _) =
-                keymap.bindings_for_input(&[Keystroke::parse(keys).unwrap()], &contexts);
+            let keystrokes = keys
+                .split_whitespace()
+                .map(|key| Keystroke::parse(key).unwrap())
+                .collect::<Vec<_>>();
+            let (bindings, _) = keymap.bindings_for_input(&keystrokes, &contexts);
             bindings
                 .first()
                 .map(|binding| binding.action().name().to_string())
@@ -6344,11 +6348,36 @@ mod tests {
                 "keymaps/default-macos.json",
                 "keymaps/macos/jetbrains.json",
                 "keymaps/evb.json",
+                "keymaps/specific-overrides-macos.json",
             ],
             cx,
         );
-        assert_eq!(action(&macos, "ctrl-r", &editor).as_deref(), Some("evb_run::Run"));
-        assert_eq!(action(&macos, "ctrl-d", &editor).as_deref(), Some("evb_run::Debug"));
+        for contexts in [&["Workspace"][..], &editor[..]] {
+            let parsed_contexts = contexts
+                .iter()
+                .map(|context| KeyContext::parse(context).unwrap())
+                .collect::<Vec<_>>();
+            let (bindings, pending) =
+                macos.bindings_for_input(&[Keystroke::parse("shift").unwrap()], &parsed_contexts);
+            assert!(bindings.is_empty(), "{contexts:?}");
+            assert!(pending, "{contexts:?}");
+            assert_eq!(
+                action(&macos, "shift shift", contexts).as_deref(),
+                Some("file_finder::Toggle")
+            );
+            assert_eq!(
+                action(&macos, "cmd-shift-a", contexts).as_deref(),
+                Some("command_palette::Toggle")
+            );
+        }
+        assert_eq!(
+            action(&macos, "ctrl-r", &editor).as_deref(),
+            Some("evb_run::Run")
+        );
+        assert_eq!(
+            action(&macos, "ctrl-d", &editor).as_deref(),
+            Some("evb_run::Debug")
+        );
         // The terminal keeps ctrl-r (reverse search) and ctrl-d (end of input).
         assert_eq!(
             action(&macos, "ctrl-r", &terminal).as_deref(),
@@ -6364,9 +6393,20 @@ mod tests {
                 "keymaps/default-linux.json",
                 "keymaps/linux/jetbrains.json",
                 "keymaps/linux/evb.json",
+                "keymaps/specific-overrides.json",
             ],
             cx,
         );
+        for contexts in [&["Workspace"][..], &editor[..]] {
+            assert_eq!(
+                action(&linux, "shift shift", contexts).as_deref(),
+                Some("file_finder::Toggle")
+            );
+            assert_eq!(
+                action(&linux, "ctrl-shift-a", contexts).as_deref(),
+                Some("command_palette::Toggle")
+            );
+        }
         for contexts in [&editor[..], &terminal[..], &project_panel[..]] {
             assert_eq!(
                 action(&linux, "shift-f10", contexts).as_deref(),

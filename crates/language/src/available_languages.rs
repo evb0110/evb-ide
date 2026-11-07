@@ -328,6 +328,23 @@ impl AvailableLanguages {
                 LanguageMatchPrecedence::UserConfigured(_) => None,
             }
         })
+        .or_else(|| {
+            let (stem, _) = filename?.split_once('.')?;
+            if stem.is_empty() {
+                return None;
+            }
+            self.0
+                .iter()
+                .rev()
+                .find(|language| {
+                    language
+                        .matcher
+                        .path_suffixes
+                        .iter()
+                        .any(|suffix| suffix.as_str() == stem)
+                })
+                .map(|language| language.id())
+        })
     }
 
     fn find_best_match(

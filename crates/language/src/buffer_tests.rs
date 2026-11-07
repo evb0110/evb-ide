@@ -239,6 +239,47 @@ fn test_select_language(cx: &mut App) {
     );
 }
 
+#[gpui::test]
+fn test_language_for_file_stem_fallback(cx: &mut App) {
+    init_settings(cx, |_| {});
+    let registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
+    for (name, suffixes) in [
+        ("Dockerfile", vec!["Dockerfile"]),
+        ("Containerfile", vec!["Containerfile"]),
+        ("JSON", vec!["json"]),
+    ] {
+        registry.add(Arc::new(Language::new(
+            LanguageConfig {
+                name: name.into(),
+                matcher: LanguageMatcher {
+                    path_suffixes: suffixes.into_iter().map(Into::into).collect(),
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            },
+            None,
+        )));
+    }
+
+    for (path, expected) in [
+        ("Dockerfile.foo", Some("Dockerfile")),
+        ("Containerfile.dev", Some("Containerfile")),
+        ("Dockerfile.json", Some("JSON")),
+        ("Dockerfile", Some("Dockerfile")),
+        ("unknown", None),
+        (".Dockerfile.foo", None),
+    ] {
+        assert_eq!(
+            registry
+                .language_for_file(&file(path), None, cx)
+                .and_then(|id| registry.language_name_for_id(id)),
+            expected.map(Into::into),
+            "{path}"
+        );
+    }
+}
+
 #[gpui::test(iterations = 10)]
 async fn test_first_line_pattern(cx: &mut TestAppContext) {
     cx.update(|cx| init_settings(cx, |_| {}));
