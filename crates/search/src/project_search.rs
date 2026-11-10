@@ -12,20 +12,24 @@ use crate::{
 };
 use anyhow::Context as _;
 use collections::HashMap;
+use db::kvp::KeyValueStore;
 use editor::{
     Anchor, Editor, EditorEvent, EditorSettings, MAX_TAB_TITLE_LEN, MultiBuffer, PathKey,
     SearchResultsStatus, SelectionEffects,
-    actions::{Backtab, FoldAll, SelectAll, Tab, UnfoldAll},
+    actions::{Backtab, FoldAll, OpenExcerpts, SelectAll, Tab, UnfoldAll},
+    display_map::ToDisplayPoint,
     items::active_match_index,
     multibuffer_context_lines,
     scroll::Autoscroll,
 };
+use file_icons::FileIcons;
 use futures::{StreamExt, stream::FuturesOrdered};
 use gpui::{
-    Action, AnyElement, App, AsyncApp, ClickEvent, Context, Entity, EntityId, EventEmitter,
-    FocusHandle, Focusable, Global, Hsla, InteractiveElement, IntoElement, KeyContext,
-    ParentElement, Point, Render, SharedString, Styled, Subscription, Task, TaskExt, UpdateGlobal,
-    WeakEntity, Window, actions, div,
+    Action, AnyElement, App, AsyncApp, ClickEvent, Context, DragMoveEvent, Entity, EntityId,
+    EventEmitter, FocusHandle, Focusable, Global, Hsla, InteractiveElement, IntoElement,
+    KeyContext, ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Styled,
+    Subscription, Task, TaskExt, UniformListScrollHandle, UpdateGlobal, WeakEntity, Window,
+    actions, div, px, relative, uniform_list,
 };
 use itertools::Itertools;
 use language::{Buffer, Language};
@@ -49,7 +53,7 @@ use std::{
     },
     time::Duration,
 };
-use text::OffsetRangeExt;
+use text::{BufferId, OffsetRangeExt};
 use ui::{
     CommonAnimationExt, IconButtonShape, KeyBinding, Toggleable, Tooltip, prelude::*,
     utils::SearchInputWidth,
@@ -76,7 +80,9 @@ actions!(
         /// Toggles collapse/expand state of all search result excerpts.
         ToggleAllSearchResults,
         /// Open a text picker showing the current result in a modal.
-        OpenTextFinder
+        OpenTextFinder,
+        /// Shows or hides the list of files that contain search results.
+        ToggleFileList
     ]
 );
 
@@ -110,6 +116,135 @@ fn split_glob_patterns(text: &str) -> Vec<&str> {
 pub(crate) struct ActiveSettings(pub(crate) HashMap<WeakEntity<Project>, ProjectSearchSettings>);
 
 impl Global for ActiveSettings {}
+
+const FILE_LIST_STATE_KEY: &str = "evb_project_search_file_list";
+const DEFAULT_FILE_LIST_WIDTH: Pixels = px(280.);
+const MIN_FILE_LIST_WIDTH: Pixels = px(160.);
+const MIN_RESULTS_WIDTH: Pixels = px(240.);
+const FILE_LIST_RESIZE_HANDLE_WIDTH: Pixels = px(6.);
+const FILE_LIST_WIDTH_SAVE_DELAY: Duration = Duration::from_millis(500);
+
+/// Visibility and width of the file list beside the project search results. It is shared by
+/// every project search and remembered across restarts, like a tool window's layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FileListLayout {
+    visible: bool,
+    width: Pixels,
+}
+
+impl Default for FileListLayout {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            width: DEFAULT_FILE_LIST_WIDTH,
+        }
+    }
+}
+
+impl Global for FileListLayout {}
+
+impl FileListLayout {
+    fn get(cx: &mut App) -> Self {
+        if let Some(layout) = cx.try_global::<Self>() {
+            return *layout;
+        }
+        let layout = Self::load(cx);
+        cx.set_global(layout);
+        layout
+    }
+
+    /// The layout to render with; views load the persisted one when they are created.
+    fn current(cx: &App) -> Self {
+        cx.try_global::<Self>().copied().unwrap_or_default()
+    }
+
+    fn load(cx: &App) -> Self {
+        let Some(json) = KeyValueStore::global(cx)
+            .read_kvp(FILE_LIST_STATE_KEY)
+            .log_err()
+            .flatten()
+        else {
+            return Self::default();
+        };
+        let Some(value) = serde_json::from_str::<serde_json::Value>(&json).log_err() else {
+            return Self::default();
+        };
+        let default = Self::default();
+        Self {
+            visible: value
+                .get("visible")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(default.visible),
+            width: value
+                .get("width")
+                .and_then(serde_json::Value::as_f64)
+                .map(|width| px(width as f32).max(MIN_FILE_LIST_WIDTH))
+                .unwrap_or(default.width),
+        }
+    }
+
+    fn save(self, cx: &App) {
+        let json = serde_json::json!({
+            "visible": self.visible,
+            "width": f32::from(self.width),
+        })
+        .to_string();
+        let store = KeyValueStore::global(cx);
+        db::write_and_log(cx, move || async move {
+            store.write_kvp(FILE_LIST_STATE_KEY.to_string(), json).await
+        });
+    }
+
+    fn update(cx: &mut App, update: impl FnOnce(&mut Self)) -> Self {
+        let mut layout = Self::get(cx);
+        let previous = layout;
+        update(&mut layout);
+        if layout != previous {
+            cx.set_global(layout);
+        }
+        layout
+    }
+
+    fn toggle_visible(cx: &mut App) {
+        Self::update(cx, |layout| layout.visible = !layout.visible).save(cx);
+    }
+}
+
+/// The results of one file, as a span of the project search's `match_ranges`, which keep all
+/// matches of a buffer next to each other in the order the results editor shows them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchResultFile {
+    buffer_id: BufferId,
+    match_indices: Range<usize>,
+}
+
+fn group_matches_by_file(match_ranges: &[Range<Anchor>]) -> Vec<SearchResultFile> {
+    let mut files: Vec<SearchResultFile> = Vec::new();
+    for (index, range) in match_ranges.iter().enumerate() {
+        let Some(buffer_id) = range.start.buffer_id() else {
+            continue;
+        };
+        match files.last_mut() {
+            Some(file) if file.buffer_id == buffer_id && file.match_indices.end == index => {
+                file.match_indices.end = index + 1;
+            }
+            _ => files.push(SearchResultFile {
+                buffer_id,
+                match_indices: index..index + 1,
+            }),
+        }
+    }
+    files
+}
+
+#[derive(Clone)]
+struct DraggedFileListHandle(EntityId);
+
+impl Render for DraggedFileListHandle {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.set_global(ActiveSettings::default());
@@ -164,6 +299,11 @@ pub fn init(cx: &mut App) {
         register_workspace_action_for_present_search(workspace, |workspace, action, window, cx| {
             ProjectSearchView::search_in_new(workspace, action, window, cx)
         });
+
+        register_workspace_action_for_present_search(
+            workspace,
+            |_workspace, _: &ToggleFileList, _window, cx| FileListLayout::toggle_visible(cx),
+        );
 
         register_workspace_action_for_present_search(
             workspace,
@@ -380,6 +520,10 @@ pub struct ProjectSearchView {
     regex_language: Option<Arc<Language>>,
     debounced_search: Option<Task<()>>,
     last_search_signature: Option<SearchSignature>,
+    search_result_files: Vec<SearchResultFile>,
+    active_file_index: Option<usize>,
+    file_list_scroll_handle: UniformListScrollHandle,
+    file_list_width_save: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1058,13 +1202,24 @@ impl Render for ProjectSearchView {
         key_context.add("ProjectSearchView");
 
         if self.has_matches() {
-            div()
+            let file_list = FileListLayout::current(cx)
+                .visible
+                .then(|| self.render_file_list(cx));
+            h_flex()
                 .key_context(key_context)
                 .on_action(cx.listener(Self::open_text_finder))
                 .flex_1()
                 .size_full()
                 .track_focus(&self.focus_handle(cx))
-                .child(self.results_editor.clone())
+                .on_drag_move(cx.listener(|this, event, _, cx| this.resize_file_list(event, cx)))
+                .children(file_list)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.results_editor.clone()),
+                )
         } else {
             let model = self.entity.read(cx);
 
@@ -1540,6 +1695,8 @@ impl ProjectSearchView {
         subscriptions.push(cx.observe_in(&entity, window, |this, _, window, cx| {
             this.entity_changed(window, cx)
         }));
+        FileListLayout::get(cx);
+        subscriptions.push(cx.observe_global::<FileListLayout>(|_, cx| cx.notify()));
 
         let query_editor = cx.new(|cx| {
             let mut editor = Editor::auto_height(1, 4, window, cx);
@@ -1718,6 +1875,10 @@ impl ProjectSearchView {
             regex_language: None,
             debounced_search: None,
             last_search_signature: None,
+            search_result_files: Vec::new(),
+            active_file_index: None,
+            file_list_scroll_handle: UniformListScrollHandle::new(),
+            file_list_width_save: None,
             _subscriptions: subscriptions,
         };
 
@@ -2396,6 +2557,7 @@ impl ProjectSearchView {
         let results_stale = search_pending && !model.results_refreshed;
         let preserve_view = phase == SearchPhase::Typing || results_stale;
         let match_ranges = model.match_ranges.clone();
+        self.search_result_files = group_matches_by_file(&match_ranges);
         self.sync_search_results_status(cx);
 
         if phase == SearchPhase::Typing
@@ -2416,6 +2578,7 @@ impl ProjectSearchView {
 
         if match_ranges.is_empty() {
             self.active_match_index = None;
+            self.active_file_index = None;
             if !results_stale {
                 self.results_editor.update(cx, |editor, cx| {
                     editor.clear_background_highlights(HighlightKey::ProjectSearchView, cx);
@@ -2435,6 +2598,8 @@ impl ProjectSearchView {
                     mem::replace(&mut self.search_id, self.entity.read(cx).search_id);
                 let is_new_search = self.search_id != prev_search_id;
                 if is_new_search {
+                    self.file_list_scroll_handle
+                        .scroll_to_item(0, ScrollStrategy::Top);
                     self.results_editor.update(cx, |editor, cx| {
                         let range_to_select = match_ranges
                             .first()
@@ -2485,6 +2650,113 @@ impl ProjectSearchView {
             self.active_match_index = new_index;
             cx.notify();
         }
+        self.update_active_file(newest_anchor.buffer_id(), cx);
+    }
+
+    /// Follows the results editor's cursor: the active file is the one the cursor is in, or the
+    /// one holding the active match while the cursor is outside every file (before the first one).
+    fn update_active_file(&mut self, cursor_buffer_id: Option<BufferId>, cx: &mut Context<Self>) {
+        let active_file_index = cursor_buffer_id
+            .and_then(|buffer_id| {
+                self.search_result_files
+                    .iter()
+                    .position(|file| file.buffer_id == buffer_id)
+            })
+            .or_else(|| {
+                let match_index = self.active_match_index?;
+                self.search_result_files
+                    .iter()
+                    .position(|file| file.match_indices.contains(&match_index))
+            });
+        if self.active_file_index != active_file_index {
+            self.active_file_index = active_file_index;
+            if let Some(index) = active_file_index {
+                self.file_list_scroll_handle
+                    .scroll_to_item(index, ScrollStrategy::Nearest);
+            }
+            cx.notify();
+        }
+    }
+
+    fn select_search_result_file(
+        &mut self,
+        index: usize,
+        open_file: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(file) = self.search_result_files.get(index).cloned() else {
+            return;
+        };
+        let model = self.entity.read(cx);
+        let Some(first_match) = model.match_ranges.get(file.match_indices.start).cloned() else {
+            return;
+        };
+        let excerpts = model.excerpts.clone();
+        self.results_editor.update(cx, |editor, cx| {
+            editor.unfold_buffer(file.buffer_id, cx);
+            let range_to_select = editor.range_for_match(&first_match);
+            editor.unfold_ranges(std::slice::from_ref(&range_to_select), false, false, cx);
+            // Scroll so the file's header sits at the top of the results, which keeps the list's
+            // order and the results' order visually aligned instead of centering a match.
+            let path_key = excerpts
+                .read(cx)
+                .snapshot(cx)
+                .path_for_buffer(file.buffer_id)
+                .cloned();
+            let file_start =
+                path_key.and_then(|path_key| excerpts.read(cx).location_for_path(&path_key, cx));
+            let display_snapshot = editor.display_snapshot(cx);
+            let match_row = range_to_select
+                .start
+                .to_display_point(&display_snapshot)
+                .row()
+                .0;
+            let rows_above_match = file_start
+                .map(|file_start| {
+                    let file_start_row = file_start.to_display_point(&display_snapshot).row().0;
+                    match_row.saturating_sub(file_start_row) + editor::FILE_HEADER_HEIGHT
+                })
+                .unwrap_or(editor::FILE_HEADER_HEIGHT);
+            editor.change_selections(
+                SelectionEffects::scroll(Autoscroll::top_relative(rows_above_match as f64)),
+                window,
+                cx,
+                |selections| selections.select_ranges([range_to_select]),
+            );
+        });
+        self.update_match_index(cx);
+        if open_file {
+            self.results_editor.update(cx, |editor, cx| {
+                editor.open_excerpts(&OpenExcerpts, window, cx);
+            });
+        } else {
+            self.focus_results_editor(window, cx);
+        }
+    }
+
+    fn resize_file_list(
+        &mut self,
+        event: &DragMoveEvent<DraggedFileListHandle>,
+        cx: &mut Context<Self>,
+    ) {
+        if event.drag(cx).0 != cx.entity_id() {
+            return;
+        }
+        let max_width = (event.bounds.size.width - MIN_RESULTS_WIDTH).max(MIN_FILE_LIST_WIDTH);
+        let width =
+            (event.event.position.x - event.bounds.left()).clamp(MIN_FILE_LIST_WIDTH, max_width);
+        self.set_file_list_width(width, cx);
+    }
+
+    fn set_file_list_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        let layout = FileListLayout::update(cx, |layout| layout.width = width);
+        self.file_list_width_save = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(FILE_LIST_WIDTH_SAVE_DELAY)
+                .await;
+            cx.update(|cx| layout.save(cx));
+        }));
     }
 
     #[ztracing::instrument(skip_all)]
@@ -2512,6 +2784,195 @@ impl ProjectSearchView {
 
     pub fn has_matches(&self) -> bool {
         self.active_match_index.is_some()
+    }
+
+    fn render_file_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        let file_count = self.search_result_files.len();
+        let limit_reached = self.entity.read(cx).search_state.limit_reached();
+        let file_count_label = match (file_count, limit_reached) {
+            (1, false) => "1 file".to_string(),
+            (count, false) => format!("{count} files"),
+            (count, true) => format!("{count}+ files"),
+        };
+        let view_id = cx.entity_id();
+
+        let header = h_flex()
+            .h_7()
+            .flex_none()
+            .pl_2()
+            .pr_1()
+            .justify_between()
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .child(
+                Label::new(file_count_label)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                IconButton::new("project-search-hide-file-list", IconName::Close)
+                    .icon_size(IconSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action("Hide File List", &ToggleFileList, cx)
+                    })
+                    .on_click(|_, _, cx| FileListLayout::toggle_visible(cx)),
+            );
+
+        let list = uniform_list(
+            "project-search-file-list",
+            file_count,
+            cx.processor(|this, range: Range<usize>, _window, cx| {
+                range
+                    .map(|index| this.render_file_list_entry(index, cx))
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .track_scroll(&self.file_list_scroll_handle)
+        .flex_1()
+        .py_1();
+
+        let resize_handle = div()
+            .id("project-search-file-list-resize-handle")
+            .absolute()
+            .top_0()
+            .right(-FILE_LIST_RESIZE_HANDLE_WIDTH / 2.)
+            .w(FILE_LIST_RESIZE_HANDLE_WIDTH)
+            .h_full()
+            .cursor_col_resize()
+            .block_mouse_except_scroll()
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                if event.click_count() >= 2 {
+                    this.set_file_list_width(DEFAULT_FILE_LIST_WIDTH, cx);
+                }
+                cx.stop_propagation();
+            }))
+            .on_drag(DraggedFileListHandle(view_id), |handle, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| handle.clone())
+            });
+
+        v_flex()
+            .id("project-search-file-list-panel")
+            .relative()
+            .flex_none()
+            .h_full()
+            .w(FileListLayout::current(cx).width)
+            .max_w(relative(0.6))
+            .bg(colors.panel_background)
+            .border_r_1()
+            .border_color(colors.border)
+            .child(header)
+            .child(list)
+            .child(resize_handle)
+            .into_any_element()
+    }
+
+    fn render_file_list_entry(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(file) = self.search_result_files.get(index) else {
+            return div().into_any_element();
+        };
+        let colors = cx.theme().colors();
+        let project = self.entity.read(cx).project.read(cx);
+        let include_root = project.visible_worktrees(cx).count() > 1;
+        let buffer = self
+            .entity
+            .read(cx)
+            .excerpts
+            .read(cx)
+            .buffer(file.buffer_id);
+        let buffer = buffer.as_ref().map(|buffer| buffer.read(cx));
+        let file_handle = buffer.and_then(|buffer| buffer.file());
+        let path_style = file_handle.map(|file| file.path_style(cx));
+        let full_path = file_handle.map(|file| {
+            if include_root || file.path().file_name().is_none() {
+                file.full_path(cx).to_string_lossy().into_owned()
+            } else {
+                file.path().display(file.path_style(cx)).to_string()
+            }
+        });
+
+        let (directory, file_name) = match (&full_path, path_style) {
+            (Some(path), Some(path_style)) => {
+                match path_style
+                    .file_name(std::path::Path::new(path))
+                    .and_then(std::ffi::OsStr::to_str)
+                {
+                    Some(file_name) => (
+                        path.strip_suffix(file_name)
+                            .map(|parent| parent.trim_end_matches(['/', '\\']))
+                            .filter(|parent| !parent.is_empty())
+                            .map(ToOwned::to_owned),
+                        file_name.to_owned(),
+                    ),
+                    None => (None, path.clone()),
+                }
+            }
+            (Some(path), None) => (None, path.clone()),
+            (None, _) => (None, "untitled".to_string()),
+        };
+        let icon = full_path
+            .as_deref()
+            .and_then(|path| FileIcons::get_icon(std::path::Path::new(path), cx))
+            .map(Icon::from_path)
+            .unwrap_or_else(|| Icon::new(IconName::File))
+            .size(IconSize::Small)
+            .color(Color::Muted);
+        let match_count = file.match_indices.len();
+        let is_active = self.active_file_index == Some(index);
+        let tooltip_text = full_path.unwrap_or_else(|| file_name.clone());
+
+        h_flex()
+            .id(("project-search-file", index))
+            .w_full()
+            .h_6()
+            .px_2()
+            .gap_1p5()
+            .cursor_pointer()
+            .when(is_active, |row| row.bg(colors.element_selected))
+            .hover(|row| row.bg(colors.element_hover))
+            .child(icon)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1p5()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(relative(0.75))
+                            .child(Label::new(file_name).size(LabelSize::Small).truncate()),
+                    )
+                    .children(directory.map(|directory| {
+                        div().flex_1().min_w_0().child(
+                            Label::new(directory)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate_start(),
+                        )
+                    })),
+            )
+            .child(
+                Label::new(match_count.to_string())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .tooltip(move |_, cx| {
+                Tooltip::with_meta(
+                    tooltip_text.clone(),
+                    None,
+                    format!(
+                        "{match_count} {} · Double-click to open",
+                        if match_count == 1 { "match" } else { "matches" }
+                    ),
+                    cx,
+                )
+            })
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.select_search_result_file(index, event.click_count() >= 2, window, cx);
+            }))
+            .into_any_element()
     }
 
     fn landing_text_minor(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3258,10 +3719,31 @@ impl Render for ProjectSearchBar {
                 }
             }));
 
+        let file_list_visible = FileListLayout::current(cx).visible;
+        let file_list_focus = focus_handle.clone();
+        let file_list_button =
+            IconButton::new("project-search-file-list-toggle", IconName::FileTree)
+                .shape(IconButtonShape::Square)
+                .toggle_state(file_list_visible)
+                .tooltip(move |_, cx| {
+                    Tooltip::for_action_in(
+                        if file_list_visible {
+                            "Hide File List"
+                        } else {
+                            "Show File List"
+                        },
+                        &ToggleFileList,
+                        &file_list_focus,
+                        cx,
+                    )
+                })
+                .on_click(|_, _, cx| FileListLayout::toggle_visible(cx));
+
         let search_line = h_flex()
             .pl_0p5()
             .w_full()
             .gap_2()
+            .child(file_list_button)
             .child(expand_button)
             .child(query_column)
             .child(mode_column);
@@ -7001,6 +7483,182 @@ pub mod tests {
         perform_incremental_search(search_view, "ONE", cx);
         assert_eq!(match_texts(&search, cx), expected_one_matches);
         assert_all_highlights_match_query(&search, "ONE", cx);
+    }
+
+    #[gpui::test]
+    async fn test_file_list_layout_is_remembered(cx: &mut TestAppContext) {
+        init_test(cx);
+        let saved = FileListLayout {
+            visible: false,
+            width: px(412.),
+        };
+        cx.update(|cx| saved.save(cx));
+        cx.background_executor.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(FileListLayout::load(cx), saved);
+            FileListLayout::default().save(cx);
+        });
+        cx.background_executor.run_until_parked();
+        cx.update(|cx| assert_eq!(FileListLayout::load(cx), FileListLayout::default()));
+    }
+
+    #[gpui::test]
+    async fn test_file_list_groups_matches_and_follows_navigation(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/dir"),
+            json!({
+                "one.rs": "const ONE: usize = 1;\nconst ONEROUS: usize = 2;",
+                "two.rs": "const TWO: usize = one::ONE + one::ONE;",
+                "three.rs": "const THREE: usize = one::ONE + two::TWO;",
+                "four.rs": "const FOUR: usize = one::ONE + three::THREE;",
+                "only_one.rs": "const ONLY_ONE: usize = 1;",
+                "zero.rs": "const ZERO: usize = 0;",
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let search = cx.new(|cx| ProjectSearch::new(project.clone(), workspace.downgrade(), cx));
+        let search_view = cx.add_window(|window, cx| {
+            ProjectSearchView::new(workspace.downgrade(), search.clone(), window, cx, None)
+        });
+
+        fn listed_files(view: &ProjectSearchView, cx: &App) -> Vec<(String, usize)> {
+            let excerpts = view.entity.read(cx).excerpts.read(cx);
+            view.search_result_files
+                .iter()
+                .map(|file| {
+                    let buffer = excerpts.buffer(file.buffer_id).expect("listed buffer");
+                    let file_name = buffer
+                        .read(cx)
+                        .file()
+                        .expect("listed file")
+                        .file_name(cx)
+                        .to_string();
+                    (file_name, file.match_indices.len())
+                })
+                .collect()
+        }
+
+        fn cursor_file_name(view: &ProjectSearchView, cx: &App) -> String {
+            let cursor = view
+                .results_editor
+                .read(cx)
+                .selections
+                .newest_anchor()
+                .head();
+            let buffer_id = cursor.buffer_id().expect("cursor in a file");
+            let buffer = view
+                .entity
+                .read(cx)
+                .excerpts
+                .read(cx)
+                .buffer(buffer_id)
+                .expect("cursor buffer");
+            buffer
+                .read(cx)
+                .file()
+                .expect("cursor file")
+                .file_name(cx)
+                .to_string()
+        }
+
+        perform_search(search_view, "ONE", cx);
+        search_view
+            .update(cx, |view, _, cx| {
+                assert_eq!(
+                    listed_files(view, cx),
+                    vec![
+                        ("four.rs".to_string(), 2),
+                        ("one.rs".to_string(), 2),
+                        ("only_one.rs".to_string(), 1),
+                        ("three.rs".to_string(), 2),
+                        ("two.rs".to_string(), 4),
+                    ]
+                );
+                assert_eq!(view.active_file_index, Some(0));
+            })
+            .unwrap();
+
+        search_view
+            .update(cx, |view, window, cx| {
+                view.select_search_result_file(4, false, window, cx)
+            })
+            .unwrap();
+        cx.background_executor.run_until_parked();
+        search_view
+            .update(cx, |view, window, cx| {
+                assert_eq!(view.active_file_index, Some(4));
+                assert_eq!(view.active_match_index, Some(7));
+                assert_eq!(cursor_file_name(view, cx), "two.rs");
+                assert!(view.results_editor.focus_handle(cx).is_focused(window));
+            })
+            .unwrap();
+
+        search_view
+            .update(cx, |view, window, cx| {
+                view.select_match(Direction::Prev, window, cx)
+            })
+            .unwrap();
+        cx.background_executor.run_until_parked();
+        search_view
+            .update(cx, |view, _, cx| {
+                assert_eq!(view.active_match_index, Some(6));
+                assert_eq!(view.active_file_index, Some(3));
+                assert_eq!(cursor_file_name(view, cx), "three.rs");
+            })
+            .unwrap();
+
+        search_view
+            .update(cx, |view, window, cx| {
+                view.results_editor.update(cx, |editor, cx| {
+                    editor.fold_all(&FoldAll, window, cx);
+                });
+            })
+            .unwrap();
+        cx.background_executor.run_until_parked();
+        search_view
+            .update(cx, |view, window, cx| {
+                let one_buffer_id = view.search_result_files[1].buffer_id;
+                assert!(
+                    view.results_editor
+                        .read(cx)
+                        .is_buffer_folded(one_buffer_id, cx)
+                );
+                view.select_search_result_file(1, false, window, cx);
+            })
+            .unwrap();
+        cx.background_executor.run_until_parked();
+        search_view
+            .update(cx, |view, _, cx| {
+                let one_buffer_id = view.search_result_files[1].buffer_id;
+                assert!(
+                    !view
+                        .results_editor
+                        .read(cx)
+                        .is_buffer_folded(one_buffer_id, cx),
+                    "selecting a collapsed file expands it"
+                );
+                assert_eq!(view.active_file_index, Some(1));
+                assert_eq!(view.active_match_index, Some(2));
+                assert_eq!(cursor_file_name(view, cx), "one.rs");
+            })
+            .unwrap();
+
+        perform_search(search_view, "ONLY_ONE", cx);
+        search_view
+            .update(cx, |view, _, cx| {
+                assert_eq!(listed_files(view, cx), vec![("only_one.rs".to_string(), 1)]);
+                assert_eq!(view.active_file_index, Some(0));
+            })
+            .unwrap();
     }
 
     #[gpui::test]

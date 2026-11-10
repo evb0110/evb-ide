@@ -23,6 +23,7 @@ runs next to an installed Zed without sharing state.
 | Language servers | Completion trigger context per server (fixes Vue completions only appearing on manual invoke), rename tries the next capable server in local projects, Vue↔TypeScript bridge scoped to the worktree and waiting for vtsls to start | `crates/project/src/lsp_command.rs`, `crates/project/src/project.rs`, `crates/project/src/lsp_store/vue_language_server_ext.rs` |
 | Project windows | Projects open in their own windows, on macOS as tabs of one window labelled by project name (with the parent folder for duplicate names, the path on hover); opening a project that is already open, also from the CLI or through a symlink, switches to it | `crates/platform_title_bar/src/system_window_tabs.rs`, `crates/workspace/src/workspace.rs`, `crates/gpui_macos/src/window.rs` |
 | Editor tabs | The tab context menu offers Move to Split Right/Down and Split Right/Down for the clicked tab. Moving transfers the tab; splitting keeps it open in both panes when the item supports duplication | `crates/workspace/src/pane.rs` |
+| Find in Files | The results have a file list on their left: each file with matches, its folder and match count, in the order of the results. Clicking a file shows its first match with the file header at the top (expanding a collapsed file); double-clicking opens the file there. The file holding the cursor stays highlighted while you move through matches. Drag the list's edge to resize it (double-click it to reset); hide or show it with the list button in the search bar or `project_search: toggle file list`. Its visibility and width are remembered | `crates/search/src/project_search.rs` |
 | Project tree | Automatic reveal of the active file is off (`project_panel.auto_reveal_entries`); Select Opened File reveals it, and the path breadcrumbs reveal (click) or copy (right-click) | `crates/project_panel`, `crates/editor/src/element.rs` |
 | History views | Files at a commit are read-only with Open Working Copy; go to definition there jumps to the matching code in the working copy | `crates/git_ui/src/commit_view.rs` |
 | Privacy | Keychain entries under their own key (`credentials_url`), so an installed Zed's login is never read or deleted; with the agent and edit predictions off, AI counts as disabled and no AI service is contacted | `assets/settings/evb.json`, `DisableAiSettings` in `crates/project/src/project.rs` |
@@ -139,6 +140,7 @@ cargo run -p zed --bin evb-visual-capture --features visual-tests
 git project and writes screenshots of the workspace, the run configuration
 menu, a running and a stopped `npm run dev`, the Commit panel, the git log,
 both themes, the blame column with its menus, and the pull request indicator, its menu, review threads in the editor, the Create Pull Request form (against a fake GitHub) and three projects as window tabs (two with the same name) in the IntelliJ themes and One Light to `target/evb_captures` (or `EVB_CAPTURE_DIR`).
+`EVB_PROJECT_SEARCH_CAPTURE=1` captures only Find in Files with its file list.
 
 ## Updating the themes
 

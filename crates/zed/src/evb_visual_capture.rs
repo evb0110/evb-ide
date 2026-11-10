@@ -385,6 +385,15 @@ mod capture {
         if std::env::var_os("EVB_NAVIGATION_CAPTURE").is_some() {
             return capture_navigation(&workspace, any_window, &mut cx, &output_dir);
         }
+        if std::env::var_os("EVB_PROJECT_SEARCH_CAPTURE").is_some() {
+            return capture_project_search(
+                &workspace,
+                any_window,
+                &project_path,
+                &mut cx,
+                &output_dir,
+            );
+        }
         if let Ok(film_dir) = std::env::var("EVB_FILM_DIR") {
             return film(&workspace, any_window, &mut cx, Path::new(&film_dir));
         }
@@ -1005,6 +1014,186 @@ mod capture {
         save(cx, window, output, "navigation-working-copy")?;
         Ok(())
     }
+
+    /// Find in Files with its file list: the files that contain matches, a click on one of them,
+    /// the dark theme and the hidden list.
+    fn capture_project_search(
+        workspace: &Entity<Workspace>,
+        window: AnyWindowHandle,
+        project_path: &Path,
+        cx: &mut VisualTestAppContext,
+        output: &Path,
+    ) -> Result<()> {
+        for (relative, contents) in [
+            (
+                "server/utils/trip-store.ts",
+                "export function getTripStore(event) {\n  return useStorage('trips')\n}\n",
+            ),
+            (
+                "server/utils/trip-summary.ts",
+                "export function toTripSummary(trip) {\n  return { id: trip.id, name: trip.name, stops: trip.stops.length }\n}\n",
+            ),
+            (
+                "app/pages/trips/[id].vue",
+                "<script setup lang=\"ts\">\nconst route = useRoute()\nconst { data: trip } = await useFetch('/api/trip', { query: { id: route.params.id } })\n</script>\n",
+            ),
+            (
+                "app/composables/useTripMap.ts",
+                "export function useTripMap(trip) {\n  return computed(() => trip.value?.stops ?? [])\n}\n",
+            ),
+        ] {
+            let file = project_path.join(relative);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(file, contents)?;
+        }
+        wait_real_time(cx, Duration::from_secs(2));
+        workspace.update_in_window(window, cx, |workspace, window, cx| {
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.toolbar().update(cx, |toolbar, cx| {
+                    let search_bar = cx.new(|_| search::project_search::ProjectSearchBar::new());
+                    toolbar.add_item(search_bar, window, cx);
+                });
+            });
+        })?;
+
+        cx.dispatch_action(
+            window,
+            workspace::DeploySearch {
+                query: Some("trip".to_string()),
+                ..Default::default()
+            },
+        );
+        wait_real_time(cx, Duration::from_secs(2));
+        settle(cx, 5);
+        let search_view = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item_as::<search::ProjectSearchView>(cx)
+            })
+            .context("Find in Files must open a project search")?;
+        let (query, match_count) = search_view.read_with(cx, |view, cx| {
+            (view.search_query_text(cx), view.get_matches(cx).len())
+        });
+        println!("project search: {match_count} matches for {query:?}");
+        anyhow::ensure!(
+            query == "trip" && match_count > 0,
+            "Find in Files must search for its query"
+        );
+        save(cx, window, output, "project-search-file-list")?;
+
+        let results_editor = cx
+            .update(|cx| {
+                let item: Box<dyn workspace::item::ItemHandle> = Box::new(search_view.clone());
+                item.act_as::<editor::Editor>(cx)
+            })
+            .context("project search results editor")?;
+        let cursor_file = |cx: &mut VisualTestAppContext| {
+            results_editor.read_with(cx, |editor, cx| {
+                let cursor = editor.selections.newest_anchor().head();
+                cursor
+                    .buffer_id()
+                    .and_then(|buffer_id| editor.buffer().read(cx).buffer(buffer_id))
+                    .and_then(|buffer| {
+                        buffer
+                            .read(cx)
+                            .file()
+                            .map(|file| file.path().as_unix_str().to_string())
+                    })
+            })
+        };
+        // The `server/api/trip.get.ts` row of the file list.
+        cx.simulate_click(
+            window,
+            point(px(PROJECT_SEARCH_LIST_X), px(211.)),
+            Default::default(),
+        );
+        settle(cx, 5);
+        let selected_file = cursor_file(cx);
+        save(cx, window, output, "project-search-file-selected")?;
+        println!("project search: clicking trip.get.ts moved the cursor to {selected_file:?}");
+        anyhow::ensure!(
+            selected_file.as_deref() == Some("server/api/trip.get.ts"),
+            "clicking a file must move to its first match"
+        );
+
+        set_theme(cx, "IntelliJ Dark");
+        settle(cx, 5);
+        save(cx, window, output, "project-search-file-list-dark")?;
+        set_theme(cx, "IntelliJ Light");
+
+        cx.dispatch_action(window, search::project_search::ToggleFileList);
+        settle(cx, 5);
+        save(cx, window, output, "project-search-file-list-hidden")?;
+        cx.dispatch_action(window, search::project_search::ToggleFileList);
+        settle(cx, 3);
+
+        // Drag the list's right edge to widen it.
+        let handle = point(px(PROJECT_SEARCH_LIST_RIGHT_EDGE), px(500.));
+        cx.simulate_mouse_down(window, handle, MouseButton::Left, Default::default());
+        for x in [530., 580., 640.] {
+            cx.simulate_mouse_move(
+                window,
+                point(px(x), px(500.)),
+                MouseButton::Left,
+                Default::default(),
+            );
+        }
+        cx.simulate_mouse_up(
+            window,
+            point(px(640.), px(500.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        settle(cx, 3);
+        save(cx, window, output, "project-search-file-list-resized")?;
+
+        // Double-clicking README.md, the first row, opens the file.
+        let readme_row = point(px(PROJECT_SEARCH_LIST_X), px(133.));
+        for click_count in [1, 2] {
+            cx.simulate_event(
+                window,
+                gpui::MouseDownEvent {
+                    position: readme_row,
+                    modifiers: Default::default(),
+                    button: MouseButton::Left,
+                    click_count,
+                    first_mouse: false,
+                },
+            );
+            cx.simulate_event(
+                window,
+                gpui::MouseUpEvent {
+                    position: readme_row,
+                    modifiers: Default::default(),
+                    button: MouseButton::Left,
+                    click_count,
+                },
+            );
+        }
+        wait_real_time(cx, Duration::from_secs(1));
+        let opened_path = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_item_as::<editor::Editor>(cx)
+                .and_then(|editor| editor.read(cx).buffer().read(cx).as_singleton())
+                .and_then(|buffer| {
+                    buffer
+                        .read(cx)
+                        .file()
+                        .map(|file| file.path().as_unix_str().to_string())
+                })
+        });
+        println!("project search: double-clicking README.md opened {opened_path:?}");
+        anyhow::ensure!(
+            opened_path.as_deref() == Some("README.md"),
+            "double-clicking a file must open it"
+        );
+        save(cx, window, output, "project-search-file-opened")?;
+        Ok(())
+    }
+
+    const PROJECT_SEARCH_LIST_X: f32 = 420.;
+    const PROJECT_SEARCH_LIST_RIGHT_EDGE: f32 = 519.;
 
     /// Points in the fixed 1440x900 window.
     const RUN_BUTTON: [f32; 2] = [1370., 16.];
