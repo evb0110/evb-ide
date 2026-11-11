@@ -278,6 +278,7 @@ struct UnifiedLanguageServer {
 struct LanguageServerSeedSettings {
     binary: Option<BinarySettings>,
     initialization_options: Option<serde_json::Value>,
+    launch_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -460,6 +461,7 @@ impl LocalLspStore {
             settings: LanguageServerSeedSettings {
                 binary: disposition.settings.binary.clone(),
                 initialization_options: disposition.settings.initialization_options.clone(),
+                launch_fingerprint: disposition.launch_fingerprint.clone(),
             },
             toolchain: disposition.toolchain.clone(),
         };
@@ -6543,6 +6545,7 @@ impl LspStore {
                                         .settings
                                         .initialization_options
                                         .clone(),
+                                    launch_fingerprint: disposition.launch_fingerprint.clone(),
                                 },
                                 toolchain: local.toolchain_store.read(cx).active_toolchain(
                                     path.worktree_id,

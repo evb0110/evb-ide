@@ -23,9 +23,13 @@ use std::sync::OnceLock;
 use util::rel_path::RelPath;
 
 use crate::{
-    LanguageServerId, ProjectPath, project_settings::LspSettings,
+    LanguageServerId, ProjectPath,
+    project_settings::{LspSettings, ProjectSettings},
     toolchain_store::LocalToolchainStore,
 };
+
+const VTSLS_SERVER_NAME: LanguageServerName = LanguageServerName::new_static("vtsls");
+const NATIVE_TYPESCRIPT_SERVER_NAME: LanguageServerName = LanguageServerName::new_static("tsgo");
 
 use super::ManifestTree;
 
@@ -58,6 +62,7 @@ pub(crate) struct LaunchDisposition {
     pub(crate) path: ProjectPath,
     pub(crate) settings: Arc<LspSettings>,
     pub(crate) toolchain: Option<Toolchain>,
+    pub(crate) launch_fingerprint: Option<String>,
 }
 
 impl LanguageServerTreeNode {
@@ -107,6 +112,7 @@ impl InnerTreeNode {
         path: ProjectPath,
         settings: LspSettings,
         toolchain: Option<Toolchain>,
+        launch_fingerprint: Option<String>,
     ) -> Self {
         InnerTreeNode {
             id: Default::default(),
@@ -115,6 +121,7 @@ impl InnerTreeNode {
                 path,
                 settings: settings.into(),
                 toolchain,
+                launch_fingerprint,
             }),
         }
     }
@@ -195,6 +202,7 @@ impl LanguageServerTree {
                     root_path.clone(),
                     settings,
                     toolchain,
+                    adapter.launch_fingerprint(root_path.worktree_id, cx),
                 ))
             };
             let (node, languages) = match inner_node {
@@ -267,8 +275,32 @@ impl LanguageServerTree {
             .map(|lsp_adapter| lsp_adapter.name.clone())
             .collect::<Vec<_>>();
 
-        let desired_language_servers =
+        let mut desired_language_servers =
             settings.customized_language_servers(&available_language_servers);
+        // `vtsls` cannot host TypeScript 7+, so a 7+ `typescript.version` hands its place to the
+        // native server. Vue keeps `vtsls`, since TypeScript 7 has no language service plugins.
+        if matches!(language_name.as_ref(), "TypeScript" | "JavaScript" | "TSX")
+            && ProjectSettings::get(Some(settings_location), cx)
+                .typescript
+                .version
+                .uses_native_server()
+        {
+            desired_language_servers = desired_language_servers
+                .into_iter()
+                .map(|server_name| {
+                    if server_name == VTSLS_SERVER_NAME {
+                        NATIVE_TYPESCRIPT_SERVER_NAME
+                    } else {
+                        server_name
+                    }
+                })
+                .fold(Vec::new(), |mut server_names, server_name| {
+                    if !server_names.contains(&server_name) {
+                        server_names.push(server_name);
+                    }
+                    server_names
+                });
+        }
         let adapters_with_settings = desired_language_servers
             .into_iter()
             .filter_map(|desired_adapter| {
@@ -437,6 +469,8 @@ impl ServerTreeRebase {
                         // Dynamic settings (settings.settings) can be updated via DidChangeConfiguration
                         // without restarting the server.
                         disposition.toolchain == old_node.disposition.toolchain
+                            && disposition.launch_fingerprint
+                                == old_node.disposition.launch_fingerprint
                             && disposition.settings.binary == old_node.disposition.settings.binary
                             && disposition.settings.initialization_options
                                 == old_node.disposition.settings.initialization_options

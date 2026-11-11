@@ -389,6 +389,10 @@ impl CachedLspAdapter {
         self.adapter.is_opt_in_for(language)
     }
 
+    pub fn launch_fingerprint(&self, worktree_id: WorktreeId, cx: &App) -> Option<String> {
+        self.adapter.launch_fingerprint(worktree_id, cx)
+    }
+
     pub async fn get_language_server_command(
         self: Arc<Self>,
         delegate: Arc<dyn LspAdapterDelegate>,
@@ -675,6 +679,12 @@ pub trait LspAdapter: 'static + Send + Sync + DynLspInstaller {
     /// listed explicitly.
     fn is_opt_in_for(&self, _language: &LanguageName) -> bool {
         false
+    }
+
+    /// Summarizes settings outside `lsp.<server>` that the server only reads when it starts.
+    /// When the value changes, a new instance of the server replaces the running one.
+    fn launch_fingerprint(&self, _worktree_id: WorktreeId, _cx: &App) -> Option<String> {
+        None
     }
 
     /// Support custom initialize params.

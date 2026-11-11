@@ -17,6 +17,7 @@ use rpc::{
     proto::{self, REMOTE_SERVER_PROJECT_ID},
 };
 use schemars::JsonSchema;
+use semver::{Comparator, Op, Prerelease, VersionReq};
 use serde::{Deserialize, Serialize};
 pub use settings::BinarySettings;
 pub use settings::DirenvSettings;
@@ -79,6 +80,91 @@ pub struct ProjectSettings {
 
     /// Configuration for session-related features
     pub session: SessionSettings,
+
+    /// Configuration for the TypeScript that powers JavaScript and TypeScript language features.
+    pub typescript: TypeScriptSettings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeScriptSettings {
+    pub version: TypeScriptVersion,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeScriptVersion {
+    /// The project's TypeScript, or the newest TypeScript 6.x when the project has none.
+    Auto,
+    /// The newest TypeScript matching this requirement, installed by EVB IDE.
+    Requirement(VersionReq),
+}
+
+/// TypeScript 7 is the first release without `tsserver.js`, so it needs the native language server.
+const NATIVE_TYPESCRIPT_MAJOR: u64 = 7;
+
+impl TypeScriptVersion {
+    fn from_setting(value: Option<&str>) -> Self {
+        let value = value.map(str::trim).unwrap_or_default();
+        if value.is_empty() || value.eq_ignore_ascii_case("auto") {
+            return Self::Auto;
+        }
+        // npm reads a bare `6.0.3` as an exact version and `5.9` as `5.9.x`, while semver
+        // treats a missing operator as `^`, so make the npm meaning explicit.
+        let requirement = if value.starts_with(|character: char| character.is_ascii_digit()) {
+            format!("={value}")
+        } else {
+            value.to_string()
+        };
+        match VersionReq::parse(&requirement) {
+            Ok(requirement) => Self::Requirement(requirement),
+            Err(error) => {
+                log::warn!(
+                    "Invalid `typescript.version` setting {value:?}, using \"auto\": {error}"
+                );
+                Self::Auto
+            }
+        }
+    }
+
+    /// Whether JavaScript and TypeScript files use the native TypeScript language server.
+    pub fn uses_native_server(&self) -> bool {
+        match self {
+            Self::Auto => false,
+            Self::Requirement(requirement) => requirement
+                .comparators
+                .first()
+                .is_some_and(|comparator| comparator.major >= NATIVE_TYPESCRIPT_MAJOR),
+        }
+    }
+
+    /// The TypeScript versions `vtsls` can host, which all still ship `tsserver.js`.
+    pub fn tsserver_requirement(&self) -> VersionReq {
+        let mut comparators = match self {
+            Self::Auto => vec![major_comparator(Op::Caret, NATIVE_TYPESCRIPT_MAJOR - 1)],
+            Self::Requirement(requirement) => requirement.comparators.clone(),
+        };
+        comparators.push(major_comparator(Op::Less, NATIVE_TYPESCRIPT_MAJOR));
+        VersionReq { comparators }
+    }
+
+    /// The TypeScript versions the native language server can run.
+    pub fn native_requirement(&self) -> VersionReq {
+        let mut comparators = match self {
+            Self::Auto => Vec::new(),
+            Self::Requirement(requirement) => requirement.comparators.clone(),
+        };
+        comparators.push(major_comparator(Op::GreaterEq, NATIVE_TYPESCRIPT_MAJOR));
+        VersionReq { comparators }
+    }
+}
+
+fn major_comparator(op: Op, major: u64) -> Comparator {
+    Comparator {
+        op,
+        major,
+        minor: Some(0),
+        patch: Some(0),
+        pre: Prerelease::EMPTY,
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -821,6 +907,14 @@ impl Settings for ProjectSettings {
             session: SessionSettings {
                 restore_unsaved_buffers: content.session.unwrap().restore_unsaved_buffers.unwrap(),
                 trust_all_worktrees: content.session.unwrap().trust_all_worktrees.unwrap(),
+            },
+            typescript: TypeScriptSettings {
+                version: TypeScriptVersion::from_setting(
+                    project
+                        .typescript
+                        .as_ref()
+                        .and_then(|typescript| typescript.version.as_deref()),
+                ),
             },
         }
     }
@@ -1650,4 +1744,64 @@ impl From<DapSettingsContent> for DapSettings {
 pub enum DapBinary {
     Default,
     Custom(String),
+}
+
+#[cfg(test)]
+mod typescript_version_tests {
+    use super::TypeScriptVersion;
+    use semver::Version;
+
+    fn version(value: &str) -> Version {
+        Version::parse(value).expect("valid test version")
+    }
+
+    #[test]
+    fn test_auto_typescript_version() {
+        for value in [
+            None,
+            Some(""),
+            Some("auto"),
+            Some(" Auto "),
+            Some("not a version"),
+        ] {
+            assert_eq!(
+                TypeScriptVersion::from_setting(value),
+                TypeScriptVersion::Auto
+            );
+        }
+        let auto = TypeScriptVersion::Auto;
+        assert!(!auto.uses_native_server());
+        assert!(auto.tsserver_requirement().matches(&version("6.0.3")));
+        assert!(!auto.tsserver_requirement().matches(&version("5.9.3")));
+        assert!(!auto.tsserver_requirement().matches(&version("7.0.2")));
+        assert!(auto.native_requirement().matches(&version("7.0.2")));
+        assert!(!auto.native_requirement().matches(&version("6.0.3")));
+    }
+
+    #[test]
+    fn test_typescript_version_uses_npm_meaning() {
+        let exact = TypeScriptVersion::from_setting(Some("6.0.3"));
+        assert!(!exact.uses_native_server());
+        assert!(exact.tsserver_requirement().matches(&version("6.0.3")));
+        assert!(!exact.tsserver_requirement().matches(&version("6.0.4")));
+
+        let minor = TypeScriptVersion::from_setting(Some("5.9"));
+        assert!(minor.tsserver_requirement().matches(&version("5.9.3")));
+        assert!(!minor.tsserver_requirement().matches(&version("6.0.3")));
+
+        let caret = TypeScriptVersion::from_setting(Some("^6"));
+        assert!(caret.tsserver_requirement().matches(&version("6.1.0")));
+    }
+
+    #[test]
+    fn test_typescript_7_uses_native_server() {
+        for value in ["7", "7.0.2", "^7", ">=7.1"] {
+            let setting = TypeScriptVersion::from_setting(Some(value));
+            assert!(setting.uses_native_server(), "{value}");
+        }
+        let exact = TypeScriptVersion::from_setting(Some("7.0.2"));
+        assert!(exact.native_requirement().matches(&version("7.0.2")));
+        assert!(!exact.native_requirement().matches(&version("7.1.0")));
+        assert!(!exact.tsserver_requirement().matches(&version("7.0.2")));
+    }
 }

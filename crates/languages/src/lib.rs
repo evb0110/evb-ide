@@ -28,6 +28,7 @@ mod python;
 mod rust;
 mod tailwind;
 mod tailwindcss;
+mod tsgo;
 mod typescript;
 mod vtsls;
 mod yaml;
@@ -86,6 +87,7 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
         fs.clone(),
     ));
     let vtsls_adapter = Arc::new(vtsls::VtslsLspAdapter::new(node.clone(), fs.clone()));
+    let tsgo_adapter = Arc::new(tsgo::TsgoLspAdapter::new(node.clone()));
     let yaml_lsp_adapter = Arc::new(yaml::YamlLspAdapter::new(node));
 
     let built_in_languages = [
@@ -187,19 +189,31 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
         },
         LanguageInfo {
             name: "tsx",
-            adapters: vec![typescript_lsp_adapter.clone(), vtsls_adapter.clone()],
+            adapters: vec![
+                typescript_lsp_adapter.clone(),
+                vtsls_adapter.clone(),
+                tsgo_adapter.clone(),
+            ],
             context: Some(typescript_context.clone()),
             ..Default::default()
         },
         LanguageInfo {
             name: "typescript",
-            adapters: vec![typescript_lsp_adapter.clone(), vtsls_adapter.clone()],
+            adapters: vec![
+                typescript_lsp_adapter.clone(),
+                vtsls_adapter.clone(),
+                tsgo_adapter.clone(),
+            ],
             context: Some(typescript_context.clone()),
             ..Default::default()
         },
         LanguageInfo {
             name: "javascript",
-            adapters: vec![typescript_lsp_adapter.clone(), vtsls_adapter.clone()],
+            adapters: vec![
+                typescript_lsp_adapter.clone(),
+                vtsls_adapter.clone(),
+                tsgo_adapter.clone(),
+            ],
             context: Some(typescript_context),
             ..Default::default()
         },
@@ -268,6 +282,7 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
         eslint_adapter.clone(),
     );
     languages.register_available_lsp_adapter(LanguageServerName("vtsls".into()), vtsls_adapter);
+    languages.register_available_lsp_adapter(LanguageServerName("tsgo".into()), tsgo_adapter);
     languages.register_available_lsp_adapter(
         LanguageServerName("typescript-language-server".into()),
         typescript_lsp_adapter,

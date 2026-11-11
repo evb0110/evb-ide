@@ -1931,6 +1931,19 @@
   // 3. Don't load direnv configuration at all.
   //      "load_direnv": "disabled"
   "load_direnv": "direct",
+  "typescript": {
+    // Which TypeScript version powers JavaScript and TypeScript language features.
+    // 1. Use the project's node_modules/typescript, or the newest TypeScript 6.x when the
+    //    project has none:
+    //      "version": "auto"
+    // 2. Use a specific version or npm-style range, installed by EVB IDE, for example:
+    //      "version": "6.0.3"
+    //      "version": "5.9"
+    //    Versions 7 and later run the native TypeScript language server (tsgo) for JavaScript,
+    //    TypeScript and TSX files:
+    //      "version": "7"
+    "version": "auto"
+  },
   "edit_predictions": {
     // Which edit prediction provider to use.
     "provider": "zed",

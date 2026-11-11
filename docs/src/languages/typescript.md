@@ -37,6 +37,24 @@ Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages
 }
 ```
 
+## TypeScript version
+
+By default, `vtsls` uses the project's `node_modules/typescript`. When the project has none, EVB IDE installs the newest TypeScript 6.x and uses it instead of the older TypeScript bundled with `vtsls`.
+
+To use a specific TypeScript for every project, or for one project in its `.zed/settings.json`, set `typescript.version` to a version or npm-style range:
+
+```json [settings]
+{
+  "typescript": {
+    "version": "6.0.3"
+  }
+}
+```
+
+EVB IDE installs the newest matching TypeScript and uses it instead of the project's. Set it back to `"auto"` to use the project's TypeScript again.
+
+TypeScript 7 and later no longer ship `tsserver.js`, so `vtsls` cannot run them. A version such as `"7"` or `"7.0.2"` replaces `vtsls` with the native TypeScript language server (`tsgo`, started as `tsc --lsp --stdio`) for TypeScript, TSX, and JavaScript files. Vue files keep using `vtsls` with TypeScript 6.x, because TypeScript 7 does not support language service plugins. Settings for the native server go under `lsp.tsgo.settings`.
+
 Prettier will also be used for TypeScript files by default. To disable this, configure in Settings ({#kb zed::OpenSettings}) under Languages > TypeScript, or add to your settings file:
 
 ```json [settings]

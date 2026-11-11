@@ -78,6 +78,9 @@ pub struct ProjectSettingsContent {
     /// Configuration for how direnv configuration should be loaded
     pub load_direnv: Option<DirenvSettings>,
 
+    /// Configuration for the TypeScript that powers JavaScript and TypeScript language features.
+    pub typescript: Option<TypeScriptSettingsContent>,
+
     /// The list of custom Git hosting providers.
     pub git_hosting_providers: Option<ExtendingVec<GitHostingProviderConfig>>,
 
@@ -90,7 +93,8 @@ pub struct ProjectSettingsContent {
 crate::fallible_options::flattened_deserialize!(ProjectSettingsContent {
     sections: { all_languages, worktree },
     options: {
-        terminal, context_server_timeout, load_direnv, git_hosting_providers, disable_ai,
+        terminal, context_server_timeout, load_direnv, typescript, git_hosting_providers,
+        disable_ai,
     },
     defaults: { lsp, dap, context_servers },
 });
@@ -982,6 +986,23 @@ pub struct NodeBinarySettings {
     pub npm_path: Option<String>,
     /// If enabled, EVB IDE will download its own copy of Node.
     pub ignore_system_version: Option<bool>,
+}
+
+#[with_fallible_options]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct TypeScriptSettingsContent {
+    /// Which TypeScript version powers JavaScript and TypeScript language features.
+    ///
+    /// - `"auto"`: use the project's `node_modules/typescript` when it has `tsserver.js`,
+    ///   otherwise the newest TypeScript 6.x, installed by EVB IDE.
+    /// - A version or npm-style range, such as `"6.0.3"`, `"5.9"`, `"^6"` or `"7"`:
+    ///   EVB IDE installs the newest matching TypeScript and uses it instead of the project's.
+    ///   Versions 7 and later run the native TypeScript language server (`tsgo`) for
+    ///   JavaScript, TypeScript and TSX files. Vue files keep using `vtsls` with TypeScript 6.x,
+    ///   because TypeScript 7 does not support language service plugins.
+    ///
+    /// Default: "auto"
+    pub version: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
