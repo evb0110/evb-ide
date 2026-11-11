@@ -29145,6 +29145,68 @@ async fn test_on_type_formatting_does_not_pin_cursor_moved_while_autoindent_is_p
 }
 
 #[gpui::test]
+async fn test_language_server_removal_keeps_unrendered_editor_buffers_registered(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx, |_| {});
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/a"), json!({ "main.rs": "fn main() {}" }))
+        .await;
+    let project = Project::test(fs, [path!("/a").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let server_shutdowns = Arc::new(AtomicUsize::new(0));
+    let mut fake_servers = language_registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            initializer: Some(Box::new({
+                let server_shutdowns = server_shutdowns.clone();
+                move |fake_server| {
+                    let server_shutdowns = server_shutdowns.clone();
+                    fake_server.set_request_handler::<lsp::request::Shutdown, _, _>(move |_, _| {
+                        server_shutdowns.fetch_add(1, atomic::Ordering::SeqCst);
+                        futures::future::ready(Ok(()))
+                    });
+                }
+            })),
+            ..Default::default()
+        },
+    );
+
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/a/main.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let cx = cx.add_empty_window();
+    // Never added to the window's element tree, like a background tab that has not been shown.
+    let _editor = cx.new_window_entity(|window, cx| {
+        Editor::for_buffer(buffer, Some(project.clone()), window, cx)
+    });
+    let fake_server = fake_servers.next().await.unwrap();
+    cx.run_until_parked();
+
+    project.update(cx, |_, cx| {
+        cx.emit(project::Event::LanguageServerRemoved(
+            fake_server.server.server_id(),
+        ));
+    });
+    cx.run_until_parked();
+    update_test_language_settings(cx, &|language_settings| {
+        language_settings.defaults.tab_size = NonZeroU32::new(8);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        server_shutdowns.load(atomic::Ordering::SeqCst),
+        0,
+        "the server of a buffer open in an editor should keep running after another server is removed"
+    );
+}
+
+#[gpui::test]
 async fn test_language_server_restart_due_to_settings_change(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 

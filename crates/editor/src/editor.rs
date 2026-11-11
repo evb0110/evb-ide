@@ -2153,8 +2153,19 @@ impl Editor {
                         editor.refresh_semantic_tokens(None, true, cx);
                     }
                     project::Event::LanguageServerRemoved(_) => {
-                        editor.registered_buffers.clear();
+                        // Re-register every buffer that was registered, not only the visible
+                        // ones: an editor that has not been laid out yet (such as a background
+                        // tab) has no visible buffers, and its servers would otherwise be stopped
+                        // on the next server refresh.
+                        let previously_registered_buffers = editor
+                            .registered_buffers
+                            .drain()
+                            .map(|(buffer_id, _)| buffer_id)
+                            .collect::<Vec<_>>();
                         editor.register_visible_buffers(cx);
+                        for buffer_id in previously_registered_buffers {
+                            editor.register_buffer(buffer_id, cx);
+                        }
                         editor.invalidate_semantic_tokens(None);
                         editor.refresh_runnables(None, window, cx);
                         editor.update_lsp_data(None, window, cx);
