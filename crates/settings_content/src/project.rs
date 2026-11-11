@@ -993,8 +993,9 @@ pub struct NodeBinarySettings {
 pub struct TypeScriptSettingsContent {
     /// Which TypeScript version powers JavaScript and TypeScript language features.
     ///
-    /// - `"auto"`: use the project's `node_modules/typescript` when it has `tsserver.js`,
-    ///   otherwise the newest TypeScript 6.x, installed by EVB IDE.
+    /// - `"auto"`: use the `node_modules/typescript` of the opened folder, of its parent folders,
+    ///   or of packages up to two levels below it, when it has `tsserver.js`; otherwise the newest
+    ///   TypeScript 6.x, installed by EVB IDE.
     /// - A version or npm-style range, such as `"6.0.3"`, `"5.9"`, `"^6"` or `"7"`:
     ///   EVB IDE installs the newest matching TypeScript and uses it instead of the project's.
     ///   Versions 7 and later run the native TypeScript language server (`tsgo`) for

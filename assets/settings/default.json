@@ -1933,7 +1933,8 @@
   "load_direnv": "direct",
   "typescript": {
     // Which TypeScript version powers JavaScript and TypeScript language features.
-    // 1. Use the project's node_modules/typescript, or the newest TypeScript 6.x when the
+    // 1. Use the project's node_modules/typescript, found in the opened folder, its parent
+    //    folders, or packages up to two levels below it, or the newest TypeScript 6.x when the
     //    project has none:
     //      "version": "auto"
     // 2. Use a specific version or npm-style range, installed by EVB IDE, for example:

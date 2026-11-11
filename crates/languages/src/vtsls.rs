@@ -30,9 +30,85 @@ const ACTION_ALWAYS: &str = "Always";
 const ACTION_NEVER: &str = "Never";
 const UPDATE_IMPORTS_MESSAGE_PATTERN: &str = "Update imports for";
 const VTSLS_SERVER_NAME: &str = "vtsls";
+const TYPESCRIPT_TSDK_PATH: &str = "node_modules/typescript/lib";
+const TYPESCRIPT_YARN_TSDK_PATH: &str = ".yarn/sdks/typescript/lib";
+const NESTED_PACKAGE_DEPTH: usize = 2;
 
 fn typescript_server_binary_arguments(server_path: &Path) -> Vec<OsString> {
     vec![server_path.into(), "--stdio".into()]
+}
+
+/// Finds the TypeScript the project itself installs, the way Node would resolve it for files
+/// at the worktree root, then in nested packages of monorepos that don't hoist it.
+async fn project_tsdk_path(fs: &dyn Fs, root_path: &Path) -> Option<PathBuf> {
+    let yarn_sdk_path = root_path.join(TYPESCRIPT_YARN_TSDK_PATH);
+    if is_tsdk(fs, &yarn_sdk_path).await {
+        return Some(yarn_sdk_path);
+    }
+    // The worktree may be a package inside a monorepo, or a single file, whose TypeScript is
+    // installed in a parent directory.
+    for directory in root_path.ancestors() {
+        let tsdk_path = directory.join(TYPESCRIPT_TSDK_PATH);
+        if is_tsdk(fs, &tsdk_path).await {
+            return Some(tsdk_path);
+        }
+    }
+    nested_project_tsdk_path(fs, root_path).await
+}
+
+/// The newest TypeScript installed by a package up to `NESTED_PACKAGE_DEPTH` levels below the
+/// root, as in pnpm workspaces where each package installs its own.
+async fn nested_project_tsdk_path(fs: &dyn Fs, root_path: &Path) -> Option<PathBuf> {
+    let mut newest: Option<(Version, PathBuf)> = None;
+    let mut directories = vec![root_path.to_path_buf()];
+    for _ in 0..NESTED_PACKAGE_DEPTH {
+        let mut subdirectories = Vec::new();
+        for directory in directories {
+            let Ok(mut entries) = fs.read_dir(&directory).await else {
+                continue;
+            };
+            while let Some(entry) = entries.next().await {
+                let Some(path) = entry.log_err() else {
+                    continue;
+                };
+                let is_skipped = path
+                    .file_name()
+                    .and_then(|file_name| file_name.to_str())
+                    .is_none_or(|file_name| file_name.starts_with('.') || file_name == "node_modules");
+                if is_skipped || !fs.is_dir(&path).await {
+                    continue;
+                }
+                let tsdk_path = path.join(TYPESCRIPT_TSDK_PATH);
+                if let Some(version) = tsdk_version(fs, &tsdk_path).await
+                    && newest
+                        .as_ref()
+                        .is_none_or(|(newest_version, _)| &version > newest_version)
+                {
+                    newest = Some((version, tsdk_path));
+                }
+                subdirectories.push(path);
+            }
+        }
+        directories = subdirectories;
+    }
+    newest.map(|(_, tsdk_path)| tsdk_path)
+}
+
+/// vtsls doesn't support TypeScript 7+, which no longer ships `tsserver.js`.
+async fn is_tsdk(fs: &dyn Fs, tsdk_path: &Path) -> bool {
+    fs.is_file(&tsdk_path.join("tsserver.js")).await
+}
+
+async fn tsdk_version(fs: &dyn Fs, tsdk_path: &Path) -> Option<Version> {
+    if !is_tsdk(fs, tsdk_path).await {
+        return None;
+    }
+    let package_json = fs
+        .load(&tsdk_path.parent()?.join("package.json"))
+        .await
+        .ok()?;
+    let package: Value = serde_json::from_str(&package_json).ok()?;
+    Version::parse(package.get("version")?.as_str()?).ok()
 }
 
 pub struct VtslsLspAdapter {
@@ -48,43 +124,13 @@ impl VtslsLspAdapter {
     const SERVER_PATH: &'static str = "node_modules/@vtsls/language-server/bin/vtsls.js";
 
     const TYPESCRIPT_PACKAGE_NAME: &'static str = "typescript";
-    const TYPESCRIPT_TSDK_PATH: &'static str = "node_modules/typescript/lib";
     const MANAGED_TYPESCRIPT_DIR: &'static str = "typescript";
-    const TYPESCRIPT_YARN_TSDK_PATH: &'static str = ".yarn/sdks/typescript/lib";
 
     pub fn new(node: NodeRuntime, fs: Arc<dyn Fs>) -> Self {
         VtslsLspAdapter {
             node,
             fs,
             resolved_typescript_requirements: Mutex::default(),
-        }
-    }
-
-    async fn tsdk_path(&self, adapter: &Arc<dyn LspAdapterDelegate>) -> Option<&'static str> {
-        let yarn_sdk = adapter
-            .worktree_root_path()
-            .join(Self::TYPESCRIPT_YARN_TSDK_PATH);
-
-        let tsdk_path = if self.fs.is_dir(&yarn_sdk).await {
-            Self::TYPESCRIPT_YARN_TSDK_PATH
-        } else {
-            Self::TYPESCRIPT_TSDK_PATH
-        };
-
-        // vtsls doesn't support TypeScript 7+, which no longer ships `tsserver.js`.
-        if self
-            .fs
-            .is_file(
-                &adapter
-                    .worktree_root_path()
-                    .join(tsdk_path)
-                    .join("tsserver.js"),
-            )
-            .await
-        {
-            Some(tsdk_path)
-        } else {
-            None
         }
     }
 
@@ -159,7 +205,7 @@ impl VtslsLspAdapter {
 
         let tsdk_path = installs_dir
             .join(version.to_string())
-            .join(Self::TYPESCRIPT_TSDK_PATH);
+            .join(TYPESCRIPT_TSDK_PATH);
         anyhow::ensure!(
             self.fs.is_file(&tsdk_path.join("tsserver.js")).await,
             "TypeScript {version} has no tsserver.js"
@@ -185,7 +231,7 @@ impl VtslsLspAdapter {
             };
             if self
                 .fs
-                .is_file(&entry.join(Self::TYPESCRIPT_TSDK_PATH).join("tsserver.js"))
+                .is_file(&entry.join(TYPESCRIPT_TSDK_PATH).join("tsserver.js"))
                 .await
             {
                 versions.push(version);
@@ -345,15 +391,17 @@ impl LspAdapter for VtslsLspAdapter {
                 .clone()
         });
         let project_tsdk_path = match typescript_version {
-            TypeScriptVersion::Auto => self.tsdk_path(delegate).await,
+            TypeScriptVersion::Auto => {
+                project_tsdk_path(self.fs.as_ref(), delegate.worktree_root_path()).await
+            }
             TypeScriptVersion::Requirement(_) => None,
         };
         let tsdk_path = match project_tsdk_path {
-            Some(project_tsdk_path) => Some(project_tsdk_path.to_string()),
+            Some(project_tsdk_path) => Some(project_tsdk_path),
             None => {
                 let requirement = typescript_version.tsserver_requirement();
                 match self.managed_tsdk_path(&requirement, delegate).await {
-                    Ok(managed_tsdk_path) => Some(managed_tsdk_path.to_string_lossy().into_owned()),
+                    Ok(managed_tsdk_path) => Some(managed_tsdk_path),
                     Err(error) => {
                         let message = format!(
                             "Failed to install TypeScript {requirement}, using the TypeScript bundled with vtsls: {error:#}"
@@ -369,6 +417,12 @@ impl LspAdapter for VtslsLspAdapter {
                 }
             }
         };
+        let tsdk_path = tsdk_path.map(|tsdk_path| tsdk_path.to_string_lossy().into_owned());
+        log::info!(
+            "vtsls for {}: using TypeScript from {}",
+            delegate.worktree_root_path().display(),
+            tsdk_path.as_deref().unwrap_or("vtsls")
+        );
         let mut config = typescript_language_features_config();
         config["tsdk"] = json!(tsdk_path);
         config["tsserver"] = json!({ "maxTsServerMemory": 8192 });
@@ -570,6 +624,91 @@ async fn get_cached_ts_server_binary(
 #[cfg(test)]
 mod tests {
     use crate::vtsls::VtslsLspAdapter;
+
+    #[gpui::test]
+    async fn test_project_tsdk_path(cx: &mut gpui::TestAppContext) {
+        use super::project_tsdk_path;
+        use ::fs::FakeFs;
+        use serde_json::json;
+        use std::path::{Path, PathBuf};
+        use util::path;
+
+        fn typescript(version: &str) -> serde_json::Value {
+            json!({
+                "typescript": {
+                    "package.json": json!({ "version": version }).to_string(),
+                    "lib": { "tsserver.js": "" },
+                }
+            })
+        }
+        fn native_typescript() -> serde_json::Value {
+            json!({
+                "typescript": {
+                    "package.json": json!({ "version": "7.0.2" }).to_string(),
+                    "lib": { "tsc.js": "" },
+                }
+            })
+        }
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/work"),
+            json!({
+                "hoisted": {
+                    "node_modules": typescript("6.0.3"),
+                    "packages": { "app": { "src": { "index.ts": "" } } },
+                },
+                "nested": {
+                    "node_modules": {},
+                    "packages": {
+                        "old": { "node_modules": typescript("5.9.3") },
+                        "new": { "node_modules": typescript("6.0.3") },
+                        "native": { "node_modules": native_typescript() },
+                    },
+                    "tools": { "node_modules": { "lib": { "node_modules": typescript("9.0.0") } } },
+                },
+                "yarn": {
+                    ".yarn": { "sdks": { "typescript": { "lib": { "tsserver.js": "" } } } },
+                    "node_modules": typescript("6.0.3"),
+                },
+                "native": { "node_modules": native_typescript() },
+                "none": { "src": { "index.ts": "" } },
+            }),
+        )
+        .await;
+
+        let tsdk = |root: &'static str| {
+            let fs = fs.clone();
+            async move { project_tsdk_path(fs.as_ref(), Path::new(root)).await }
+        };
+        assert_eq!(
+            tsdk(path!("/work/hoisted")).await,
+            Some(PathBuf::from(path!("/work/hoisted/node_modules/typescript/lib")))
+        );
+        assert_eq!(
+            tsdk(path!("/work/hoisted/packages/app")).await,
+            Some(PathBuf::from(path!("/work/hoisted/node_modules/typescript/lib"))),
+            "a package opened inside a monorepo uses the TypeScript hoisted above it"
+        );
+        assert_eq!(
+            tsdk(path!("/work/hoisted/packages/app/src/index.ts")).await,
+            Some(PathBuf::from(path!("/work/hoisted/node_modules/typescript/lib"))),
+            "a single opened file uses its project's TypeScript"
+        );
+        assert_eq!(
+            tsdk(path!("/work/nested")).await,
+            Some(PathBuf::from(path!(
+                "/work/nested/packages/new/node_modules/typescript/lib"
+            ))),
+            "the newest TypeScript of the nested packages, ignoring dependencies' own"
+        );
+        assert_eq!(
+            tsdk(path!("/work/yarn")).await,
+            Some(PathBuf::from(path!("/work/yarn/.yarn/sdks/typescript/lib")))
+        );
+        assert_eq!(tsdk(path!("/work/native")).await, None);
+        assert_eq!(tsdk(path!("/work/none")).await, None);
+    }
 
     #[test]
     fn test_diagnostic_message_to_markdown() {

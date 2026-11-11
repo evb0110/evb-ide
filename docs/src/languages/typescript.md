@@ -39,7 +39,9 @@ Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages
 
 ## TypeScript version
 
-By default, `vtsls` uses the project's `node_modules/typescript`. When the project has none, EVB IDE installs the newest TypeScript 6.x and uses it instead of the older TypeScript bundled with `vtsls`.
+By default, `vtsls` uses the TypeScript the project installs. EVB IDE looks for `node_modules/typescript` in the opened folder, then in its parent folders, as Node does, then in packages up to two levels below the opened folder, taking the newest one found there. When the project has none, EVB IDE installs the newest TypeScript 6.x and uses it instead of the older TypeScript bundled with `vtsls`. The log records which TypeScript each project uses.
+
+`vtsls` loads TypeScript only when it starts. After installing or upgrading the project's TypeScript, run {#action editor::RestartLanguageServer} to switch to it.
 
 To use a specific TypeScript for every project, or for one project in its `.zed/settings.json`, set `typescript.version` to a version or npm-style range:
 
