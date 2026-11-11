@@ -136,7 +136,7 @@ impl<D: PickerDelegate> Picker<D> {
         }
         let editor = editor.clone();
         Some(
-            IconButton::new("picker-clear-query", IconName::XCircle)
+            IconButton::new("picker-clear-query", IconName::XCircleFilled)
                 .icon_size(IconSize::Small)
                 .icon_color(Color::Muted)
                 .tooltip(Tooltip::text("Clear"))

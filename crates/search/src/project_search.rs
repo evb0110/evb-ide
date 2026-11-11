@@ -3566,14 +3566,14 @@ impl Render for ProjectSearchBar {
                 color_override,
                 cx,
             )))
-            .children(render_clear_input_button(
-                "project-search-clear-query",
-                &search.query_editor,
-                cx,
-            ))
             .child(
                 h_flex()
                     .gap_1()
+                    .children(render_clear_input_button(
+                        "project-search-clear-query",
+                        &search.query_editor,
+                        cx,
+                    ))
                     .child(SearchOption::CaseSensitive.as_button(
                         search.search_options,
                         SearchSource::Project(cx),

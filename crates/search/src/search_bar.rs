@@ -149,7 +149,7 @@ pub(crate) fn render_clear_input_button(
     }
     let editor = editor.clone();
     Some(
-        IconButton::new(id, IconName::XCircle)
+        IconButton::new(id, IconName::XCircleFilled)
             .shape(IconButtonShape::Square)
             .icon_size(IconSize::Small)
             .icon_color(Color::Muted)

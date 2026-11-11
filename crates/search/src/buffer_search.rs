@@ -235,15 +235,15 @@ impl Render for BufferSearchBar {
                 color_override,
                 cx,
             )))
-            .children(render_clear_input_button(
-                "buffer-search-clear-query",
-                &self.query_editor,
-                cx,
-            ))
             .child(
                 h_flex()
                     .flex_none()
                     .gap_1()
+                    .children(render_clear_input_button(
+                        "buffer-search-clear-query",
+                        &self.query_editor,
+                        cx,
+                    ))
                     .when(case, |div| {
                         div.child(SearchOption::CaseSensitive.as_button(
                             self.search_options,
