@@ -21737,26 +21737,43 @@ mod disable_ai_settings_tests {
     use project::*;
     use settings::{Settings, SettingsStore};
 
-    #[gpui::test]
-    async fn test_disable_ai_settings_security(cx: &mut TestAppContext) {
+    // EVB IDE ships with the agent and edit predictions off, which counts as AI being disabled,
+    // so these tests turn the agent on wherever they check how `disable_ai` itself combines.
+    fn agent_enabled_with_disable_ai(disable_ai: Option<bool>) -> String {
+        let mut settings = serde_json::json!({ "agent": { "enabled": true } });
+        if let Some(disable_ai) = disable_ai {
+            settings["disable_ai"] = serde_json::json!(disable_ai);
+        }
+        settings.to_string()
+    }
+
+    fn assert_default_disables_ai_until_agent_is_enabled(cx: &mut TestAppContext) {
         cx.update(|cx| {
             settings::init(cx);
-
-            // Test 1: Default is false (AI enabled)
             assert!(
-                !DisableAiSettings::get_global(cx).disable_ai,
-                "Default should allow AI"
+                DisableAiSettings::get_global(cx).disable_ai,
+                "EVB IDE should start with AI disabled"
             );
         });
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store
+                .set_user_settings(&agent_enabled_with_disable_ai(None), cx)
+                .unwrap();
+        });
+        cx.update(|cx| {
+            assert!(
+                !DisableAiSettings::get_global(cx).disable_ai,
+                "Turning the agent on should allow AI"
+            );
+        });
+    }
 
-        let disable_true = serde_json::json!({
-            "disable_ai": true
-        })
-        .to_string();
-        let disable_false = serde_json::json!({
-            "disable_ai": false
-        })
-        .to_string();
+    #[gpui::test]
+    async fn test_disable_ai_settings_security(cx: &mut TestAppContext) {
+        assert_default_disables_ai_until_agent_is_enabled(cx);
+
+        let disable_true = agent_enabled_with_disable_ai(Some(true));
+        let disable_false = agent_enabled_with_disable_ai(Some(false));
 
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.set_user_settings(&disable_false, cx).unwrap();
@@ -21787,15 +21804,7 @@ mod disable_ai_settings_tests {
         use settings::{LocalSettingsKind, LocalSettingsPath, SettingsLocation, SettingsStore};
         use worktree::WorktreeId;
 
-        cx.update(|cx| {
-            settings::init(cx);
-
-            // Default should allow AI
-            assert!(
-                !DisableAiSettings::get_global(cx).disable_ai,
-                "Default should allow AI"
-            );
-        });
+        assert_default_disables_ai_until_agent_is_enabled(cx);
 
         let worktree_id = WorktreeId::from_usize(1);
         let rel_path = |path: &str| -> std::sync::Arc<util::rel_path::RelPath> {
@@ -21860,7 +21869,7 @@ mod disable_ai_settings_tests {
         });
 
         // Test: User-level true + project-level false = AI disabled (saturation)
-        let disable_true = serde_json::json!({ "disable_ai": true }).to_string();
+        let disable_true = agent_enabled_with_disable_ai(Some(true));
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.set_user_settings(&disable_true, cx).unwrap();
             store
