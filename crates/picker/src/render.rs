@@ -115,6 +115,7 @@ impl<D: PickerDelegate> Picker<D> {
                     .flex_none()
                     .overflow_hidden()
                     .child(div().flex_1().child(editor.render(window, cx)))
+                    .children(Self::render_clear_query_button(editor, cx))
                     .children(self.delegate.searchbar_trailer(window, cx))
                     .when(self.delegate.supports_multi_select(), |this| {
                         this.child(self.render_multi_select_toggle(cx))
@@ -123,6 +124,27 @@ impl<D: PickerDelegate> Picker<D> {
             .when(editor_position == PickerEditorPosition::Start, |this| {
                 this.child(Divider::horizontal())
             })
+    }
+
+    /// Clears the query and refocuses it; shown only while there is a query to clear.
+    fn render_clear_query_button(
+        editor: &Arc<dyn ErasedEditor>,
+        cx: &App,
+    ) -> Option<impl IntoElement + use<D>> {
+        if editor.text(cx).is_empty() {
+            return None;
+        }
+        let editor = editor.clone();
+        Some(
+            IconButton::new("picker-clear-query", IconName::XCircle)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .tooltip(Tooltip::text("Clear"))
+                .on_click(move |_, window, cx| {
+                    editor.clear(window, cx);
+                    window.focus(&editor.focus_handle(cx), cx);
+                }),
+        )
     }
 
     /// The multi-select toggle is picker-owned so it can reflect the mode,

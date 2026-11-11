@@ -1,6 +1,7 @@
 use editor::{Editor, EditorElement, EditorStyle, MultiBufferOffset, ToOffset};
 use gpui::{
-    Action, App, ClickEvent, Context, Entity, FocusHandle, Hsla, IntoElement, TextStyle, Window,
+    Action, App, ClickEvent, Context, ElementId, Entity, FocusHandle, Focusable, Hsla, IntoElement,
+    TextStyle, Window,
 };
 use settings::Settings;
 use theme_settings::ThemeSettings;
@@ -135,6 +136,31 @@ pub(crate) fn render_text_input(
     }
 
     EditorElement::new(editor, editor_style)
+}
+
+/// Clears `editor` and focuses it; shown only while the input has text to clear.
+pub(crate) fn render_clear_input_button(
+    id: impl Into<ElementId>,
+    editor: &Entity<Editor>,
+    cx: &App,
+) -> Option<impl IntoElement> {
+    if editor.read(cx).is_empty(cx) || editor.read(cx).read_only(cx) {
+        return None;
+    }
+    let editor = editor.clone();
+    Some(
+        IconButton::new(id, IconName::XCircle)
+            .shape(IconButtonShape::Square)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .tooltip(Tooltip::text("Clear"))
+            .on_click(move |_, window, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.clear(window, cx);
+                    window.focus(&editor.focus_handle(cx), cx);
+                });
+            }),
+    )
 }
 
 /// This element makes all search inputs align as if they were in the same column

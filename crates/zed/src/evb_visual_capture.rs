@@ -1189,11 +1189,105 @@ mod capture {
             "double-clicking a file must open it"
         );
         save(cx, window, output, "project-search-file-opened")?;
+
+        capture_clear_buttons(workspace, window, &search_view, cx, output)
+    }
+
+    /// The clear buttons of Find in Files, in-file search and the command palette.
+    fn capture_clear_buttons(
+        workspace: &Entity<Workspace>,
+        window: AnyWindowHandle,
+        search_view: &Entity<search::ProjectSearchView>,
+        cx: &mut VisualTestAppContext,
+        output: &Path,
+    ) -> Result<()> {
+        let readme = workspace
+            .read_with(cx, |workspace, cx| workspace.active_item(cx))
+            .context("README.md must be open")?;
+        workspace.update_in_window(window, cx, |workspace, window, cx| {
+            workspace.activate_item(search_view, true, true, window, cx);
+        })?;
+        settle(cx, 5);
+        save(cx, window, output, "clear-project-search")?;
+        cx.simulate_click(
+            window,
+            point(
+                px(PROJECT_SEARCH_CLEAR_BUTTON[0]),
+                px(PROJECT_SEARCH_CLEAR_BUTTON[1]),
+            ),
+            Default::default(),
+        );
+        settle(cx, 5);
+        let query = search_view.read_with(cx, |view, cx| view.search_query_text(cx));
+        println!("clear buttons: Find in Files query after clearing is {query:?}");
+        anyhow::ensure!(query.is_empty(), "the clear button must empty the query");
+        save(cx, window, output, "clear-project-search-cleared")?;
+
+        workspace.update_in_window(window, cx, |workspace, window, cx| {
+            workspace.activate_item(readme.as_ref(), true, true, window, cx);
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.toolbar().update(cx, |toolbar, cx| {
+                    let search_bar = cx.new(|cx| search::BufferSearchBar::new(None, window, cx));
+                    toolbar.add_item(search_bar, window, cx);
+                });
+            });
+        })?;
+        cx.dispatch_action(window, zed_actions::buffer_search::Deploy::find());
+        settle(cx, 5);
+        cx.simulate_input(window, "Trail");
+        settle(cx, 5);
+        save(cx, window, output, "clear-buffer-search")?;
+        cx.simulate_click(
+            window,
+            point(
+                px(BUFFER_SEARCH_CLEAR_BUTTON[0]),
+                px(BUFFER_SEARCH_CLEAR_BUTTON[1]),
+            ),
+            Default::default(),
+        );
+        settle(cx, 5);
+        let query = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace
+                    .active_pane()
+                    .read(cx)
+                    .toolbar()
+                    .read(cx)
+                    .item_of_type::<search::BufferSearchBar>()
+                    .map(|search_bar| search_bar.read(cx).query(cx))
+            })
+            .context("the in-file search bar must be open")?;
+        println!("clear buttons: in-file search query after clearing is {query:?}");
+        anyhow::ensure!(query.is_empty(), "the clear button must empty the query");
+        save(cx, window, output, "clear-buffer-search-cleared")?;
+
+        cx.dispatch_action(window, zed_actions::buffer_search::Dismiss);
+        settle(cx, 3);
+        cx.dispatch_action(window, zed_actions::command_palette::Toggle);
+        settle(cx, 5);
+        cx.simulate_input(window, "search");
+        wait_real_time(cx, Duration::from_millis(500));
+        settle(cx, 5);
+        save(cx, window, output, "clear-command-palette")?;
+        cx.simulate_click(
+            window,
+            point(
+                px(COMMAND_PALETTE_CLEAR_BUTTON[0]),
+                px(COMMAND_PALETTE_CLEAR_BUTTON[1]),
+            ),
+            Default::default(),
+        );
+        wait_real_time(cx, Duration::from_millis(500));
+        settle(cx, 5);
+        save(cx, window, output, "clear-command-palette-cleared")?;
         Ok(())
     }
 
     const PROJECT_SEARCH_LIST_X: f32 = 420.;
     const PROJECT_SEARCH_LIST_RIGHT_EDGE: f32 = 519.;
+    const PROJECT_SEARCH_CLEAR_BUTTON: [f32; 2] = [1154., 79.];
+    const BUFFER_SEARCH_CLEAR_BUTTON: [f32; 2] = [1154., 110.];
+    const COMMAND_PALETTE_CLEAR_BUTTON: [f32; 2] = [950., 80.];
 
     /// Points in the fixed 1440x900 window.
     const RUN_BUTTON: [f32; 2] = [1370., 16.];

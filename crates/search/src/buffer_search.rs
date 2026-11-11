@@ -7,8 +7,8 @@ use crate::{
     buffer_search::registrar::WithResultsOrExternalQuery,
     search_bar::{
         ActionButtonState, HistoryNavigationDirection, alignment_element,
-        filter_search_results_input, input_base_styles, render_local_action_button,
-        render_text_input, should_navigate_history,
+        filter_search_results_input, input_base_styles, render_clear_input_button,
+        render_local_action_button, render_text_input, should_navigate_history,
     },
 };
 use any_vec::AnyVec;
@@ -235,6 +235,11 @@ impl Render for BufferSearchBar {
                 color_override,
                 cx,
             )))
+            .children(render_clear_input_button(
+                "buffer-search-clear-query",
+                &self.query_editor,
+                cx,
+            ))
             .child(
                 h_flex()
                     .flex_none()
@@ -388,12 +393,17 @@ impl Render for BufferSearchBar {
             .child(mode_column);
 
         let replace_line = should_show_replace_input.then(|| {
-            let replace_column = input_base_styles(replacement_border).child(
-                div()
-                    .flex_1()
-                    .py_1()
-                    .child(render_text_input(&self.replacement_editor, None, cx)),
-            );
+            let replace_column = input_base_styles(replacement_border)
+                .child(div().flex_1().py_1().child(render_text_input(
+                    &self.replacement_editor,
+                    None,
+                    cx,
+                )))
+                .children(render_clear_input_button(
+                    "buffer-search-clear-replacement",
+                    &self.replacement_editor,
+                    cx,
+                ));
             let focus_handle = self.replacement_editor.read(cx).focus_handle(cx);
 
             let replace_actions = h_flex()

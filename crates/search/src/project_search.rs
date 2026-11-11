@@ -6,7 +6,8 @@ use crate::{
     buffer_search::Deploy,
     search_bar::{
         ActionButtonState, HistoryNavigationDirection, alignment_element, input_base_styles,
-        render_local_action_button, render_text_input, should_navigate_history,
+        render_clear_input_button, render_local_action_button, render_text_input,
+        should_navigate_history,
     },
     text_finder::TextFinder,
 };
@@ -3565,6 +3566,11 @@ impl Render for ProjectSearchBar {
                 color_override,
                 cx,
             )))
+            .children(render_clear_input_button(
+                "project-search-clear-query",
+                &search.query_editor,
+                cx,
+            ))
             .child(
                 h_flex()
                     .gap_1()
@@ -3749,13 +3755,17 @@ impl Render for ProjectSearchBar {
             .child(mode_column);
 
         let replace_line = search.replace_enabled.then(|| {
-            let replace_column = input_base_styles(InputPanel::Replacement).child(
-                div().flex_1().py_1().child(render_text_input(
+            let replace_column = input_base_styles(InputPanel::Replacement)
+                .child(div().flex_1().py_1().child(render_text_input(
                     &search.replacement_editor,
                     None,
                     cx,
-                )),
-            );
+                )))
+                .children(render_clear_input_button(
+                    "project-search-clear-replacement",
+                    &search.replacement_editor,
+                    cx,
+                ));
 
             let focus_handle = search.replacement_editor.read(cx).focus_handle(cx);
             let replace_actions = h_flex()
@@ -3798,7 +3808,16 @@ impl Render for ProjectSearchBar {
                 .on_action(cx.listener(|this, action, window, cx| {
                     this.next_history_query(action, window, cx)
                 }))
-                .child(render_text_input(&search.included_files_editor, None, cx));
+                .child(div().flex_1().min_w_0().child(render_text_input(
+                    &search.included_files_editor,
+                    None,
+                    cx,
+                )))
+                .children(render_clear_input_button(
+                    "project-search-clear-include",
+                    &search.included_files_editor,
+                    cx,
+                ));
             let exclude = input_base_styles(InputPanel::Exclude)
                 .on_action(cx.listener(|this, action, window, cx| {
                     this.previous_history_query(action, window, cx)
@@ -3806,7 +3825,16 @@ impl Render for ProjectSearchBar {
                 .on_action(cx.listener(|this, action, window, cx| {
                     this.next_history_query(action, window, cx)
                 }))
-                .child(render_text_input(&search.excluded_files_editor, None, cx));
+                .child(div().flex_1().min_w_0().child(render_text_input(
+                    &search.excluded_files_editor,
+                    None,
+                    cx,
+                )))
+                .children(render_clear_input_button(
+                    "project-search-clear-exclude",
+                    &search.excluded_files_editor,
+                    cx,
+                ));
             let mode_column = h_flex()
                 .gap_1()
                 .min_w_64()
