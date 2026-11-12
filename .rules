@@ -165,6 +165,13 @@ Release Notes:
 - Fetch crash reports: `script/sentry-fetch <issue-id>`
 - Generate investigation prompt from crash: `script/crash-to-prompt <issue-id>`
 
+# Build output
+
+* Each distinct package selection or feature set compiles its own copy of every crate above the first dependency whose features differ, so `cargo run`, `cargo test -p git_ui` and `cargo test -p project --features test-support` share little. `target` reached 186 GB in October 2026 and 73 GB within four days in November, with twelve library builds of `project`.
+* Run the commands under Checks in `EVB.md` as written. Add a new `-p` or `--features` combination only when no listed command covers the change.
+* Build in this checkout's `target`. A second target directory (`CARGO_TARGET_DIR`, another clone) starts another full copy.
+* On the maintainer's hosts the hourly `agent-sweep` bounds `target` while no cargo process runs in the checkout: past the cap in its header it deletes the incremental caches, then `target/debug`, and the next build starts from scratch.
+
 # Rules Hygiene
 
 These `.rules` files are read by every agent session. Keep them high-signal.
